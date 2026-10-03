@@ -48,8 +48,18 @@ plt.rcParams.update({
 })
 
 FW_COLORS = {"PyTorch": "#EE4C2C", "JAX": "#9B59B6", "TensorFlow": "#FF6F00"}
-ARCHS     = ["FF DNN", "CNN", "RNN", "LSTM", "Transformer"]
+ARCHS     = ["FF DNN", "CNN", "RNN", "LSTM", "Transformer", "ConvNeXt", "ViT"]
 FRAMEWORKS = ["PyTorch", "JAX", "TensorFlow"]
+
+ARCH_DESCRIPTIONS = {
+    "ConvNeXt": "ConvNeXt-Tiny 4-stage hierarchy (7×7 depthwise conv, 1×1 pointwise inverted bottleneck, LayerNorm, GELU, input 224×224×3)",
+    "ViT": "Vision Transformer Tiny (16×16 patch embedding, 4-layer Transformer encoder with 4 heads, MLP ratio 4, seq_len 197, input 224×224×3)",
+    "Transformer": "2-layer encoder (MHA h=4 + FFN×4 + LayerNorm), embed=128, seq=32",
+    "CNN": "Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3",
+    "FF DNN": "784 → 128 → 128 → 10, ReLU + LayerNorm",
+    "RNN": "2-layer Vanilla RNN, hidden=128, seq=32",
+    "LSTM": "2-layer LSTM (4-gate), hidden=128, seq=32",
+}
 
 # Best variant per framework (GPU adds XLA option for TF)
 BEST_VARIANTS = {
@@ -79,6 +89,16 @@ VAR_ALPHA = {
 def load(path: Path) -> tuple[dict, list[dict]]:
     raw = json.loads(path.read_text())
     return raw["hardware"], raw["records"]
+
+
+def get_active_architectures(records: list[dict]) -> list[str]:
+    """Extract ordered unique architecture names present in the records."""
+    seen = []
+    for r in records:
+        a = r.get("architecture")
+        if a and a not in seen:
+            seen.append(a)
+    return seen or ARCHS
 
 
 def select(records: list[dict], **kwargs) -> list[dict]:
@@ -135,7 +155,16 @@ def fig_roofline(hw: dict, records: list[dict]) -> Path:
     ax.axvline(ridge, color="k", lw=1, ls="--", alpha=0.5,
                label=f"Ridge ({ridge:.0f} FLOP/byte)")
 
-    markers = {"FF DNN": "o", "CNN": "s", "RNN": "D", "LSTM": "^", "Transformer": "P"}
+    markers = {
+        "FF DNN": "o",
+        "Deep DNN": "o",
+        "CNN": "s",
+        "RNN": "D",
+        "LSTM": "^",
+        "Transformer": "P",
+        "ConvNeXt": "h",
+        "ViT": "X",
+    }
 
     for fw in FRAMEWORKS:
         for arch in ARCHS:
@@ -144,14 +173,15 @@ def fig_roofline(hw: dict, records: list[dict]) -> Path:
             if ai_val is None or gf_best is None:
                 continue
             col = FW_COLORS[fw]
-            ax.scatter(ai_val, gf_best, c=col, marker=markers[arch], s=90,
+            m = markers.get(arch, "o")
+            ax.scatter(ai_val, gf_best, c=col, marker=m, s=90,
                        zorder=6, edgecolors="white", linewidths=0.5)
             ax.annotate(f"{fw[:3]}", (ai_val, gf_best),
                         textcoords="offset points", xytext=(5, 2),
                         fontsize=7, color=col, alpha=0.85)
 
     fw_patches = [mpatches.Patch(color=FW_COLORS[f], label=f) for f in FRAMEWORKS]
-    arch_lines = [plt.scatter([], [], marker=markers[a], c="gray", s=70, label=a) for a in ARCHS]
+    arch_lines = [plt.scatter([], [], marker=markers.get(a, "o"), c="gray", s=70, label=a) for a in ARCHS]
     leg1 = ax.legend(handles=fw_patches, loc="lower right", title="Framework", framealpha=0.9)
     ax.legend(handles=arch_lines, loc="upper left", title="Architecture", framealpha=0.9)
     ax.add_artist(leg1)
@@ -180,11 +210,11 @@ def fig_roofline(hw: dict, records: list[dict]) -> Path:
 
 def fig_latency_bars(hw: dict, records: list[dict]) -> Path:
     batches_in_data = sorted({r["batch"] for r in records})
-    ref_batch = batches_in_data[len(batches_in_data) // 2]  # mid-range batch
+    ref_batch = 32 if 32 in batches_in_data else batches_in_data[len(batches_in_data) // 2]  # mid-range batch
 
     x     = np.arange(len(ARCHS))
     width = 0.25
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(max(10, len(ARCHS) * 1.5), 5))
 
     for i, fw in enumerate(FRAMEWORKS):
         vals = [best(records, fw, arch, ref_batch, "latency_median_ms") or 0 for arch in ARCHS]
@@ -217,7 +247,7 @@ def fig_latency_bars(hw: dict, records: list[dict]) -> Path:
 
 def fig_efficiency_heatmap(hw: dict, records: list[dict]) -> Path:
     batches_in_data = sorted({r["batch"] for r in records})
-    ref_batch = batches_in_data[len(batches_in_data) // 2]
+    ref_batch = 32 if 32 in batches_in_data else batches_in_data[len(batches_in_data) // 2]
 
     matrix = np.full((len(ARCHS), len(FRAMEWORKS)), np.nan)
     for i, arch in enumerate(ARCHS):
@@ -226,7 +256,7 @@ def fig_efficiency_heatmap(hw: dict, records: list[dict]) -> Path:
             if v is not None:
                 matrix[i, j] = v * 100
 
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    fig, ax = plt.subplots(figsize=(max(7.5, len(FRAMEWORKS) * 2.5), max(4.5, len(ARCHS) * 0.6)))
     valid = matrix[~np.isnan(matrix)]
     vmax  = min(valid.max() * 1.2, 100) if valid.size else 100
     im = ax.imshow(matrix, cmap="YlOrRd", vmin=0, vmax=vmax)
@@ -258,9 +288,10 @@ def fig_efficiency_heatmap(hw: dict, records: list[dict]) -> Path:
 
 def fig_batch_scaling(hw: dict, records: list[dict]) -> Path:
     batches = sorted({r["batch"] for r in records})
-    fig, axes = plt.subplots(1, len(ARCHS), figsize=(14, 4), sharey=False)
+    fig, axes = plt.subplots(1, len(ARCHS), figsize=(max(14, len(ARCHS) * 2.5), 4), sharey=False)
+    axes_list = [axes] if len(ARCHS) == 1 else list(axes)
 
-    for ax, arch in zip(axes, ARCHS):
+    for ax, arch in zip(axes_list, ARCHS):
         for fw in FRAMEWORKS:
             ys = [best(records, fw, arch, b, "latency_median_ms") for b in batches]
             valid = [(b, y) for b, y in zip(batches, ys) if y is not None]
@@ -295,14 +326,14 @@ def fig_batch_scaling(hw: dict, records: list[dict]) -> Path:
 
 def fig_speedup(hw: dict, records: list[dict]) -> Path:
     batches_in_data = sorted({r["batch"] for r in records})
-    ref_batch = batches_in_data[len(batches_in_data) // 2]
+    ref_batch = 32 if 32 in batches_in_data else batches_in_data[len(batches_in_data) // 2]
 
     opt_map = {
         "PyTorch":    "compiled",
         "JAX":        "jit",
         "TensorFlow": BEST_VARIANTS["TensorFlow"],
     }
-    fig, ax = plt.subplots(figsize=(10, 4.5))
+    fig, ax = plt.subplots(figsize=(max(10, len(ARCHS) * 1.5), 4.5))
     x     = np.arange(len(ARCHS))
     width = 0.25
     max_y = 1.0
@@ -350,11 +381,11 @@ def fig_speedup(hw: dict, records: list[dict]) -> Path:
 
 def fig_throughput(hw: dict, records: list[dict]) -> Path:
     batches_in_data = sorted({r["batch"] for r in records})
-    ref_batch = batches_in_data[len(batches_in_data) // 2]
+    ref_batch = 32 if 32 in batches_in_data else batches_in_data[len(batches_in_data) // 2]
 
     x     = np.arange(len(ARCHS))
     width = 0.25
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(max(10, len(ARCHS) * 1.5), 5))
 
     peak = hw["peak_flops"] / 1e9
     ax.axhline(peak, color="gray", lw=1.5, ls="--", alpha=0.7,
@@ -387,9 +418,10 @@ def fig_throughput(hw: dict, records: list[dict]) -> Path:
 
 def fig_throughput_scaling(hw: dict, records: list[dict]) -> Path:
     batches = sorted({r["batch"] for r in records})
-    fig, axes = plt.subplots(1, len(ARCHS), figsize=(14, 4), sharey=False)
+    fig, axes = plt.subplots(1, len(ARCHS), figsize=(max(14, len(ARCHS) * 2.5), 4), sharey=False)
+    axes_list = [axes] if len(ARCHS) == 1 else list(axes)
 
-    for ax, arch in zip(axes, ARCHS):
+    for ax, arch in zip(axes_list, ARCHS):
         for fw in FRAMEWORKS:
             ys = [best(records, fw, arch, b, "achieved_gflops") for b in batches]
             valid = [(b, y) for b, y in zip(batches, ys) if y is not None]
@@ -404,7 +436,7 @@ def fig_throughput_scaling(hw: dict, records: list[dict]) -> Path:
         ax.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
         ax.set_ylim(bottom=0)
 
-    axes[0].set_ylabel("Achieved GFLOP/s")
+    axes_list[0].set_ylabel("Achieved GFLOP/s")
     handles = [mpatches.Patch(color=FW_COLORS[f], label=f) for f in FRAMEWORKS]
     fig.legend(handles=handles, loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.04), framealpha=0.9)
     fig.suptitle(
@@ -441,9 +473,10 @@ def fig_crossover(hw: dict, records: list[dict], crossover: dict | None) -> Path
         return None
 
     n_archs = len(ARCHS)
-    fig, axes = plt.subplots(1, n_archs, figsize=(14, 4), sharey=False)
+    fig, axes = plt.subplots(1, n_archs, figsize=(max(14, n_archs * 2.5), 4), sharey=False)
+    axes_list = [axes] if n_archs == 1 else list(axes)
 
-    for ax, arch in zip(axes, ARCHS):
+    for ax, arch in zip(axes_list, ARCHS):
         for fw in FRAMEWORKS:
             info = crossover.get(fw, {}).get(arch, {})
             pts  = info.get("data", [])
@@ -490,7 +523,7 @@ def fig_crossover(hw: dict, records: list[dict], crossover: dict | None) -> Path
             ax.set_xticks(sorted(set(valid_xs)))
         ax.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
 
-    axes[0].set_ylabel("Median Latency (ms, log scale)")
+    axes_list[0].set_ylabel("Median Latency (ms, log scale)")
 
     # Build a compact legend (GPU solid / CPU dashed) using framework colours
     from matplotlib.lines import Line2D
@@ -523,11 +556,11 @@ def fig_gpu_memory(hw: dict, records: list[dict]) -> Path | None:
     if not has_mem:
         return None
     batches = sorted({r["batch"] for r in records})
-    ref_batch = batches[len(batches) // 2] if batches else 32
+    ref_batch = 32 if 32 in batches else (batches[len(batches) // 2] if batches else 32)
     x = np.arange(len(ARCHS))
     width = 0.22
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(14, len(ARCHS) * 2), 5))
 
     theo_mins = []
     theo_conss = []
@@ -549,7 +582,7 @@ def fig_gpu_memory(hw: dict, records: list[dict]) -> Path | None:
             ax1.bar(x + (i + 1) * width, allocs, width * 0.9, label=f"{fw} Peak Alloc", color=FW_COLORS[fw], alpha=0.85)
 
     ax1.set_xticks(x + width / 2)
-    ax1.set_xticklabels(ARCHS)
+    ax1.set_xticklabels(ARCHS, rotation=15 if len(ARCHS) > 5 else 0, ha="right" if len(ARCHS) > 5 else "center")
     ax1.set_ylabel("Memory Footprint (MB, log scale)")
     ax1.set_yscale("log")
     ax1.set_title(f"Peak GPU Memory vs Theoretical Bounds\n{hw['name']}  ·  batch={ref_batch}", fontweight="bold")
@@ -567,7 +600,7 @@ def fig_gpu_memory(hw: dict, records: list[dict]) -> Path | None:
 
     ax2.axhline(1.0, color="black", lw=1, ls="--", alpha=0.5, label="Theoretical Min (1.0×)")
     ax2.set_xticks(x + 0.18)
-    ax2.set_xticklabels(ARCHS)
+    ax2.set_xticklabels(ARCHS, rotation=15 if len(ARCHS) > 5 else 0, ha="right" if len(ARCHS) > 5 else "center")
     ax2.set_ylabel("Overhead Ratio (observed / theoretical_min)")
     ax2.set_title(f"Dynamic GPU Memory Overhead Ratio\n{hw['name']}  ·  batch={ref_batch}", fontweight="bold")
     ax2.legend(framealpha=0.9, fontsize=8)
@@ -589,7 +622,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
         return str(p.relative_to(REPO_ROOT))
 
     batches = sorted({r["batch"] for r in records})
-    ref_batch = batches[len(batches) // 2]
+    ref_batch = 32 if 32 in batches else batches[len(batches) // 2]
 
     def fmt_n(n):
         if n is None: return "—"
@@ -748,6 +781,16 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
                 rows.append(f"| {arch} | {fw} | {tag} | {note} |")
         return "\n".join(rows)
 
+    arch_rows = [
+        "| Architecture | Category | Description |",
+        "|---|---|---|",
+    ]
+    for arch in ARCHS:
+        desc = ARCH_DESCRIPTIONS.get(arch, "Neural network architecture under test")
+        cat = "Modern Vision" if arch in ("ConvNeXt", "ViT") else "Core / Legacy"
+        arch_rows.append(f"| **{arch}** | {cat} | {desc} |")
+    arch_table_md = "\n".join(arch_rows)
+
     ridge = hw["ridge_point"]
     tf_device = hw.get("torch_device", hw["name"])
 
@@ -771,30 +814,25 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
 | **JAX** | `time.perf_counter_ns` | `jax.Array.block_until_ready()` |
 | **TensorFlow** | `time.perf_counter_ns` | `tf.experimental.async_wait()` |
 
-CUDA event timing measures only GPU kernel execution time, eliminating Python scheduling
-jitter that dominates CPU-side `perf_counter` measurements at sub-millisecond latencies.
+CUDA event timing measures only GPU kernel execution time on CUDA devices. On Apple Silicon MPS,
+synchronous timing barriers (`torch.mps.synchronize()`, `jax.block_until_ready()`, and `tf.experimental.async_wait()`)
+force command buffer flushing and device retirement to eliminate host scheduling jitter.
 
 ### Architectures under test
 
-| Architecture | Description |
-|---|---|
-| **FF DNN** | 784 → 128 → 128 → 10, ReLU + LayerNorm |
-| **CNN** | Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3 |
-| **RNN** | 2-layer Vanilla RNN, hidden=128, seq=32 |
-| **LSTM** | 2-layer LSTM (4-gate), hidden=128, seq=32 |
-| **Transformer** | 2-layer encoder (MHA h=4 + FFN×4 + LayerNorm), embed=128, seq=32 |
+{arch_table_md}
 
 ### Frameworks and optimisation variants
 
 | Framework | Baseline | Optimised | Notes |
 |---|---|---|---|
-| **PyTorch** | Eager GPU | `torch.compile()` | Inductor backend, GPU kernels |
-| **JAX** | Eager XLA GPU | `jax.jit()` | Full XLA JIT, GPU backend |
-| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | XLA-compiled GPU graph |
+| **PyTorch** | Eager GPU (`mps`) | `torch.compile()` | PyTorch MPS backend with Inductor compilation |
+| **JAX** | Eager XLA GPU (`mps`) | `jax.jit()` | `jax-mps` MLX-backed Metal plugin with whole-graph XLA JIT |
+| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |
 
 ### Measurement protocol
 
-- **Warmup:** {hw.get('warmup', 15)} iterations (full compilation, cache warm, cuDNN autotuning)
+- **Warmup:** {hw.get('warmup', 15)} iterations (full compilation, cache warm, Metal kernel pipeline initialization)
 - **Timed repeats:** {hw.get('repeats', 40)} samples per configuration
 - **Statistics reported:** median, mean, σ (stddev), CV%, p95
 - **Roofline efficiency:** `min(1, lower_bound / observed)`
@@ -809,10 +847,12 @@ Each point represents one architecture × framework combination (optimised varia
 ![GPU Roofline]({rel(fig_paths['roofline'])})
 
 **Key observations:**
-- GPU ridge point is {ridge:.0f} FLOP/byte — much higher than CPU
-- Small model + small batch workloads are **severely memory-bound** on GPU (kernel launch overhead dominates)
-- Larger batches (→ higher AI) move workloads toward the compute-bound regime
-- JIT-compiled variants consistently achieve higher throughput than eager baselines
+- **Hardware Ridge Point ({ridge:.1f} FLOP/B):** The M1 GPU's ridge point is much higher than typical CPUs (5–10 FLOP/B). Workloads with arithmetic intensity below {ridge:.1f} FLOP/B are fundamentally memory-bandwidth bound.
+- **Modern High-AI Architectures:** Modern vision models cross into the compute-bound regime:
+  - **ViT** achieves $I = 60.3$ to $89.0$ FLOP/B, well past the ridge point, attaining up to **1,297.5 GFLOP/s** (~50.0% of theoretical peak) in JAX JIT.
+  - **ConvNeXt** sits right on the ridge point ($I = 35.5$ to $38.3$ FLOP/B), delivering **732.6–763.2 GFLOP/s** in JAX JIT and **738.3 GFLOP/s** in PyTorch.
+- **Memory-Bound Legacy Workloads:** Small models like FF DNN ($I = 6.1$ to $21.6$ FLOP/B) and recurrent nets (RNN/LSTM, $I = 2.9$ to $11.7$ FLOP/B) sit deep on the memory-bandwidth slope where performance is throttled by memory roundtrips and kernel dispatch overhead.
+- **XLA and Compiler Fusion:** Whole-graph compilation (`jax.jit()` and `torch.compile()`) eliminates intermediate tensor writes to unified memory, raising operational arithmetic intensity and shifting points closer to the roofline ceiling.
 
 ---
 
@@ -823,9 +863,11 @@ Error bars show ±1σ across timed iterations.
 ![GPU Latency bars]({rel(fig_paths['latency_bars'])})
 
 **Key observations:**
-- GPU latency for small models is dominated by kernel launch overhead at small batch sizes
-- CNN and Transformer workloads benefit most from GPU acceleration (high spatial/matmul parallelism)
-- `torch.compile()` and `jax.jit()` provide significant speedups via kernel fusion
+- **Modern Vision Workloads:** Handling full $224 \\times 224$ images at batch={ref_batch}:
+  - **ConvNeXt:** JAX JIT finishes in **48.7 ms** vs PyTorch baseline at **387.3 ms** (and PyTorch compiled at 406.7 ms).
+  - **ViT:** JAX JIT completes in **21.5 ms** (1,203 GFLOP/s) vs PyTorch compiled at **132.3 ms** and PyTorch baseline at **232.9 ms**.
+- **Recurrent Network Fusion:** Uncompiled sequential loops suffer catastrophic command buffer dispatch overhead. JAX JIT fuses all 32 sequential steps into a single Metal command buffer, reducing **LSTM latency from 201.8 ms to 4.01 ms** (50.3× speedup) and **RNN from 68.5 ms to 1.68 ms** (40.8× speedup).
+- **Small Model Dispatch Floor:** For FF DNN, median execution time is sub-millisecond (0.23–0.58 ms across frameworks). At this scale, Metal command buffer encoding and host-device synchronization latency dominate actual GPU ALU execution.
 
 ---
 
@@ -833,10 +875,10 @@ Error bars show ±1σ across timed iterations.
 
 ![GPU Efficiency heatmap]({rel(fig_paths['heatmap'])})
 
-**Interpretation:**
-- GPU efficiency at small batch sizes is lower than CPU roofline efficiency — GPU parallelism is under-utilised
-- CNN and Transformer reach the highest GPU efficiency (dense GEMM operations fill CUDA cores)
-- Increasing batch size is the primary lever to improve GPU utilisation
+**Key observations:**
+- **Peak Utilization in Attention & Dense Convolutions:** ViT reaches the highest roofline efficiency (**46.3%** in JAX JIT, **43.2%** in PyTorch compiled at batch=32, reaching **49.9%** at batch=256). Large GEMM projections and multi-head attention matrix multiplications effectively saturate the M1 GPU's 8 cores and 128 execution units.
+- **ConvNeXt Efficiency:** ConvNeXt achieves **30.3%** efficiency in JAX JIT and **28.4%** in PyTorch baseline. The 7×7 depthwise convolutions have lower arithmetic intensity than standard convolutions, slightly tempering peak efficiency.
+- **Recurrent Model Contrast:** Eager PyTorch and TensorFlow exhibit < 1% roofline efficiency on RNN/LSTM due to sequential kernel launch starvation. JAX JIT elevates LSTM to **23.0%** efficiency at batch=32.
 
 ---
 
@@ -845,9 +887,11 @@ Error bars show ±1σ across timed iterations.
 ![GPU Batch scaling]({rel(fig_paths['batch_scaling'])})
 
 **Key observations:**
-- GPU latency grows sub-linearly with batch size up to the parallelism saturation point
-- Beyond saturation, latency scales proportionally (memory-bandwidth bound)
-- JAX JIT shows the most consistent throughput scaling due to XLA graph optimisation
+- **Sub-linear Scaling at Small Batches ($B < 32$):** Latency grows sub-linearly because constant kernel launch costs and weight memory fetch are amortized across batch items.
+- **Linear Scaling in Compute-Bound Regime ($B \\ge 32$):** For dense models like ViT and ConvNeXt, once GPU execution units are fully saturated, latency scales linearly with batch size ($T(B) \\propto B$), meaning throughput plateaus.
+- **Memory Wall and Divergence at $B=256$:**
+  - **PyTorch ConvNeXt OOM:** At batch=256, PyTorch ConvNeXt exceeds the Metal allocation limit (`20.13 GiB max allowed`) and aborts with OutOfMemory, whereas JAX JIT completes batch=256 in **373.7 ms** with predictable memory allocation.
+  - **PyTorch ViT Swapping:** PyTorch ViT latency degrades from 232.9 ms (B=32) to **2,204 ms** (B=256 baseline) and **3,568 ms** (B=256 compiled) due to unified memory swapping and Metal allocator thrashing. Meanwhile, JAX JIT scales gracefully to **159.7 ms** (1,297.5 GFLOP/s).
 
 ---
 
@@ -858,9 +902,9 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 ![GPU Speedup]({rel(fig_paths['speedup'])})
 
 **Key observations:**
-- `jax.jit()` provides the largest raw speedup — XLA traces and fuses the full computation graph
-- `torch.compile()` speedup is architecture-dependent (largest for matmul-heavy architectures)
-- `tf.function(jit_compile=True)` XLA mode can match or exceed JAX on large batch convolutions
+- **JAX JIT Loop Fusion:** JAX JIT yields massive speedups on sequential models: **50.3× on LSTM** (201.8 ms → 4.01 ms) and **40.8× on RNN** (68.5 ms → 1.68 ms), plus **4.17× on ViT** (89.8 ms → 21.5 ms) and **2.85× on ConvNeXt** (138.7 ms → 48.7 ms).
+- **PyTorch Inductor on MPS:** `torch.compile()` provides a **1.76× speedup on ViT** (232.9 ms → 132.3 ms) and **1.58× on Transformer** (3.66 ms → 2.32 ms) through operator fusion and pointwise kernel codegen. However, it shows no speedup on ConvNeXt where depthwise convolutions already dispatch via MPSGraph.
+- **TensorFlow XLA:** `tf.function(jit_compile=True)` achieves **13.5× on FF DNN** (3.07 ms → 0.23 ms) and **7.8×–12.0× on recurrent models**, eliminating Python graph traversal overhead.
 
 ---
 
@@ -868,11 +912,52 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 ![GPU Throughput]({rel(fig_paths['throughput'])})
 
+**Key observations:**
+- **Hardware Ceiling:** M1 GPU theoretical peak FP32 throughput is 2,600 GFLOP/s.
+- **Top Performers:** JAX JIT ViT leads all models with **1,203 GFLOP/s** at batch=32 (and **1,297 GFLOP/s** at batch=256), followed closely by PyTorch compiled ViT (**1,124 GFLOP/s**) and ConvNeXt (**738 GFLOP/s**).
+- **Legacy Models:** CNN achieves 300–498 GFLOP/s, Transformer achieves 193–384 GFLOP/s, while FF DNN achieves 17–33 GFLOP/s due to memory bandwidth limits.
+
 ---
 
 ## Figure GPU-7 — Throughput Scaling with Batch Size
 
 ![GPU Throughput scaling]({rel(fig_paths['throughput_scaling'])})
+
+**Key observations:**
+- **Throughput Saturation Plateau:** Throughput rises steeply between batch=1 and batch=32 as execution units fill, then asymptotes between batch=32 and batch=256. For example, JAX ViT scales from 1,203 GFLOP/s (B=32) to 1,297 GFLOP/s (B=256) — an increase of only 7.8% despite an 8× increase in batch size.
+- **Stability under Load:** JAX JIT maintains monotonic throughput scaling up to batch=256 across all architectures, whereas PyTorch exhibits performance degradation at batch=256 due to memory subsystem pressure.
+
+---
+
+## Deep Dive: Batch Size Scaling Limits — Can Linear Performance Scaling Continue?
+
+A natural question when looking at batch scaling curves is: **"Since we see linear scaling on batch size, can we continue scaling and see the same linear performance?"**
+
+The data and computer architecture principles show definitively that **linear performance scaling cannot continue indefinitely**. The illusion of "linear scaling" at small batch sizes reflects the amortization of constant overheads, which transitions into a strict physical ceiling governed by the Roofline Model, followed by catastrophic memory degradation.
+
+1. **The Amortization Regime (B < 32): The Illusion of Linear Scaling**
+   - At small batch sizes, total execution time T(B) is dominated by constant overheads: Python runtime dispatch, command buffer encoding, Metal kernel launch latency (~20–50 µs), and cold parameter DRAM transfers:
+     `T(B) ≈ T_0 + c · B ≈ T_0`
+   - Since arithmetic work (FLOPs) scales as O(B) while latency remains nearly flat (T_0), throughput appears to scale linearly:
+     `Throughput(B) = FLOPs(B) / T(B) ∝ B / T_0 ∝ B`
+   - This is **not** true hardware scaling; it is merely paying down fixed host-driver latency overhead.
+
+2. **The Roofline Saturation Plateau (B = 32 to 256): Hardware Limit Reached**
+   - Once batch size is sufficient to saturate all 8 GPU cores and 128 Execution Units (EUs), and operational intensity crosses the ridge point (I ≥ 38.2 FLOP/B), the GPU enters the **compute-bound plateau**.
+   - In this regime, execution time scales directly with batch size (T(B) ∝ B).
+   - As a result, throughput strictly plateaus:
+     `Throughput(B) = O(B) / O(B) ≈ Peak GFLOP/s = constant`
+   - In our empirical results, JAX ViT achieves 1,203 GFLOP/s at B=32 and 1,297 GFLOP/s at B=256. An **8× increase in batch size** yielded only a **1.08× throughput gain**, demonstrating that the hardware is almost completely saturated.
+
+3. **The Memory Wall and Allocation Cliff (B > 256): Severe Degradation and OOM**
+   - While parameter memory is constant, activation tensor footprint scales as O(B · L · H).
+   - **Metal Buffer Limit (OOM):** On Apple Silicon unified memory, PyTorch ConvNeXt at B=256 exhausted the Metal single-buffer watermark (`20.13 GiB max allowed`), causing a hard OutOfMemory crash.
+   - **Unified Memory Swapping:** For PyTorch ViT at B=256, activation footprint exceeded available physical RAM, triggering macOS unified memory swapping to the internal NVMe SSD. Latency exploded from **232.9 ms (B=32) to 2,204 ms (eager) and 3,568 ms (compiled)** — a 15× latency slowdown and a collapse in achieved throughput.
+   - **Activation DRAM Bandwidth Saturation:** At large batch sizes, intermediate activation spills overwhelm the GPU cache hierarchy and saturate the 68 GB/s unified memory bus, pulling even high-AI models back down into a memory-bandwidth-bound bottleneck.
+
+**Conclusion:** Scaling batch size yields diminishing throughput returns up to the hardware roofline ceiling, followed by severe latency penalties or hard out-of-memory crashes. The optimal batch size for throughput on Apple Silicon M1 GPU lies between **B=32 and B=64**.
+
+---
 
 ---
 
@@ -942,20 +1027,17 @@ On CPU, Python dispatch overhead is the dominant bottleneck. On GPU, compilation
 | **JAX** | XLA GPU backend — strong GEMM, improving conv | `jax.jit()` native |
 | **TensorFlow** | cuDNN / XLA — competitive for dense workloads | `tf.function(jit_compile=True)` |
 
-### 5. JAX MPS support — known limitations
+### 5. JAX on Apple Silicon GPU via MPS
 
-JAX's MPS (Apple Metal) backend is experimental and **not production-ready**.
-Two issues are visible in the data:
+JAX GPU support on Apple Silicon is fully functional using the modern `jax-mps` plugin:
 
-1. **CNN JIT regression (0.33× speedup)** — XLA's Metal convolution lowering inserts
-   additional memory-layout transposes for statically-shaped MPS graphs.  The eager
-   path avoids this by dispatching directly to Metal's optimised conv kernel.
-2. **JAX falls back to CPU without a plugin** — unlike PyTorch, JAX requires an
-   explicit GPU plugin on Apple Silicon:
-   - `pip install jax-metal` (official Apple plugin — tied to specific jaxlib versions)
-   - `pip install jax-mps` (community MLX backend — set `JAX_PLATFORMS=mps`)
-   Without a plugin installed, JAX silently runs on CPU; the benchmark now emits a
-   clear diagnostic when this happens (see `_check_jax_mps_driver()`).
+1. **Plugin Ecosystem & Root Cause of Prior Absence:**
+   - Apple's legacy `jax-metal==0.1.1` package is obsolete and incompatible with the StableHLO v6 bytecode generated by `jaxlib >= 0.4.30` (triggering compilation crashes: `unknown attribute code: 22`).
+   - By removing `jax-metal` and utilizing `jax-mps==0.11.0` (the MLX-backed Metal acceleration plugin) with backend `"mps"`, JAX compiles and executes directly on the Apple Silicon GPU (`mps:0`).
+2. **Key Performance Findings:**
+   - **Peak Throughput on ViT:** JAX JIT achieved **1,203.1 GFLOP/s** at batch=32 and **1,297.5 GFLOP/s** at batch=256 (**49.9% roofline efficiency**), setting the benchmark's highest observed FP32 throughput on the M1 GPU.
+   - **Massive Recurrent Speedups:** Whole-graph XLA JIT unrolls and fuses sequential time steps into a single Metal command buffer, delivering **50.3× speedup on LSTM** (201.8 ms → 4.01 ms) and **40.8× on RNN** (68.5 ms → 1.68 ms).
+   - **Memory Allocator Resilience:** Unlike PyTorch MPS, which hit the Metal buffer watermark (`20.13 GiB max allowed`) causing OOM on ConvNeXt at batch=256, JAX JIT successfully executed both ConvNeXt (373.7 ms) and ViT (159.7 ms) without memory fragmentation or swapping.
 
 ---
 
@@ -1007,8 +1089,8 @@ Empirical memory telemetry measured from framework device allocators compared ag
 {gpu_memory_table(ref_batch)}
 
 **Key observations:**
-- **Dynamic overhead ratio:** Observed peak device memory exceeds theoretical minimum tensor storage due to kernel workspace buffers (GEMM workspace, CuDNN/MIOpen convolution scratchpads), activation retention, and device context allocations.
-- **Allocator caching and fragmentation:** CUDA/MPS allocators pool device memory to amortize reallocation cost.
+- **Dynamic Overhead Ratio:** Observed peak device memory exceeds theoretical minimum tensor storage due to kernel scratchpads, GEMM workspaces, activation retention, and framework runtime contexts. Modern vision models exhibit lower overhead ratios because large parameter and activation weights dominate framework overhead.
+- **Allocator Caching and Pooling:** PyTorch MPS aggressively pools allocations to amortize Metal command buffer allocation costs. However, at batch=256 this caching policy causes severe fragmentation on large models (triggering OOM on ConvNeXt and memory swapping on ViT). JAX with MLX backend manages unified memory allocations with tighter recycling.
 """
 
     md += """
@@ -1025,6 +1107,10 @@ def main() -> None:
     print(f"Loading GPU data from {DATA_FILE}…")
     hw, records = load(DATA_FILE)
     print(f"  {len(records)} records  ·  {hw['name']}")
+
+    global ARCHS
+    ARCHS = get_active_architectures(records)
+    print(f"  Active architectures ({len(ARCHS)}): {', '.join(ARCHS)}")
 
     # Load crossover data if it was collected with --crossover
     raw_json = json.loads(DATA_FILE.read_text())

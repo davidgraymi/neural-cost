@@ -37,8 +37,17 @@ from pathlib import Path
 from statistics import mean, median, stdev
 from typing import Any
 
-# Ensure src/ is importable when run from the repo root.
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Ensure repo root and src/ are importable when run from any directory
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from benchmarks.models import (
+    get_available_models,
+    get_model,
+)
 
 from neural_cost import (
     HardwareSpec,
@@ -535,15 +544,27 @@ def _torch_transformer(batch: int, device: Any):
     return m, (x,)
 
 
+def _torch_convnext(batch: int, device: Any):
+    model, inputs = get_model("ConvNeXt", framework="torch", batch=batch)
+    return model.to(device), tuple(x.to(device) for x in inputs)
+
+
+def _torch_vit(batch: int, device: Any):
+    model, inputs = get_model("ViT", framework="torch", batch=batch)
+    return model.to(device), tuple(x.to(device) for x in inputs)
+
+
 TORCH_GPU_BUILDERS = {
     "FF DNN": _torch_ff_dnn,
+    "ConvNeXt": _torch_convnext,
+    "ViT": _torch_vit,
+    "Transformer": _torch_transformer,
     "CNN": _torch_cnn,
     "RNN": _torch_rnn,
     "LSTM": _torch_lstm,
-    "Transformer": _torch_transformer,
 }
 
-ARCHITECTURES = ["FF DNN", "CNN", "RNN", "LSTM", "Transformer"]
+ARCHITECTURES = ["FF DNN", "ConvNeXt", "ViT", "Transformer", "CNN", "RNN", "LSTM"]
 FRAMEWORKS = ["PyTorch", "JAX", "TensorFlow"]
 
 
@@ -681,12 +702,28 @@ def _jax_transformer_gpu(batch: int, jax_device: Any):
     return model, (_put(jnp.ones((batch, T, EMBED_DIM))), wq, wk, wv, wo, wf1, wf2, wfc)
 
 
+def _jax_convnext_gpu(batch: int, jax_device: Any):
+    import jax
+
+    model, inputs = get_model("ConvNeXt", framework="jax", batch=batch)
+    return model, tuple(jax.device_put(x, jax_device) for x in inputs)
+
+
+def _jax_vit_gpu(batch: int, jax_device: Any):
+    import jax
+
+    model, inputs = get_model("ViT", framework="jax", batch=batch)
+    return model, tuple(jax.device_put(x, jax_device) for x in inputs)
+
+
 JAX_GPU_BUILDERS = {
     "FF DNN": _jax_ff_dnn_gpu,
+    "ConvNeXt": _jax_convnext_gpu,
+    "ViT": _jax_vit_gpu,
+    "Transformer": _jax_transformer_gpu,
     "CNN": _jax_cnn_gpu,
     "RNN": _jax_rnn_gpu,
     "LSTM": _jax_lstm_gpu,
-    "Transformer": _jax_transformer_gpu,
 }
 
 
@@ -807,14 +844,14 @@ def _detect_jax_gpu() -> tuple[Any | None, str]:
     try:
         import jax
 
-        # Try GPU first, then TPU, fall back to CPU
-        for backend in ("gpu", "tpu", "cpu"):
+        # Try GPU/accelerators first: "gpu", "mps", "tpu", fall back to CPU
+        for backend in ("gpu", "mps", "tpu", "cpu"):
             try:
                 devs = jax.devices(backend)
                 if devs:
                     dev = devs[0]
                     return dev, f"{backend}:{dev.id} ({dev.device_kind})"
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 pass
         return None, "cpu-fallback"
     except ImportError:
@@ -871,6 +908,7 @@ def eval_torch_gpu(
     torch_device: Any,
     device_label: str,
     use_fx: bool = True,
+    architectures: list[str] | None = None,
 ) -> list[BenchRecord]:
     import torch
 
@@ -887,7 +925,11 @@ def eval_torch_gpu(
     is_cuda = str(torch_device).startswith("cuda")
     is_mps = str(torch_device) == "mps"
 
-    for arch in ARCHITECTURES:
+    active_archs = architectures if architectures is not None else list(TORCH_GPU_BUILDERS.keys())
+
+    for arch in active_archs:
+        if arch not in TORCH_GPU_BUILDERS:
+            continue
         for batch in batches:
             try:
                 model, inputs = TORCH_GPU_BUILDERS[arch](batch, torch_device)
@@ -993,13 +1035,18 @@ def eval_jax_gpu(
     repeats: int,
     jax_device: Any,
     device_label: str,
+    architectures: list[str] | None = None,
 ) -> list[BenchRecord]:
     import jax
 
     adapter = JaxAdapter()
     records: list[BenchRecord] = []
 
-    for arch in ARCHITECTURES:
+    active_archs = architectures if architectures is not None else list(JAX_GPU_BUILDERS.keys())
+
+    for arch in active_archs:
+        if arch not in JAX_GPU_BUILDERS:
+            continue
         for batch in batches:
             try:
                 model, inputs = JAX_GPU_BUILDERS[arch](batch, jax_device)
@@ -1086,13 +1133,18 @@ def eval_tensorflow_gpu(
     repeats: int,
     tf_device: str,
     device_label: str,
+    architectures: list[str] | None = None,
 ) -> list[BenchRecord]:
     import tensorflow as tf
 
     adapter = TensorFlowAdapter()
     records: list[BenchRecord] = []
 
-    for arch in ARCHITECTURES:
+    active_archs = architectures if architectures is not None else list(TF_GPU_BUILDERS.keys())
+
+    for arch in active_archs:
+        if arch not in TF_GPU_BUILDERS:
+            continue
         for batch in batches:
             try:
                 model, inputs = TF_GPU_BUILDERS[arch](batch, tf_device)
@@ -1335,9 +1387,10 @@ def compute_crossover(
         }}}
     """
     result: dict = {}
+    active_archs = list(dict.fromkeys(r.architecture for r in gpu_records)) or ARCHITECTURES
     for fw in FRAMEWORKS:
         result[fw] = {}
-        for arch in ARCHITECTURES:
+        for arch in active_archs:
             # Collect GPU data points (best variant, sorted by batch)
             gpu_recs = sorted(
                 [r for r in gpu_records if r.framework == fw and r.architecture == arch],
@@ -1378,8 +1431,9 @@ def print_crossover_table(crossover: dict) -> None:
     header = f"  │  {'Architecture':<14} {'Framework':<12} {'Crossover batch':>16}  Notes"
     print(header)
     print("  │  " + "─" * (len(header) - 5))
+    all_archs = sorted({a for fw_data in crossover.values() for a in fw_data.keys()})
     for fw in FRAMEWORKS:
-        for arch in ARCHITECTURES:
+        for arch in all_archs:
             info = crossover.get(fw, {}).get(arch, {})
             cb = info.get("crossover_batch")
             tag = f"≥ batch={cb}" if cb else "never"
@@ -1443,6 +1497,18 @@ def main() -> None:
         help="Include legacy recurrent architectures (RNN, LSTM)",
     )
     parser.add_argument(
+        "--append",
+        action="store_true",
+        default=False,
+        help="Append and merge records into existing benchmark_gpu_data.json rather than overwriting",
+    )
+    parser.add_argument(
+        "--framework",
+        choices=["all", "torch", "jax", "tensorflow"],
+        default="all",
+        help="Target framework to benchmark (default: all)",
+    )
+    parser.add_argument(
         "--no-fx",
         action="store_true",
         help="Disable PyTorch FX graph tracing fallback",
@@ -1456,6 +1522,8 @@ def main() -> None:
         print("Crossover mode: sweeping batch sizes", batches)
     else:
         batches = QUICK_BATCH_SIZES if args.quick else BATCH_SIZES
+
+    active_archs = get_available_models(include_legacy=args.include_legacy)
 
     # ------------------------------------------------------------------
     # Detect GPU and build a HardwareSpec for the GPU if one is found.
@@ -1544,45 +1612,105 @@ def main() -> None:
                 f"{r.latency_median_ms:7.2f} ms  {r.roofline_efficiency:.1%}  {r.bottleneck}{extra_str}"
             )
 
+    run_torch = args.framework in ("all", "torch")
+    run_jax = args.framework in ("all", "jax")
+    run_tf = args.framework in ("all", "tensorflow")
+
     # PyTorch GPU
-    if importlib.util.find_spec("torch") is not None and torch_dev is not None:
+    if run_torch and importlib.util.find_spec("torch") is not None and torch_dev is not None:
         print(f"── PyTorch ({torch_label}) ─────────────────────────────────")
         recs = eval_torch_gpu(
-            gpu_hardware, batches, warmup, repeats, torch_dev, torch_label, use_fx=not args.no_fx
+            gpu_hardware,
+            batches,
+            warmup,
+            repeats,
+            torch_dev,
+            torch_label,
+            use_fx=not args.no_fx,
+            architectures=active_archs,
         )
         all_records.extend(recs)
         _print_recs(recs)
         print()
+    elif run_torch:
+        print("[skip] PyTorch not installed or device unavailable")
 
     # JAX GPU
-    if importlib.util.find_spec("jax") is not None:
+    if run_jax and importlib.util.find_spec("jax") is not None:
         jax_dev, jax_label = _detect_jax_gpu()
         if jax_dev is not None:
             print(f"── JAX ({jax_label}) ─────────────────────────────────")
-            recs = eval_jax_gpu(gpu_hardware, batches, warmup, repeats, jax_dev, jax_label)
+            recs = eval_jax_gpu(
+                gpu_hardware,
+                batches,
+                warmup,
+                repeats,
+                jax_dev,
+                jax_label,
+                architectures=active_archs,
+            )
             all_records.extend(recs)
             _print_recs(recs)
             print()
         else:
             print("[skip] JAX: no GPU/accelerator device available")
-    else:
+    elif run_jax:
         print("[skip] JAX not installed")
 
     # TensorFlow GPU
-    if importlib.util.find_spec("tensorflow") is not None:
+    if run_tf and importlib.util.find_spec("tensorflow") is not None:
         tf_dev, tf_label = _detect_tf_gpu()
         print(f"── TensorFlow ({tf_label}) ─────────────────────────────────")
-        recs = eval_tensorflow_gpu(gpu_hardware, batches, warmup, repeats, tf_dev, tf_label)
+        recs = eval_tensorflow_gpu(
+            gpu_hardware,
+            batches,
+            warmup,
+            repeats,
+            tf_dev,
+            tf_label,
+            architectures=active_archs,
+        )
         all_records.extend(recs)
         _print_recs(recs)
         print()
-    else:
+    elif run_tf:
         print("[skip] TensorFlow not installed")
 
     out_dir = Path(__file__).parent / "results"
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / "benchmark_gpu_data.json"
-    payload: dict = {"hardware": hw_meta, "records": [asdict(r) for r in all_records]}
+
+    records_to_save: list[dict] = []
+    if args.append and out_path.exists():
+        try:
+            old_payload = json.loads(out_path.read_text())
+            record_map = {
+                (
+                    r.get("framework"),
+                    r.get("variant"),
+                    r.get("architecture"),
+                    r.get("batch"),
+                    r.get("scale", "standard"),
+                ): r
+                for r in old_payload.get("records", [])
+            }
+            for r in all_records:
+                d = asdict(r)
+                k = (
+                    d.get("framework"),
+                    d.get("variant"),
+                    d.get("architecture"),
+                    d.get("batch"),
+                    d.get("scale", "standard"),
+                )
+                record_map[k] = d
+            records_to_save = list(record_map.values())
+        except Exception:
+            records_to_save = [asdict(r) for r in all_records]
+    else:
+        records_to_save = [asdict(r) for r in all_records]
+
+    payload: dict = {"hardware": hw_meta, "records": records_to_save}
 
     # ------------------------------------------------------------------
     # Crossover analysis: compare GPU latencies to CPU baseline
@@ -1600,7 +1728,7 @@ def main() -> None:
             )
 
     out_path.write_text(json.dumps(payload, indent=2))
-    print(f"\nSaved {len(all_records)} records → {out_path}")
+    print(f"\nSaved {len(records_to_save)} records → {out_path}")
 
 
 if __name__ == "__main__":
