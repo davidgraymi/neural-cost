@@ -451,6 +451,117 @@ def fig_throughput_scaling(hw: dict, records: list[dict]) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Figure GPU-9: Inference Latency per Sample (Amortization & Saturation Floor)
+# ---------------------------------------------------------------------------
+
+def fig_per_sample_latency(hw: dict, records: list[dict]) -> Path | None:
+    batches = sorted({r["batch"] for r in records})
+    if len(batches) < 2:
+        return None
+    x = np.arange(len(ARCHS))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(max(11, len(ARCHS) * 1.6), 5))
+
+    for idx, b in enumerate(batches):
+        vals = []
+        for arch in ARCHS:
+            b_recs = [r for r in records if r["architecture"] == arch and r["batch"] == b]
+            fast_ms = min((r["latency_median_ms"] for r in b_recs), default=None)
+            vals.append((fast_ms / b) if fast_ms else 0)
+
+        offset = (idx - 0.5) * width
+        color = "#3498DB" if idx == 0 else "#E67E22"
+        bars = ax.bar(x + offset, vals, width * 0.9, label=f"Batch {b}", color=color, alpha=0.88)
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() * 1.02,
+                    f"{v:.3f}ms" if v < 1 else f"{v:.2f}ms",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    rotation=25,
+                )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(ARCHS)
+    ax.set_ylabel("Latency per Sample (ms/sample)")
+    ax.set_title(
+        f"Inference Latency per Sample: Batch Scaling Law & Saturation Floor\n{hw['name']}  ·  Fastest Variant per Architecture",
+        fontweight="bold",
+    )
+    ax.legend(framealpha=0.9)
+    ax.set_ylim(bottom=0)
+    fig.tight_layout()
+    out = FIG_DIR / "gpu_fig9_per_sample_latency.png"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Figure GPU-10: JAX vs PyTorch Head-to-Head Speedup
+# ---------------------------------------------------------------------------
+
+def fig_framework_comparison(hw: dict, records: list[dict]) -> Path:
+    ref_batch = 32 if 32 in {r["batch"] for r in records} else 256
+    x = np.arange(len(ARCHS))
+    width = 0.5
+    fig, ax = plt.subplots(figsize=(max(10, len(ARCHS) * 1.5), 4.8))
+
+    speedups = []
+    colors = []
+    labels = []
+    for arch in ARCHS:
+        pt_lat = best(records, "PyTorch", arch, ref_batch, "latency_median_ms")
+        jax_lat = best(records, "JAX", arch, ref_batch, "latency_median_ms")
+        if pt_lat and jax_lat and jax_lat > 0:
+            sp = pt_lat / jax_lat
+            speedups.append(sp)
+            colors.append("#9B59B6" if sp >= 1.0 else "#EE4C2C")
+            labels.append(f"{sp:.1f}×")
+        else:
+            speedups.append(1.0)
+            colors.append("gray")
+            labels.append("N/A")
+
+    bars = ax.bar(x, speedups, width, color=colors, alpha=0.88)
+    ax.axhline(1.0, color="black", lw=1.2, ls="--", alpha=0.7, label="Parity (1.0×)")
+    for bar, lbl, sp in zip(bars, labels, speedups):
+        y_pos = max(sp, 1.0) + 0.15 if sp >= 1.0 else sp + 0.05
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            y_pos,
+            lbl,
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            fontweight="bold",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(ARCHS)
+    ax.set_ylabel("Speedup over PyTorch (T_PyTorch / T_JAX)")
+    ax.set_title(
+        f"JAX (JIT) vs PyTorch (Compiled) Head-to-Head Speedup on Apple Silicon GPU\n{hw['name']}  ·  batch={ref_batch}  (Values > 1.0× indicate JAX is faster)",
+        fontweight="bold",
+    )
+    legend_elements = [
+        mpatches.Patch(color="#9B59B6", label="JAX faster"),
+        mpatches.Patch(color="#EE4C2C", label="PyTorch faster"),
+        plt.Line2D([0], [0], color="black", lw=1.2, ls="--", label="Parity (1.0×)"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right", framealpha=0.9)
+    ax.set_ylim(0, max(speedups) * 1.25)
+    fig.tight_layout()
+    out = FIG_DIR / "gpu_fig10_framework_comparison.png"
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Figure GPU-8: GPU-vs-CPU crossover (batch size where GPU first wins)
 # ---------------------------------------------------------------------------
 
@@ -908,6 +1019,19 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 ---
 
+## Figure GPU-5b — JAX vs PyTorch Head-to-Head Speedup (batch={ref_batch})
+
+Direct speedup of JAX (JIT) over PyTorch (Compiled): $T_{{\\text{{PyTorch}}}} / T_{{\\text{{JAX}}}}$. Values > 1.0× indicate JAX is faster.
+
+![JAX vs PyTorch Speedup]({rel(fig_paths['framework_comparison'])})
+
+**Key observations:**
+- **Modern Vision Dominance:** JAX JIT outperforms PyTorch on both modern vision architectures: **8.4× faster on ConvNeXt** (48.7 ms vs 406.7 ms) and **6.1× faster on ViT** (21.5 ms vs 132.3 ms).
+- **Core Models:** JAX leads on Transformer (**2.2× faster**) and CNN (**1.7× faster**), and achieves **2.6× faster** execution on vanilla RNN.
+- **PyTorch Strengths:** PyTorch compiled retains a slight lead on LSTM (**1.48× faster** than JAX) and FF DNN (**1.5× faster**), where PyTorch's native C++ MPS kernels avoid JIT graph compilation overhead for small tensors.
+
+---
+
 ## Figure GPU-6 — Achieved Throughput (GFLOP/s, batch={ref_batch})
 
 ![GPU Throughput]({rel(fig_paths['throughput'])})
@@ -954,6 +1078,14 @@ The data and computer architecture principles show definitively that **linear pe
    - **Metal Buffer Limit (OOM):** On Apple Silicon unified memory, PyTorch ConvNeXt at B=256 exhausted the Metal single-buffer watermark (`20.13 GiB max allowed`), causing a hard OutOfMemory crash.
    - **Unified Memory Swapping:** For PyTorch ViT at B=256, activation footprint exceeded available physical RAM, triggering macOS unified memory swapping to the internal NVMe SSD. Latency exploded from **232.9 ms (B=32) to 2,204 ms (eager) and 3,568 ms (compiled)** — a 15× latency slowdown and a collapse in achieved throughput.
    - **Activation DRAM Bandwidth Saturation:** At large batch sizes, intermediate activation spills overwhelm the GPU cache hierarchy and saturate the 68 GB/s unified memory bus, pulling even high-AI models back down into a memory-bandwidth-bound bottleneck.
+
+### Visualizing the Saturation Floor: Latency per Sample
+
+![Latency per Sample]({rel(fig_paths['per_sample_latency'])})
+
+**Key takeaways from per-sample latency ($T(B) / B$):**
+- **Saturation Floor on Modern Models:** For JAX ViT, per-sample latency is **0.673 ms/sample at $B=32$** and **0.624 ms/sample at $B=256$** — an 8× batch increase yielded only a 7.2% reduction in time-per-sample. For ConvNeXt, per-sample cost dropped from **1.52 ms/sample ($B=32$) to 1.46 ms/sample ($B=256$)**, a mere 3.9% gain.
+- **The Memory Cliff for PyTorch ViT:** For PyTorch ViT, per-sample cost actually **regressed from 4.13 ms/sample at $B=32$ to 8.61 ms/sample (baseline) and 13.94 ms/sample (compiled) at $B=256$**, proving that scaling batch size past physical RAM capacity severely degrades throughput.
 
 **Conclusion:** Scaling batch size yields diminishing throughput returns up to the hardware roofline ceiling, followed by severe latency penalties or hard out-of-memory crashes. The optimal batch size for throughput on Apple Silicon M1 GPU lies between **B=32 and B=64**.
 
@@ -1088,9 +1220,12 @@ Empirical memory telemetry measured from framework device allocators compared ag
 
 {gpu_memory_table(ref_batch)}
 
-**Key observations:**
-- **Dynamic Overhead Ratio:** Observed peak device memory exceeds theoretical minimum tensor storage due to kernel scratchpads, GEMM workspaces, activation retention, and framework runtime contexts. Modern vision models exhibit lower overhead ratios because large parameter and activation weights dominate framework overhead.
-- **Allocator Caching and Pooling:** PyTorch MPS aggressively pools allocations to amortize Metal command buffer allocation costs. However, at batch=256 this caching policy causes severe fragmentation on large models (triggering OOM on ConvNeXt and memory swapping on ViT). JAX with MLX backend manages unified memory allocations with tighter recycling.
+**Key observations & Telemetry Analysis:**
+- **Dynamic Overhead Ratio & Driver Caching:** Observed device memory exceeds theoretical minimum tensor storage due to kernel scratchpads, GEMM workspaces, activation retention, and framework runtime contexts.
+- **JAX MPS Process Watermark Anomaly:** JAX MPS telemetry via `jax.devices()[0].memory_stats()` reports a monotonic process-lifetime peak (`peak_bytes_in_use`). When ConvNeXt at $B=256$ ran early in the suite, it set a 4.01 GB process watermark. Because `jax-mps` currently lacks a `reset_peak_memory_stats()` API, subsequently benchmarked models inherited this 4.01 GB value, resulting in artificially high overhead ratios (e.g. 1,388× on Transformer) that reflect process history rather than isolated tensor memory.
+- **PyTorch MPS Post-Execution Sampling:** `torch.mps.current_allocated_memory()` measures live allocations after `torch.mps.synchronize()`, by which time intermediate activations are freed. For compiled CNN and Transformer, only persistent weights and output tensors remained active, yielding overhead ratios < 0.1× relative to theoretical inference memory.
+- **TensorFlow Metal Static Reporting:** TensorFlow on Apple Silicon exposes static scratchpads (384–512 KB), which under-reports actual framework footprint.
+- **Allocator Fragmentation at Scale:** PyTorch MPS aggressively pools allocations to amortize Metal command buffer allocation costs. However, at batch=256 this caching policy causes severe fragmentation on large models (triggering OOM on ConvNeXt and memory swapping on ViT).
 """
 
     md += """
@@ -1120,15 +1255,17 @@ def main() -> None:
 
     print("Generating GPU figures…")
     fig_paths: dict[str, Path | None] = {
-        "roofline":           fig_roofline(hw, records),
-        "latency_bars":       fig_latency_bars(hw, records),
-        "heatmap":            fig_efficiency_heatmap(hw, records),
-        "batch_scaling":      fig_batch_scaling(hw, records),
-        "speedup":            fig_speedup(hw, records),
-        "throughput":         fig_throughput(hw, records),
-        "throughput_scaling": fig_throughput_scaling(hw, records),
-        "crossover":          fig_crossover(hw, records, crossover),
-        "memory":             fig_gpu_memory(hw, records),
+        "roofline":             fig_roofline(hw, records),
+        "latency_bars":         fig_latency_bars(hw, records),
+        "heatmap":              fig_efficiency_heatmap(hw, records),
+        "batch_scaling":        fig_batch_scaling(hw, records),
+        "speedup":              fig_speedup(hw, records),
+        "framework_comparison": fig_framework_comparison(hw, records),
+        "throughput":           fig_throughput(hw, records),
+        "throughput_scaling":   fig_throughput_scaling(hw, records),
+        "per_sample_latency":   fig_per_sample_latency(hw, records),
+        "crossover":            fig_crossover(hw, records, crossover),
+        "memory":               fig_gpu_memory(hw, records),
     }
     for name, p in fig_paths.items():
         if p is not None:
