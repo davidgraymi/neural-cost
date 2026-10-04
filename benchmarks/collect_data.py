@@ -18,8 +18,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 import time
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -1273,6 +1276,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-fx", action="store_true", help="Disable PyTorch FX graph tracing fallback"
     )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        default=False,
+        help="Append and merge records into existing benchmark_data.json rather than overwriting",
+    )
+    parser.add_argument(
+        "--framework",
+        choices=["all", "torch", "jax", "tensorflow"],
+        default="all",
+        help="Target framework to benchmark (default: all)",
+    )
     return parser
 
 
@@ -1318,7 +1333,10 @@ def main() -> None:
     )
 
     all_records: list[BenchRecord] = []
-    for pkg, (label, runner) in RUNNERS.items():
+    runners_to_run = (
+        RUNNERS if args.framework == "all" else {args.framework: RUNNERS[args.framework]}
+    )
+    for pkg, (label, runner) in runners_to_run.items():
         if importlib.util.find_spec(pkg) is None:
             print(f"[skip] {label} not installed")
             continue
@@ -1365,9 +1383,44 @@ def main() -> None:
     out_dir = Path(__file__).parent / "results"
     out_dir.mkdir(exist_ok=True)
     out_path = out_dir / "benchmark_data.json"
-    payload = {"hardware": hw_meta, "records": [asdict(r) for r in all_records]}
+
+    records_to_save: list[dict] = []
+    if args.append and out_path.exists():
+        try:
+            old_payload = json.loads(out_path.read_text())
+            record_map = {
+                (
+                    r.get("framework"),
+                    r.get("variant"),
+                    r.get("architecture"),
+                    r.get("batch"),
+                    r.get("scale", "standard"),
+                    r.get("precision", "fp32"),
+                    r.get("mode", "inference"),
+                ): r
+                for r in old_payload.get("records", [])
+            }
+            for r in all_records:
+                d = asdict(r)
+                k = (
+                    d.get("framework"),
+                    d.get("variant"),
+                    d.get("architecture"),
+                    d.get("batch"),
+                    d.get("scale", "standard"),
+                    d.get("precision", "fp32"),
+                    d.get("mode", "inference"),
+                )
+                record_map[k] = d
+            records_to_save = list(record_map.values())
+        except Exception:
+            records_to_save = [asdict(r) for r in all_records]
+    else:
+        records_to_save = [asdict(r) for r in all_records]
+
+    payload = {"hardware": hw_meta, "records": records_to_save}
     out_path.write_text(json.dumps(payload, indent=2))
-    print(f"\nSaved {len(all_records)} records → {out_path}")
+    print(f"\nSaved {len(records_to_save)} records → {out_path}")
 
 
 if __name__ == "__main__":

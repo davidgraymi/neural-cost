@@ -1,0 +1,74 @@
+{
+  "hardware": {
+    "name": "Apple M1",
+    "peak_flops": 2600000000000.0,
+    "memory_bandwidth": 68250000000.0
+  },
+  "prefill": [
+    {
+      "prompt_len": 128,
+      "batch_size": 1,
+      "latency_ms": 0.1429610666666667,
+      "ttft_ms": 0.1429610666666667,
+      "gflops": 31920.59809290734,
+      "achieved_gflops": 31920.59809290734,
+      "throughput_tokens_s": 895348.6636921193,
+      "memory_traffic_bytes": 2097152
+    },
+    {
+      "prompt_len": 512,
+      "batch_size": 1,
+      "latency_ms": 1.7253610666666666,
+      "ttft_ms": 1.7253610666666666,
+      "gflops": 12446.575325528,
+      "achieved_gflops": 12446.575325528,
+      "throughput_tokens_s": 296749.4803792953,
+      "memory_traffic_bytes": 8388608
+    },
+    {
+      "prompt_len": 2048,
+      "batch_size": 1,
+      "latency_ms": 28.419263933333333,
+      "ttft_ms": 28.419263933333333,
+      "gflops": 4836.119394028217,
+      "achieved_gflops": 4836.119394028217,
+      "throughput_tokens_s": 72063.79464310732,
+      "memory_traffic_bytes": 33554432
+    }
+  ],
+  "decode": [
+    {
+      "prompt_len": 128,
+      "gen_tokens": 16,
+      "batch_size": 1,
+      "latency_ms": 0.02749375,
+      "tokens_per_sec": 36371.90270516026,
+      "throughput_tokens_s": 36371.90270516026,
+      "achieved_gbw": 3738.188933848602,
+      "memory_bw_util": 54.771999030748745,
+      "kv_cache_bytes": 2097152
+    },
+    {
+      "prompt_len": 512,
+      "gen_tokens": 16,
+      "batch_size": 1,
+      "latency_ms": 0.0474078125,
+      "tokens_per_sec": 21093.56975709436,
+      "throughput_tokens_s": 21093.56975709436,
+      "achieved_gbw": 2300.639541214858,
+      "memory_bw_util": 33.709004266884364,
+      "kv_cache_bytes": 8388608
+    },
+    {
+      "prompt_len": 2048,
+      "gen_tokens": 16,
+      "batch_size": 1,
+      "latency_ms": 0.352160425,
+      "tokens_per_sec": 2839.614928338413,
+      "throughput_tokens_s": 2839.614928338413,
+      "achieved_gbw": 381.1731883274505,
+      "memory_bw_util": 5.584955140328945,
+      "kv_cache_bytes": 33554432
+    }
+  ]
+}

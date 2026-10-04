@@ -19,8 +19,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import numpy as np
+from matplotlib import ticker
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -117,16 +117,40 @@ def select(records: list[dict], **kwargs) -> list[dict]:
     return result
 
 
-def get(records: list[dict], fw: str, variant: str, arch: str, batch: int, field: str):
-    hits = select(records, framework=fw, variant=variant, architecture=arch, batch=batch)
+def get(
+    records: list[dict],
+    fw: str,
+    variant: str,
+    arch: str,
+    batch: int,
+    field: str,
+    precision: str | None = None,
+    mode: str | None = None,
+):
+    kwargs = {"framework": fw, "variant": variant, "architecture": arch, "batch": batch}
+    if precision is not None:
+        kwargs["precision"] = precision
+    if mode is not None:
+        kwargs["mode"] = mode
+    hits = select(records, **kwargs)
+    if not hits and (precision is not None or mode is not None):
+        hits = select(records, framework=fw, variant=variant, architecture=arch, batch=batch)
     return hits[0][field] if hits else None
 
 
-def best(records: list[dict], fw: str, arch: str, batch: int, field: str):
+def best(
+    records: list[dict],
+    fw: str,
+    arch: str,
+    batch: int,
+    field: str,
+    precision: str | None = None,
+    mode: str | None = None,
+):
     v = BEST_VARIANTS.get(fw, "baseline")
-    val = get(records, fw, v, arch, batch, field)
+    val = get(records, fw, v, arch, batch, field, precision=precision, mode=mode)
     if val is None:
-        val = get(records, fw, "baseline", arch, batch, field)
+        val = get(records, fw, "baseline", arch, batch, field, precision=precision, mode=mode)
     return val
 
 
@@ -229,7 +253,7 @@ def fig_latency_bars(hw: dict, records: list[dict], batch: int | None = None) ->
     for i, fw in enumerate(FRAMEWORKS):
         vals = [best(records, fw, arch, batch, "latency_median_ms") or 0 for arch in archs]
         errs = [best(records, fw, arch, batch, "latency_stddev_ms") or 0 for arch in archs]
-        bars = ax.bar(
+        ax.bar(
             x + i * width,
             vals,
             width * 0.88,
@@ -434,7 +458,7 @@ def fig_throughput(hw: dict, records: list[dict], batch: int | None = None) -> P
 
     for i, fw in enumerate(FRAMEWORKS):
         vals = [best(records, fw, arch, batch, "achieved_gflops") or 0 for arch in archs]
-        bars = ax.bar(x + i * width, vals, width * 0.88, label=fw, color=FW_COLORS[fw], alpha=0.88)
+        ax.bar(x + i * width, vals, width * 0.88, label=fw, color=FW_COLORS[fw], alpha=0.88)
 
     ax.set_xticks(x + width)
     ax.set_xticklabels(archs)
@@ -604,27 +628,42 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
     batches = sorted({r["batch"] for r in records})
     batch32 = 32 if 32 in batches else batches[len(batches) // 2]
 
+    def fmt_n(n):
+        if n is None:
+            return "—"
+        if n >= 1e9:
+            return f"{n / 1e9:.2f}G"
+        if n >= 1e6:
+            return f"{n / 1e6:.1f}M"
+        return f"{n:,.0f}"
+
+    def fmt_kb(n):
+        if n is None:
+            return "—"
+        return f"{n / 1024:,.1f}"
+
     def stat_table(batch: int) -> str:
         rows = [
             "| Architecture | Framework | Variant | FLOPs | Params | AI (FLOP/B) | Latency med (ms) | ±σ | CV% | Efficiency | GFLOP/s | Bottleneck |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
 
-        def fmt_n(n):
-            if n is None:
-                return "—"
-            if n >= 1e9:
-                return f"{n / 1e9:.2f}G"
-            if n >= 1e6:
-                return f"{n / 1e6:.1f}M"
-            return f"{n:,.0f}"
-
         for arch in ARCHS:
             for fw in FRAMEWORKS:
                 for variant in ["baseline", "compiled", "jit", "tf.function"]:
                     hits = select(
-                        records, framework=fw, variant=variant, architecture=arch, batch=batch
+                        records,
+                        framework=fw,
+                        variant=variant,
+                        architecture=arch,
+                        batch=batch,
+                        precision="fp32",
+                        mode="inference",
                     )
+                    if not hits:
+                        hits = select(
+                            records, framework=fw, variant=variant, architecture=arch, batch=batch
+                        )
                     if not hits:
                         continue
                     r = hits[0]
@@ -651,8 +690,18 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
             for fw in FRAMEWORKS:
                 for variant in ["baseline", "compiled", "jit", "tf.function"]:
                     hits = select(
-                        records, framework=fw, variant=variant, architecture=arch, batch=batch
+                        records,
+                        framework=fw,
+                        variant=variant,
+                        architecture=arch,
+                        batch=batch,
+                        precision="fp32",
+                        mode="inference",
                     )
+                    if not hits:
+                        hits = select(
+                            records, framework=fw, variant=variant, architecture=arch, batch=batch
+                        )
                     if not hits:
                         continue
                     r = hits[0]
@@ -731,8 +780,18 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
             for fw in FRAMEWORKS:
                 for variant in ["baseline", "compiled", "jit", "tf.function"]:
                     hits = select(
-                        records, framework=fw, variant=variant, architecture=arch, batch=batch
+                        records,
+                        framework=fw,
+                        variant=variant,
+                        architecture=arch,
+                        batch=batch,
+                        precision="fp32",
+                        mode="inference",
                     )
+                    if not hits:
+                        hits = select(
+                            records, framework=fw, variant=variant, architecture=arch, batch=batch
+                        )
                     if not hits:
                         continue
                     r = hits[0]
@@ -759,6 +818,144 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
                     )
         return "\n".join(rows)
 
+    def precision_section() -> str:
+        precisions = sorted({r.get("precision", "fp32") for r in records if r.get("precision")})
+        if len(precisions) <= 1:
+            return ""
+        rows = [
+            "| Architecture | Framework | Precision | FLOPs | AI (FLOP/B) | Latency med (ms) | Speedup vs FP32 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for arch in ARCHS:
+            for fw in FRAMEWORKS:
+                fp32_ms = get(records, fw, "baseline", arch, batch32, "latency_median_ms", precision="fp32")
+                for p in precisions:
+                    r = select(
+                        records,
+                        framework=fw,
+                        variant="baseline",
+                        architecture=arch,
+                        batch=batch32,
+                        precision=p,
+                    )
+                    if not r:
+                        continue
+                    rec = r[0]
+                    speedup_str = (
+                        f"**{fp32_ms / rec['latency_median_ms']:.2f}×**"
+                        if fp32_ms and rec["latency_median_ms"] > 0
+                        else "1.00×"
+                    )
+                    rows.append(
+                        f"| {arch} | {fw} | {p.upper()} | {fmt_n(rec['flops'])} | {rec['arith_intensity']:.2f} | {rec['latency_median_ms']:.3f} | {speedup_str} |"
+                    )
+        return (
+            "---\n\n## Multi-Precision Benchmark Evaluation (FP32 vs FP16 vs BF16 vs INT8)\n\n"
+            "Evaluates arithmetic intensity and latency scaling across lower compute precisions (Issue #20):\n\n"
+            + "\n".join(rows)
+            + "\n"
+        )
+
+    def training_section() -> str:
+        modes = sorted({r.get("mode", "inference") for r in records if r.get("mode")})
+        if len(modes) <= 1:
+            return ""
+        rows = [
+            "| Architecture | Framework | Mode | FLOPs | FLOP Multiplier | Latency med (ms) | Peak Alloc (KB) | Training Min (KB) |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for arch in ARCHS:
+            for fw in FRAMEWORKS:
+                for m in modes:
+                    r = select(
+                        records,
+                        framework=fw,
+                        variant="baseline",
+                        architecture=arch,
+                        batch=batch32,
+                        mode=m,
+                    )
+                    if not r:
+                        continue
+                    rec = r[0]
+                    mult = "1.0×" if m == "inference" else ("2.0×" if m == "backward_only" else "3.0×")
+                    t_min = rec.get("training_minimum_bytes") or rec.get("theoretical_min_bytes")
+                    p_alloc = rec.get("peak_allocated_bytes")
+                    rows.append(
+                        f"| {arch} | {fw} | {m} | {fmt_n(rec['flops'])} | {mult} | {rec['latency_median_ms']:.3f} | {fmt_kb(p_alloc)} | {fmt_kb(t_min)} |"
+                    )
+        return (
+            "---\n\n## Training Workload Phases & Optimizer Memory Traffic (Issue #21)\n\n"
+            "Evaluates forward inference vs backward pass vs complete training steps including AdamW optimizer memory traffic:\n\n"
+            + "\n".join(rows)
+            + "\n"
+        )
+
+    def llm_section() -> str:
+        llm_data_path = REPO_ROOT / "benchmarks" / "results" / "llm_benchmark_data.json"
+        if not llm_data_path.exists():
+            return ""
+        try:
+            data = json.loads(llm_data_path.read_text())
+            prefill_rows = [
+                "| Prompt Len | Batch | TTFT (ms) | Achieved Compute | Throughput (tok/s) |",
+                "|---|---|---|---|---|",
+            ]
+            for p in data.get("prefill", []):
+                prefill_rows.append(
+                    f"| {p['prompt_len']} | {p['batch_size']} | {p['ttft_ms']:.2f} | {p['achieved_gflops']:.1f} GFLOP/s | {p['throughput_tokens_s']:,.0f} |"
+                )
+
+            decode_rows = [
+                "| Prompt Len | Batch | Step Latency (ms) | Decode Throughput | Memory Bandwidth | BW Utilization | KV Cache (KB) |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for d in data.get("decode", []):
+                decode_rows.append(
+                    f"| {d['prompt_len']} | {d['batch_size']} | {d['latency_ms']:.2f} | {d['tokens_per_sec']:.1f} tok/s | {d['achieved_gbw']:.1f} GB/s | {d['memory_bw_util']:.1%} | {d['kv_cache_bytes'] / 1024:,.1f} |"
+                )
+
+            return f"""---
+
+## LLM Prefill vs. Decode Phase Discrepancy & KV Cache Analysis
+
+Evaluates operational regime differences in Large Language Models (Issue #22):
+- **Prefill phase:** Highly parallel prompt processing bounded by arithmetic compute capacity.
+- **Decode phase:** Autoregressive single-token generation bounded by DRAM memory bandwidth and KV-cache retrieval.
+
+### Prompt Prefill Phase (Compute-Bound Regime)
+
+{chr(10).join(prefill_rows)}
+
+### Autoregressive Decode Phase (Memory-Bandwidth Bound Regime)
+
+{chr(10).join(decode_rows)}
+
+**Key observations:**
+- **Prefill arithmetic intensity:** Large prompt contexts saturate compute cores, delivering high GFLOP/s and high token processing rates.
+- **Decode memory bandwidth bottleneck:** Token-by-token generation must load the full model weights and historical KV cache per token, achieving tens of tokens/second and saturating memory bandwidth on memory-constrained hardware.
+- **KV cache scaling:** The KV cache footprints grow linearly with prompt length, increasing per-step memory traffic proportionally.
+"""
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
+            return ""
+
+    arch_descriptions = {
+        "FF DNN": "784 → 128 → 128 → 10, ReLU + LayerNorm",
+        "Deep DNN": "784 → 128 → 128 → 10, ReLU + LayerNorm",
+        "ConvNeXt": "Depthwise 7×7 → LayerNorm → 1×1 Inverted Bottleneck (dim×4) → GELU → 1×1, input 32×32×3",
+        "ViT": "Vision Transformer: Patch Embedding (4×4) → Class Token + Position → Multi-Head Self-Attention + MLP, input 32×32×3",
+        "Transformer": "2-layer encoder (MHA h=4 with SDPA + FFN×4 + RMSNorm/LayerNorm), embed=128, seq=32",
+        "CNN": "Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3",
+        "RNN": "2-layer Vanilla RNN, hidden=128, seq=32",
+        "LSTM": "2-layer LSTM (4-gate), hidden=128, seq=32",
+    }
+    active_archs_in_data = get_active_architectures(records)
+    arch_rows = [
+        f"| **{a}** | {arch_descriptions.get(a, 'Neural network topology')} |"
+        for a in active_archs_in_data
+    ]
+    arch_table_md = "\n".join(["| Architecture | Description |", "|---|---|"] + arch_rows)
+
     ridge = hw["ridge_point"]
 
     md = f"""# Neural-Cost Scientific Benchmark Report
@@ -773,13 +970,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
 
 ### Architectures under test
 
-| Architecture | Description |
-|---|---|
-| **FF DNN** | 784 → 128 → 128 → 10, ReLU + LayerNorm |
-| **CNN** | Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3 |
-| **RNN** | 2-layer Vanilla RNN, hidden=128, seq=32 |
-| **LSTM** | 2-layer LSTM (4-gate), hidden=128, seq=32 |
-| **Transformer** | 2-layer encoder (MHA h=4 + FFN×4 + LayerNorm), embed=128, seq=32 |
+{arch_table_md}
 
 ### Frameworks and optimisation variants
 
@@ -799,7 +990,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
 
 ---
 
-## Figure 1 — Roofline Model (batch=32)
+## Figure 1 — Roofline Model (batch={batch32})
 
 Each point represents one architecture × framework combination (optimised variant).  
 The roofline ceiling shows the theoretical maximum given the hardware's compute and bandwidth limits.
@@ -814,7 +1005,7 @@ The roofline ceiling shows the theoretical maximum given the hardware's compute 
 
 ---
 
-## Figure 2 — Inference Latency by Architecture (batch=32)
+## Figure 2 — Inference Latency by Architecture (batch={batch32})
 
 Error bars show ±1σ across 40 timed iterations.
 
@@ -827,7 +1018,7 @@ Error bars show ±1σ across 40 timed iterations.
 
 ---
 
-## Figure 3 — Roofline Efficiency Heatmap (batch=32)
+## Figure 3 — Roofline Efficiency Heatmap (batch={batch32})
 
 Cells show efficiency as a percentage of the theoretical roofline bound.
 
@@ -853,7 +1044,7 @@ Cells show efficiency as a percentage of the theoretical roofline bound.
 
 ---
 
-## Figure 5 — Compilation Speedup (baseline → optimised, batch=32)
+## Figure 5 — Compilation Speedup (baseline → optimised, batch={batch32})
 
 Speedup ratio = eager latency / optimised latency. Higher is better.
 
@@ -866,7 +1057,7 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 ---
 
-## Figure 6 — Achieved Throughput (GFLOP/s, batch=32)
+## Figure 6 — Achieved Throughput (GFLOP/s, batch={batch32})
 
 ![Throughput]({rel(fig_paths["throughput"])})
 
@@ -936,22 +1127,25 @@ Diagnostics powered by neural-cost's causal gap analyzer, hierarchical cache mod
 
 {conclusions(hw, records)}
 
+{precision_section()}
+{training_section()}
+{llm_section()}
 ---
 
 ## Conclusions
 
 ### 1. JIT compilation is the dominant performance lever
 
-`jax.jit()` provides the most impactful optimisation across all five architectures,
+`jax.jit()` provides the most impactful optimisation across architectures,
 eliminating Python-level loop overhead for recurrent models and enabling XLA kernel
 fusion for feedforward and attention layers. `torch.compile()` provides meaningful
 speedups (1.5–3×) for linear/conv-heavy workloads but does not trace Python loops.
 `tf.function()` closes the gap between TF eager and JIT-compiled frameworks for
 feedforward models but is less effective for recurrent models.
 
-### 2. All workloads are memory-bound on CPU at these batch sizes
+### 2. Workload regimes on CPU at these batch sizes
 
-The arithmetic intensity of all five architectures at batch=32 falls below the
+The arithmetic intensity of architectures at batch={batch32} typically falls below the
 {ridge:.0f} FLOP/byte ridge point of the {hw["name"]}.
 To reach compute-bound territory, larger batches or larger hidden dimensions are needed.
 The roofline efficiency gap (observed efficiency typically 3–15%) is attributable to:

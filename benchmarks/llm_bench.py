@@ -9,9 +9,10 @@ Evaluates operational regimes of Large Language Models:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from neural_cost import CostEstimate, HardwareSpec, analyze_gap
+from neural_cost import HardwareSpec
 from neural_cost.hardware_detect import detect_hardware
 
 
@@ -205,6 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embed-dim", type=int, default=1024, help="Embedding hidden dimension")
     parser.add_argument("--num-heads", type=int, default=8, help="Attention heads")
     parser.add_argument("--quick", action="store_true", help="Quick run")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=REPO_ROOT / "benchmarks" / "results" / "llm_benchmark_data.json",
+        help="Path to save JSON results (default: benchmarks/results/llm_benchmark_data.json)",
+    )
     return parser
 
 
@@ -220,12 +227,31 @@ def main() -> None:
     print(f"{'Phase':<10} {'Prompt':<8} {'Batch':<6} {'Latency':<12} {'Throughput':<18} {'Traffic / Util':<20}")
     print("-" * 80)
 
+    prefills = []
+    decodes = []
+
     for p_len in lengths:
         p_met = benchmark_llm_prefill(prompt_len=p_len, batch_size=args.batch_size, embed_dim=args.embed_dim, num_heads=args.num_heads)
+        prefills.append(p_met)
         print(f"{'Prefill':<10} {p_met.prompt_len:<8} {p_met.batch_size:<6} {p_met.ttft_ms:8.2f} ms  {p_met.achieved_gflops:8.1f} GFLOP/s   {p_met.throughput_tokens_s:8.0f} tok/s")
 
         d_met = benchmark_llm_decode(prompt_len=p_len, gen_tokens=args.gen_tokens, batch_size=args.batch_size, embed_dim=args.embed_dim, num_heads=args.num_heads, hardware=hardware)
+        decodes.append(d_met)
         print(f"{'Decode':<10} {d_met.prompt_len:<8} {d_met.batch_size:<6} {d_met.latency_ms:8.2f} ms  {d_met.tokens_per_sec:8.1f} tok/s      {d_met.achieved_gbw:6.1f} GB/s ({d_met.memory_bw_util:.1%})")
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "hardware": {
+                "name": hardware.name,
+                "peak_flops": hardware.peak_flops,
+                "memory_bandwidth": hardware.memory_bandwidth,
+            },
+            "prefill": [asdict(p) for p in prefills],
+            "decode": [asdict(d) for d in decodes],
+        }
+        args.output.write_text(json.dumps(payload, indent=2))
+        print(f"\nSaved {len(prefills) + len(decodes)} LLM records → {args.output}")
 
 
 if __name__ == "__main__":
