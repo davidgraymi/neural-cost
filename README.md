@@ -84,7 +84,10 @@ flowchart LR
 | `attention` | Multi-head self-attention (QKV projections + softmax + output) |
 | `elementwise` | Point-wise ops (ReLU, exp, tanh, …) |
 | `softmax` / `layernorm` / `batchnorm` | Normalisation ops |
+| `rmsnorm` | Root Mean Square normalisation |
+| `swiglu` | Gated linear unit with Swish activation |
 | `pooling` | Max / average / global-average pooling |
+| `moe` | Mixture-of-Experts sparse routing and expert FFN execution |
 | `custom` | Caller-supplied explicit FLOP count |
 
 Adapters automatically emit the right kind for each layer type:
@@ -137,6 +140,68 @@ print(profile.memory.training_minimum_bytes)
 The minimum activation bound is the largest output tensor.  The conservative
 bound assumes all forward outputs remain live, so real allocator telemetry is
 the source of truth for physical VRAM use.
+
+## Mixture-of-Experts (MoE) & Speculative Decoding
+
+`neural-cost` provides specialized theoretical models for modern LLM serving paradigms:
+
+### MoE Sparse Routing & Memory Thrashing
+
+Sparse MoE architectures (e.g. Mixtral, DeepSeek) activate only $k$ of $E$ experts per token. While compute scales with $k$, token-by-token autoregressive decoding requires loading unique experts from DRAM into registers/SRAM, producing severe memory-bandwidth pressure at small batch sizes:
+
+```python
+from neural_cost import estimate_moe, analyze_moe_gap, detect_hardware
+
+# Mixtral 8x7B layer: 8 experts, top-2 routing, SwiGLU FFN
+est = estimate_moe(
+    batch_size=1,
+    seq_len=1,
+    embed_dim=4096,
+    expert_hidden_dim=14336,
+    num_experts=8,
+    top_k=2,
+    expert_type="swiglu",
+    is_decode=True,
+)
+
+print(f"Total params: {est.total_parameters:,} | Active params: {est.active_parameters:,}")
+print(f"Expected loaded experts at B=1: {est.expected_loaded_experts:.1f}")
+
+hardware, _ = detect_hardware()
+gap = analyze_moe_gap(est, hardware)
+print(gap.render())
+```
+
+### Speculative Decoding Breakeven Analysis
+
+Speculative decoding pairs a fast draft model with a parallel target model verification step. `neural-cost` computes the analytical breakeven acceptance rate ($\alpha^*$) required to achieve wall-clock speedup on target hardware:
+
+```python
+from neural_cost import (
+    CostEstimate,
+    detect_hardware,
+    estimate_speculative_decoding,
+    analyze_speculative_decoding,
+)
+
+hardware, _ = detect_hardware()
+
+# Target (70B) vs Draft (1B) step costs
+draft_decode = CostEstimate(flops=2e9, read_bytes=2e9, write_bytes=2048, operations=1)
+target_verify = CostEstimate(flops=560e9, read_bytes=140e9, write_bytes=16384, operations=1)
+target_decode = CostEstimate(flops=140e9, read_bytes=140e9, write_bytes=4096, operations=1)
+
+analysis = analyze_speculative_decoding(
+    draft_decode_cost=draft_decode,
+    target_verify_cost=target_verify,
+    target_decode_cost=target_decode,
+    hardware=hardware,
+    gamma=4,
+    acceptance_rate=0.75,
+)
+
+print(analysis.render())
+```
 
 ## Hardware detection
 

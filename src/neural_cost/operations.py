@@ -21,6 +21,7 @@ OperationKind = Literal[
     "embedding",
     "attention",
     "swiglu",
+    "moe",
 ]
 
 

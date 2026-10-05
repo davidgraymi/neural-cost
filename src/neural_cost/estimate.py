@@ -159,6 +159,60 @@ def estimate_operation(operation: Operation) -> CostEstimate:
         if not isinstance(kernel_size, tuple) or len(kernel_size) != 2:
             raise ValueError("pooling requires attrs['kernel_size'] as (kH, kW)")
         flops = numel(operation.output) * kernel_size[0] * kernel_size[1]
+    elif kind == "moe":
+        # Mixture-of-Experts layer
+        out_shape = operation.output
+        embed_dim = out_shape[-1]
+        n_tokens = numel(out_shape[:-1]) if len(out_shape) > 1 else 1
+
+        num_experts = int(operation.attrs.get("num_experts", 8))
+        top_k = int(operation.attrs.get("top_k", 2))
+        expert_hidden_dim = int(operation.attrs.get("expert_hidden_dim", 4 * embed_dim))
+        shared_experts = int(operation.attrs.get("shared_experts", 0))
+        expert_type = str(operation.attrs.get("expert_type", "swiglu")).lower()
+        is_decode = bool(operation.attrs.get("is_decode", False))
+
+        if num_experts <= 0 or top_k <= 0 or top_k > num_experts:
+            raise ValueError(f"invalid experts configuration: {num_experts=}, {top_k=}")
+
+        # Router: Linear projection from embed_dim to num_experts
+        router_flops = 2 * n_tokens * embed_dim * num_experts
+        router_params = embed_dim * num_experts
+
+        # Single expert parameter & FLOP count
+        if expert_type == "swiglu":
+            # Gate (D -> H), Up (D -> H), Down (H -> D)
+            single_expert_params = 3 * embed_dim * expert_hidden_dim
+            single_expert_flops = 6 * embed_dim * expert_hidden_dim + 3 * expert_hidden_dim
+        else:
+            # Standard MLP: Up (D -> H), Down (H -> D)
+            single_expert_params = 2 * embed_dim * expert_hidden_dim
+            single_expert_flops = 4 * embed_dim * expert_hidden_dim + 1 * expert_hidden_dim
+
+        active_per_token = top_k + shared_experts
+        expert_flops = n_tokens * active_per_token * single_expert_flops
+        combine_flops = n_tokens * top_k * embed_dim
+        flops = router_flops + expert_flops + combine_flops
+
+        total_experts = num_experts + shared_experts
+        total_params = router_params + total_experts * single_expert_params
+
+        if is_decode:
+            # Under decode (token-by-token generation), model expected unique experts loaded
+            p_not_picked = (1.0 - (top_k / num_experts)) ** n_tokens if num_experts > 0 else 0.0
+            expected_loaded = num_experts * (1.0 - p_not_picked)
+            loaded_params = int(
+                router_params + (expected_loaded + shared_experts) * single_expert_params
+            )
+            compulsory_param_bytes = loaded_params * operation.dtype_bytes
+        else:
+            compulsory_param_bytes = int(
+                operation.attrs.get("parameter_bytes", total_params * operation.dtype_bytes)
+            )
+
+        # Override read_bytes to incorporate compulsory parameter traffic
+        token_read_bytes = sum(numel(shape) for shape in operation.inputs) * operation.dtype_bytes
+        read_bytes = token_read_bytes + compulsory_param_bytes
     else:  # Defensive in case a caller bypasses static typing.
         raise ValueError(f"unsupported operation kind: {kind}")
     return CostEstimate(flops, read_bytes, write_bytes, 1)
@@ -292,3 +346,243 @@ def estimate_adamw_traffic(num_parameters: int, dtype_bytes: int = 4) -> int:
       Total DRAM bytes: (4P + 3P) * dtype_bytes = 7 * P * dtype_bytes.
     """
     return 7 * int(num_parameters) * int(dtype_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class MoECostEstimate:
+    """Theoretical cost and memory traffic breakdown for a Mixture-of-Experts layer."""
+
+    total_flops: int
+    router_flops: int
+    expert_flops: int
+    combine_flops: int
+    total_parameters: int
+    active_parameters: int
+    expected_loaded_experts: float
+    parameter_bytes: int
+    active_parameter_bytes: int
+    compulsory_param_read_bytes: int
+    token_read_bytes: int
+    token_write_bytes: int
+    total_bytes: int
+    arithmetic_intensity: float
+    is_decode: bool
+
+
+def estimate_moe(
+    batch_size: int,
+    seq_len: int,
+    embed_dim: int,
+    expert_hidden_dim: int,
+    num_experts: int = 8,
+    top_k: int = 2,
+    shared_experts: int = 0,
+    expert_type: str = "swiglu",
+    dtype_bytes: int = 2,
+    is_decode: bool = False,
+) -> MoECostEstimate:
+    """Model compute, parameter footprint, and compulsory traffic for an MoE layer.
+
+    Parameters:
+        batch_size: Batch dimension (number of independent sequences).
+        seq_len: Sequence length (1 for decode, >1 for prefill).
+        embed_dim: Model hidden dimension (e.g., 4096).
+        expert_hidden_dim: Intermediate hidden dimension of each expert FFN (e.g., 14336).
+        num_experts: Number of routed experts in the pool (e.g., 8, 64).
+        top_k: Number of routed experts selected per token (e.g., 2, 8).
+        shared_experts: Number of shared experts always executed for all tokens (e.g., DeepSeek).
+        expert_type: 'swiglu' (3 linear projections) or 'mlp' (2 linear projections).
+        dtype_bytes: Bytes per parameter and activation element (e.g., 2 for FP16/BF16).
+        is_decode: If True, models token-by-token generation with probabilistic expert loading.
+    """
+    if batch_size <= 0 or seq_len <= 0 or embed_dim <= 0 or expert_hidden_dim <= 0:
+        raise ValueError("dimensions must be positive")
+    if num_experts <= 0 or top_k <= 0 or top_k > num_experts:
+        raise ValueError(f"invalid experts configuration: {num_experts=}, {top_k=}")
+    if shared_experts < 0:
+        raise ValueError("shared_experts cannot be negative")
+    if dtype_bytes <= 0:
+        raise ValueError("dtype_bytes must be positive")
+
+    n_tokens = batch_size * seq_len
+    norm_type = expert_type.lower()
+    if norm_type == "swiglu":
+        single_expert_params = 3 * embed_dim * expert_hidden_dim
+        single_expert_flops = 6 * embed_dim * expert_hidden_dim + 3 * expert_hidden_dim
+    else:
+        single_expert_params = 2 * embed_dim * expert_hidden_dim
+        single_expert_flops = 4 * embed_dim * expert_hidden_dim + 1 * expert_hidden_dim
+
+    router_params = embed_dim * num_experts
+    total_experts = num_experts + shared_experts
+    total_params = router_params + total_experts * single_expert_params
+    total_param_bytes = total_params * dtype_bytes
+
+    active_params_per_token = router_params + (top_k + shared_experts) * single_expert_params
+    active_param_bytes = active_params_per_token * dtype_bytes
+
+    router_flops = 2 * n_tokens * embed_dim * num_experts
+    expert_flops = n_tokens * (top_k + shared_experts) * single_expert_flops
+    combine_flops = n_tokens * top_k * embed_dim
+    total_flops = router_flops + expert_flops + combine_flops
+
+    if is_decode:
+        # Over n_tokens, probability an expert is never selected:
+        p_not_picked = (1.0 - (top_k / num_experts)) ** n_tokens if num_experts > 0 else 0.0
+        expected_loaded = num_experts * (1.0 - p_not_picked)
+        compulsory_param_bytes = int(
+            (router_params + (expected_loaded + shared_experts) * single_expert_params)
+            * dtype_bytes
+        )
+    else:
+        expected_loaded = float(num_experts)
+        compulsory_param_bytes = total_param_bytes
+
+    token_read_bytes = n_tokens * embed_dim * dtype_bytes
+    token_write_bytes = n_tokens * embed_dim * dtype_bytes
+    total_bytes = token_read_bytes + compulsory_param_bytes + token_write_bytes
+    arithmetic_intensity = total_flops / total_bytes if total_bytes > 0 else 0.0
+
+    return MoECostEstimate(
+        total_flops=total_flops,
+        router_flops=router_flops,
+        expert_flops=expert_flops,
+        combine_flops=combine_flops,
+        total_parameters=total_params,
+        active_parameters=active_params_per_token,
+        expected_loaded_experts=expected_loaded,
+        parameter_bytes=total_param_bytes,
+        active_parameter_bytes=active_param_bytes,
+        compulsory_param_read_bytes=compulsory_param_bytes,
+        token_read_bytes=token_read_bytes,
+        token_write_bytes=token_write_bytes,
+        total_bytes=total_bytes,
+        arithmetic_intensity=arithmetic_intensity,
+        is_decode=is_decode,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SpeculativeCostEstimate:
+    """Theoretical cost, speedup, and acceptance threshold for speculative decoding."""
+
+    gamma: int
+    acceptance_rate: float
+    expected_tokens_per_step: float
+    draft_decode_flops: int
+    target_verify_flops: int
+    total_step_flops: int
+    draft_decode_bytes: int
+    target_verify_bytes: int
+    total_step_bytes: int
+    baseline_target_flops: int
+    baseline_target_bytes: int
+    speedup_flops: float
+    speedup_bytes: float
+    breakeven_acceptance_rate_bytes: float
+    breakeven_acceptance_rate_flops: float
+
+
+def _expected_speculative_tokens(gamma: int, alpha: float) -> float:
+    """Compute expected number of accepted + bonus tokens: E[N] = (1 - alpha^(gamma + 1)) / (1 - alpha)."""
+    if gamma <= 0:
+        return 1.0
+    alpha = max(0.0, min(1.0, float(alpha)))
+    if abs(alpha - 1.0) < 1e-9:
+        return float(1 + gamma)
+    return (1.0 - (alpha ** (gamma + 1))) / (1.0 - alpha)
+
+
+def _find_breakeven_alpha(gamma: int, cost_ratio: float) -> float:
+    """Solve for alpha* in [0, 1] where E[N(alpha*)] == cost_ratio.
+
+    If cost_ratio <= 1.0, breakeven is 0.0 (always beneficial).
+    If cost_ratio > 1 + gamma, breakeven is unattainable (returns inf).
+    """
+    if cost_ratio <= 1.0:
+        return 0.0
+    max_tokens = float(1 + gamma)
+    if cost_ratio > max_tokens:
+        return float("inf")
+
+    low, high = 0.0, 1.0
+    for _ in range(30):
+        mid = (low + high) / 2.0
+        val = _expected_speculative_tokens(gamma, mid)
+        if val < cost_ratio:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2.0
+
+
+def estimate_speculative_decoding(
+    draft_decode_cost: CostEstimate,
+    target_verify_cost: CostEstimate,
+    target_decode_cost: CostEstimate,
+    gamma: int = 4,
+    acceptance_rate: float = 0.7,
+) -> SpeculativeCostEstimate:
+    """Estimate speculative decoding compute, memory traffic, and breakeven acceptance rate.
+
+    Args:
+        draft_decode_cost: Cost of generating 1 token autoregressively with draft model.
+        target_verify_cost: Cost of parallel verification of gamma tokens in target model.
+        target_decode_cost: Cost of generating 1 token autoregressively with target model (baseline).
+        gamma: Lookahead speculation depth (number of candidate tokens proposed).
+        acceptance_rate: Mean probability alpha of accepting a draft token.
+    """
+    if gamma <= 0:
+        raise ValueError("gamma (speculation depth) must be positive")
+    if not (0.0 <= acceptance_rate <= 1.0):
+        raise ValueError("acceptance_rate must be between 0.0 and 1.0")
+
+    e_tokens = _expected_speculative_tokens(gamma, acceptance_rate)
+
+    draft_total_flops = gamma * draft_decode_cost.flops
+    total_step_flops = draft_total_flops + target_verify_cost.flops
+    baseline_flops_for_e_tokens = int(e_tokens * target_decode_cost.flops)
+    speedup_flops = (
+        (e_tokens * target_decode_cost.flops) / total_step_flops if total_step_flops > 0 else 0.0
+    )
+
+    draft_total_bytes = gamma * draft_decode_cost.total_bytes
+    total_step_bytes = draft_total_bytes + target_verify_cost.total_bytes
+    baseline_bytes_for_e_tokens = int(e_tokens * target_decode_cost.total_bytes)
+    speedup_bytes = (
+        (e_tokens * target_decode_cost.total_bytes) / total_step_bytes
+        if total_step_bytes > 0
+        else 0.0
+    )
+
+    ratio_flops = (
+        total_step_flops / target_decode_cost.flops
+        if target_decode_cost.flops > 0
+        else float("inf")
+    )
+    ratio_bytes = (
+        total_step_bytes / target_decode_cost.total_bytes
+        if target_decode_cost.total_bytes > 0
+        else float("inf")
+    )
+
+    breakeven_flops = _find_breakeven_alpha(gamma, ratio_flops)
+    breakeven_bytes = _find_breakeven_alpha(gamma, ratio_bytes)
+
+    return SpeculativeCostEstimate(
+        gamma=gamma,
+        acceptance_rate=acceptance_rate,
+        expected_tokens_per_step=e_tokens,
+        draft_decode_flops=draft_total_flops,
+        target_verify_flops=target_verify_cost.flops,
+        total_step_flops=total_step_flops,
+        draft_decode_bytes=draft_total_bytes,
+        target_verify_bytes=target_verify_cost.total_bytes,
+        total_step_bytes=total_step_bytes,
+        baseline_target_flops=baseline_flops_for_e_tokens,
+        baseline_target_bytes=baseline_bytes_for_e_tokens,
+        speedup_flops=speedup_flops,
+        speedup_bytes=speedup_bytes,
+        breakeven_acceptance_rate_bytes=breakeven_bytes,
+        breakeven_acceptance_rate_flops=breakeven_flops,
+    )
