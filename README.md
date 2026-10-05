@@ -203,6 +203,61 @@ analysis = analyze_speculative_decoding(
 print(analysis.render())
 ```
 
+### PagedAttention & KV Cache Memory Modeling
+
+PagedAttention (vLLM) allocates non-contiguous fixed-size blocks (e.g. 16 tokens) to eliminate external fragmentation and over-reservation. `neural-cost` models exact block allocation, compulsory vs wasted fragmentation bytes, prefix cache sharing, and concurrency capacity multipliers:
+
+```python
+from neural_cost import estimate_paged_attention, analyze_paged_attention_gap
+
+# 32 concurrent requests with heterogeneous context lengths
+context_lens = [256 + (i * 32) for i in range(32)]
+paged_cost = estimate_paged_attention(
+    batch_size=32,
+    context_lens=context_lens,
+    embed_dim=4096,
+    num_heads=32,
+    num_kv_heads=8,  # Grouped-Query Attention (GQA)
+    block_size=16,
+    num_layers=32,
+    max_model_len=4096,
+    shared_prefix_tokens=128,  # 128-token shared system prompt
+)
+
+gap = analyze_paged_attention_gap(paged_cost)
+print(gap.render())
+# Reports VRAM saved vs contiguous max reservation, fragmentation ratio, and concurrency gain
+```
+
+### Continuous Batching Iteration Cost Simulator
+
+Modern serving engines (vLLM, TGI, TensorRT-LLM) use iteration-level scheduling (continuous/in-flight batching) mixing memory-bound autoregressive decodes and compute-heavy chunked prefills in the same step. `neural-cost` simulates the unified arithmetic intensity and lower-bound execution time across model weights and KV caches:
+
+```python
+from neural_cost import (
+    estimate_continuous_batch_iteration,
+    analyze_continuous_batch_iteration,
+    detect_hardware,
+)
+
+hardware, _ = detect_hardware()
+
+# Mixed iteration: 64 decode streams + one 512-token chunked prefill
+iteration = estimate_continuous_batch_iteration(
+    decode_context_lens=[1024] * 64,
+    prefill_chunk_lens=[512],
+    embed_dim=4096,
+    num_heads=32,
+    num_kv_heads=8,
+    num_layers=32,
+    hardware=hardware,
+)
+
+gap = analyze_continuous_batch_iteration(iteration, hardware)
+print(gap.render())
+# Identifies compute vs memory bottleneck and optimal prefill chunk sizing to reach the roofline ridge
+```
+
 ## Hardware detection
 
 Auto-detection via `detect_hardware()` returns a `(HardwareSpec, DetectionResult)` tuple

@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from math import prod
 
+from .hardware import HardwareSpec
 from .operations import Operation, numel
 
 
@@ -213,6 +214,48 @@ def estimate_operation(operation: Operation) -> CostEstimate:
         # Override read_bytes to incorporate compulsory parameter traffic
         token_read_bytes = sum(numel(shape) for shape in operation.inputs) * operation.dtype_bytes
         read_bytes = token_read_bytes + compulsory_param_bytes
+    elif kind == "paged_attention":
+        out_shape = operation.output
+        embed_dim = out_shape[-1]
+        n_tokens = numel(out_shape[:-1]) if len(out_shape) > 1 else 1
+
+        block_size = int(operation.attrs.get("block_size", 16))
+        context_len = int(
+            operation.attrs.get("context_len", operation.attrs.get("prompt_len", 128))
+        )
+        num_heads = int(operation.attrs.get("num_heads", 8))
+        num_kv_heads = int(operation.attrs.get("num_kv_heads", num_heads))
+        head_dim = int(operation.attrs.get("head_dim", embed_dim // max(num_heads, 1)))
+        num_layers = int(operation.attrs.get("num_layers", 1))
+
+        if block_size <= 0 or context_len <= 0:
+            raise ValueError("block_size and context_len must be positive")
+
+        attn_flops = 4 * n_tokens * context_len * (num_heads * head_dim) * num_layers
+        softmax_flops = 5 * n_tokens * num_heads * context_len * num_layers
+        include_projections = bool(operation.attrs.get("include_projections", True))
+        proj_flops = (
+            4 * 2 * n_tokens * embed_dim * embed_dim * num_layers if include_projections else 0
+        )
+        flops = attn_flops + softmax_flops + proj_flops
+
+        num_blocks = (context_len + block_size - 1) // block_size
+        kv_head_dim = num_kv_heads * head_dim
+        allocated_kv_bytes = (
+            n_tokens
+            * num_blocks
+            * block_size
+            * 2
+            * kv_head_dim
+            * num_layers
+            * operation.dtype_bytes
+        )
+        block_table_bytes = n_tokens * num_blocks * 8
+
+        token_read_bytes = sum(numel(shape) for shape in operation.inputs) * operation.dtype_bytes
+        read_bytes = token_read_bytes + allocated_kv_bytes + block_table_bytes
+        new_kv_write = n_tokens * 2 * kv_head_dim * num_layers * operation.dtype_bytes
+        write_bytes = numel(operation.output) * operation.dtype_bytes + new_kv_write
     else:  # Defensive in case a caller bypasses static typing.
         raise ValueError(f"unsupported operation kind: {kind}")
     return CostEstimate(flops, read_bytes, write_bytes, 1)
@@ -585,4 +628,253 @@ def estimate_speculative_decoding(
         speedup_bytes=speedup_bytes,
         breakeven_acceptance_rate_bytes=breakeven_bytes,
         breakeven_acceptance_rate_flops=breakeven_flops,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PagedAttentionCostEstimate:
+    """Theoretical cost, fragmentation, and memory metrics for PagedAttention."""
+
+    total_flops: int
+    compulsory_kv_bytes: int
+    allocated_kv_bytes: int
+    fragmentation_bytes: int
+    fragmentation_ratio: float
+    block_size: int
+    total_blocks: int
+    shared_prefix_blocks: int
+    shared_saved_bytes: int
+    block_table_bytes: int
+    total_read_bytes: int
+    total_write_bytes: int
+    total_bytes: int
+    arithmetic_intensity: float
+
+
+def estimate_paged_attention(
+    batch_size: int,
+    context_lens: int | tuple[int, ...] | list[int],
+    embed_dim: int,
+    num_heads: int,
+    num_kv_heads: int | None = None,
+    block_size: int = 16,
+    num_layers: int = 1,
+    dtype_bytes: int = 2,
+    shared_prefix_len: int = 0,
+    include_projections: bool = True,
+) -> PagedAttentionCostEstimate:
+    """Calculate PagedAttention memory allocation, fragmentation, and traffic.
+
+    Parameters:
+        batch_size: Number of concurrent sequences.
+        context_lens: Either a single integer context length (for uniform sequences)
+                      or a tuple of context lengths per sequence.
+        embed_dim: Total embedding dimension (e.g. 4096).
+        num_heads: Number of Query attention heads.
+        num_kv_heads: Number of Key/Value attention heads (for GQA/MQA). Defaults to num_heads.
+        block_size: Number of tokens per physical block/page (typically 16 or 32).
+        num_layers: Number of Transformer layers (default 1).
+        dtype_bytes: Bytes per element (e.g., 2 for FP16/BF16, 1 for FP8).
+        shared_prefix_len: Length of common system prompt/prefix shared across all sequences.
+        include_projections: Whether to include QKV and output projection FLOPs.
+    """
+    if batch_size <= 0 or embed_dim <= 0 or num_heads <= 0 or block_size <= 0:
+        raise ValueError("batch_size, embed_dim, num_heads, and block_size must be positive")
+    if num_layers <= 0 or dtype_bytes <= 0:
+        raise ValueError("num_layers and dtype_bytes must be positive")
+    if shared_prefix_len < 0:
+        raise ValueError("shared_prefix_len cannot be negative")
+
+    if isinstance(context_lens, int):
+        if context_lens <= 0:
+            raise ValueError("context_lens must be positive")
+        c_lens = [context_lens] * batch_size
+    else:
+        c_lens = list(context_lens)
+        if len(c_lens) != batch_size:
+            raise ValueError(f"expected {batch_size} context lengths, got {len(c_lens)}")
+        if any(cl <= 0 for cl in c_lens):
+            raise ValueError("all context lengths must be positive")
+
+    kv_heads = num_heads if num_kv_heads is None else int(num_kv_heads)
+    if kv_heads <= 0 or kv_heads > num_heads:
+        raise ValueError(f"invalid num_kv_heads={kv_heads}; must be between 1 and num_heads")
+
+    head_dim = embed_dim // num_heads
+    kv_head_dim = kv_heads * head_dim
+    bytes_per_token_kv = 2 * kv_head_dim * num_layers * dtype_bytes
+    block_bytes = block_size * bytes_per_token_kv
+
+    # Calculate allocated blocks per sequence
+    blocks_per_seq = [(cl + block_size - 1) // block_size for cl in c_lens]
+    raw_total_blocks = sum(blocks_per_seq)
+
+    # Prefix sharing (Prompt / System Prompt caching)
+    shared_blocks = shared_prefix_len // block_size if shared_prefix_len > 0 else 0
+    saved_blocks = (batch_size - 1) * shared_blocks if (shared_blocks > 0 and batch_size > 1) else 0
+    effective_total_blocks = max(1, raw_total_blocks - saved_blocks)
+
+    allocated_kv_bytes = effective_total_blocks * block_bytes
+    shared_saved_bytes = saved_blocks * block_bytes
+
+    # Compulsory KV bytes: exactly useful tokens across sequences
+    raw_compulsory_kv = sum(cl * bytes_per_token_kv for cl in c_lens)
+    saved_compulsory_tokens = (
+        (batch_size - 1) * shared_prefix_len if (shared_prefix_len > 0 and batch_size > 1) else 0
+    )
+    compulsory_kv_bytes = max(0, raw_compulsory_kv - saved_compulsory_tokens * bytes_per_token_kv)
+
+    fragmentation_bytes = max(0, allocated_kv_bytes - compulsory_kv_bytes)
+    fragmentation_ratio = (
+        fragmentation_bytes / allocated_kv_bytes if allocated_kv_bytes > 0 else 0.0
+    )
+
+    block_table_bytes = effective_total_blocks * 8
+
+    total_tokens = batch_size
+    attn_flops = 4 * sum(cl for cl in c_lens) * (num_heads * head_dim) * num_layers
+    softmax_flops = 5 * sum(cl for cl in c_lens) * num_heads * num_layers
+    proj_flops = (
+        4 * 2 * total_tokens * embed_dim * embed_dim * num_layers if include_projections else 0
+    )
+    total_flops = attn_flops + softmax_flops + proj_flops
+
+    q_read_bytes = total_tokens * embed_dim * dtype_bytes
+    total_read_bytes = q_read_bytes + allocated_kv_bytes + block_table_bytes
+
+    o_write_bytes = total_tokens * embed_dim * dtype_bytes
+    new_kv_write_bytes = total_tokens * bytes_per_token_kv
+    total_write_bytes = o_write_bytes + new_kv_write_bytes
+
+    total_bytes = total_read_bytes + total_write_bytes
+    arithmetic_intensity = total_flops / total_bytes if total_bytes > 0 else 0.0
+
+    return PagedAttentionCostEstimate(
+        total_flops=total_flops,
+        compulsory_kv_bytes=compulsory_kv_bytes,
+        allocated_kv_bytes=allocated_kv_bytes,
+        fragmentation_bytes=fragmentation_bytes,
+        fragmentation_ratio=fragmentation_ratio,
+        block_size=block_size,
+        total_blocks=effective_total_blocks,
+        shared_prefix_blocks=shared_blocks,
+        shared_saved_bytes=shared_saved_bytes,
+        block_table_bytes=block_table_bytes,
+        total_read_bytes=total_read_bytes,
+        total_write_bytes=total_write_bytes,
+        total_bytes=total_bytes,
+        arithmetic_intensity=arithmetic_intensity,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousBatchIterationEstimate:
+    """Theoretical compute, memory traffic, and operational regime for a continuous batching step."""
+
+    num_decode_requests: int
+    num_prefill_requests: int
+    decode_tokens: int
+    prefill_tokens: int
+    total_tokens: int
+    model_weight_bytes: int
+    kv_cache_read_bytes: int
+    kv_cache_write_bytes: int
+    activation_bytes: int
+    total_bytes: int
+    total_flops: int
+    decode_flops: int
+    prefill_flops: int
+    arithmetic_intensity: float
+    is_compute_bound: bool
+    hardware_lower_bound_seconds: float | None = None
+
+
+def estimate_continuous_batch_iteration(
+    decode_context_lens: tuple[int, ...] | list[int] = (),
+    prefill_chunk_lens: tuple[int, ...] | list[int] = (),
+    embed_dim: int = 4096,
+    num_heads: int = 32,
+    num_kv_heads: int | None = None,
+    intermediate_dim: int | None = None,
+    num_layers: int = 32,
+    dtype_bytes: int = 2,
+    hardware: HardwareSpec | None = None,
+) -> ContinuousBatchIterationEstimate:
+    """Model a single iteration of continuous batching with co-located prefill and decode.
+
+    In continuous batching (e.g., Orca, vLLM, Sarathi-Serve):
+    - Decode requests each execute 1 token step reading historical KV cache.
+    - Chunked prefill requests process chunks of prompt tokens with high arithmetic intensity.
+    - Model weights are read once per iteration from DRAM and amortized across all tokens.
+    """
+    n_decode = len(decode_context_lens)
+    n_prefill = len(prefill_chunk_lens)
+    if n_decode == 0 and n_prefill == 0:
+        raise ValueError("iteration must contain at least one decode or prefill request")
+    if embed_dim <= 0 or num_heads <= 0 or num_layers <= 0 or dtype_bytes <= 0:
+        raise ValueError("model parameters must be positive")
+
+    kv_heads = num_heads if num_kv_heads is None else int(num_kv_heads)
+    h_dim = intermediate_dim if intermediate_dim is not None else int(2.7 * embed_dim)
+    head_dim = embed_dim // num_heads
+
+    decode_tokens = n_decode
+    prefill_tokens = sum(prefill_chunk_lens)
+    total_tokens = decode_tokens + prefill_tokens
+
+    # Standard Llama-style SwiGLU block params:
+    attn_params_per_layer = embed_dim * embed_dim * 2 + 2 * embed_dim * (kv_heads * head_dim)
+    ffn_params_per_layer = 3 * embed_dim * h_dim
+    norm_params_per_layer = 2 * embed_dim
+    params_per_layer = attn_params_per_layer + ffn_params_per_layer + norm_params_per_layer
+    total_model_params = num_layers * params_per_layer
+    model_weight_bytes = total_model_params * dtype_bytes
+
+    kv_bytes_per_token = 2 * (kv_heads * head_dim) * num_layers * dtype_bytes
+    kv_cache_read_bytes = sum(cl * kv_bytes_per_token for cl in decode_context_lens)
+    kv_cache_write_bytes = total_tokens * kv_bytes_per_token
+
+    activation_bytes = 2 * total_tokens * embed_dim * dtype_bytes
+    total_bytes = model_weight_bytes + kv_cache_read_bytes + kv_cache_write_bytes + activation_bytes
+
+    linear_flops = 2 * total_tokens * total_model_params
+    decode_attn_flops = (
+        4 * sum(cl for cl in decode_context_lens) * (num_heads * head_dim) * num_layers
+    )
+    decode_flops = 2 * decode_tokens * total_model_params + decode_attn_flops
+
+    prefill_attn_flops = (
+        4 * sum(cl * cl for cl in prefill_chunk_lens) * (num_heads * head_dim) * num_layers
+    )
+    prefill_flops = 2 * prefill_tokens * total_model_params + prefill_attn_flops
+
+    total_flops = linear_flops + decode_attn_flops + prefill_attn_flops
+    arithmetic_intensity = total_flops / total_bytes if total_bytes > 0 else 0.0
+
+    lower_bound_s = None
+    if hardware is not None:
+        t_comp = total_flops / hardware.peak_flops
+        t_mem = total_bytes / hardware.memory_bandwidth
+        lower_bound_s = max(t_comp, t_mem)
+        is_compute_bound = t_comp >= t_mem
+    else:
+        is_compute_bound = arithmetic_intensity >= 50.0
+
+    return ContinuousBatchIterationEstimate(
+        num_decode_requests=n_decode,
+        num_prefill_requests=n_prefill,
+        decode_tokens=decode_tokens,
+        prefill_tokens=prefill_tokens,
+        total_tokens=total_tokens,
+        model_weight_bytes=model_weight_bytes,
+        kv_cache_read_bytes=kv_cache_read_bytes,
+        kv_cache_write_bytes=kv_cache_write_bytes,
+        activation_bytes=activation_bytes,
+        total_bytes=total_bytes,
+        total_flops=total_flops,
+        decode_flops=decode_flops,
+        prefill_flops=prefill_flops,
+        arithmetic_intensity=arithmetic_intensity,
+        is_compute_bound=is_compute_bound,
+        hardware_lower_bound_seconds=lower_bound_s,
     )

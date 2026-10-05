@@ -2,9 +2,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .estimate import (
+    ContinuousBatchIterationEstimate,
     CostEstimate,
     FusedCostEstimate,
     MoECostEstimate,
+    PagedAttentionCostEstimate,
     estimate_fused_operations,
     estimate_operation,
 )
@@ -529,5 +531,163 @@ def analyze_moe_gap(
         efficiency=efficiency,
         active_to_total_ratio=active_ratio,
         loaded_to_total_ratio=loaded_ratio,
+        findings=tuple(findings),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PagedAttentionGapAnalysis:
+    """Memory overhead and concurrency gain analysis for PagedAttention vs contiguous allocation."""
+
+    cost: PagedAttentionCostEstimate
+    unpaged_contiguous_bytes: int
+    paged_allocated_bytes: int
+    memory_saved_bytes: int
+    memory_savings_ratio: float
+    concurrency_multiplier: float
+    fragmentation_ratio: float
+    findings: tuple[str, ...]
+
+    def render(self) -> str:
+        lines = [
+            f"PagedAttention Gap Analysis (block_size={self.cost.block_size})",
+            f"  unpaged contiguous memory: {self.unpaged_contiguous_bytes / 1e6:.2f} MB",
+            f"  paged allocated memory: {self.paged_allocated_bytes / 1e6:.2f} MB",
+            f"  memory saved: {self.memory_saved_bytes / 1e6:.2f} MB ({self.memory_savings_ratio:.1%} reduction)",
+            f"  concurrency boost: {self.concurrency_multiplier:.2f}x capacity",
+            f"  internal fragmentation: {self.cost.fragmentation_bytes / 1e3:.1f} KB ({self.fragmentation_ratio:.1%})",
+        ]
+        if self.cost.shared_prefix_blocks > 0:
+            lines.append(
+                f"  prefix sharing: {self.cost.shared_prefix_blocks} blocks shared ({self.cost.shared_saved_bytes / 1e6:.2f} MB deduplicated)"
+            )
+        lines.extend(f"  finding: {f}" for f in self.findings)
+        return "\n".join(lines)
+
+
+def analyze_paged_attention_gap(
+    paged_cost: PagedAttentionCostEstimate,
+    max_context_len: int,
+    batch_size: int,
+    embed_dim: int,
+    num_heads: int,
+    num_kv_heads: int | None = None,
+    num_layers: int = 1,
+    dtype_bytes: int = 2,
+) -> PagedAttentionGapAnalysis:
+    """Analyze memory savings and concurrency gains of PagedAttention vs traditional reservation."""
+    kv_heads = num_heads if num_kv_heads is None else int(num_kv_heads)
+    head_dim = embed_dim // num_heads
+    bytes_per_token = 2 * (kv_heads * head_dim) * num_layers * dtype_bytes
+
+    unpaged_contiguous = batch_size * max_context_len * bytes_per_token
+    paged_allocated = paged_cost.allocated_kv_bytes
+
+    saved_bytes = max(0, unpaged_contiguous - paged_allocated)
+    savings_ratio = saved_bytes / unpaged_contiguous if unpaged_contiguous > 0 else 0.0
+    concurrency_mult = unpaged_contiguous / paged_allocated if paged_allocated > 0 else 1.0
+
+    findings: list[str] = []
+    if savings_ratio > 0.4:
+        findings.append(
+            f"PagedAttention saves {savings_ratio:.1%} VRAM vs contiguous reservation; supports {concurrency_mult:.2f}x higher request concurrency."
+        )
+    if paged_cost.fragmentation_ratio > 0.2:
+        findings.append(
+            f"Internal fragmentation is {paged_cost.fragmentation_ratio:.1%}; consider smaller block_size for short sequences."
+        )
+    if paged_cost.shared_prefix_blocks > 0:
+        findings.append(
+            f"Prefix caching deduplicates {paged_cost.shared_saved_bytes / 1e6:.2f} MB across concurrent sessions."
+        )
+
+    return PagedAttentionGapAnalysis(
+        cost=paged_cost,
+        unpaged_contiguous_bytes=unpaged_contiguous,
+        paged_allocated_bytes=paged_allocated,
+        memory_saved_bytes=saved_bytes,
+        memory_savings_ratio=savings_ratio,
+        concurrency_multiplier=concurrency_mult,
+        fragmentation_ratio=paged_cost.fragmentation_ratio,
+        findings=tuple(findings),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousBatchGapAnalysis:
+    """Operational regime and throughput gap analysis for a continuous batching iteration."""
+
+    iteration: ContinuousBatchIterationEstimate
+    hardware: HardwareSpec
+    lower_bound_seconds: float
+    compute_bound_seconds: float
+    bandwidth_bound_seconds: float
+    bottleneck: str
+    optimal_prefill_tokens_to_saturate: int
+    findings: tuple[str, ...]
+
+    def render(self) -> str:
+        lines = [
+            f"Continuous Batch Iteration Analysis ({self.iteration.total_tokens} total tokens: {self.iteration.decode_tokens} decode, {self.iteration.prefill_tokens} prefill)",
+            f"  arithmetic intensity: {self.iteration.arithmetic_intensity:.2f} FLOP/B (ridge point: {self.hardware.ridge_point:.1f} FLOP/B)",
+            f"  iteration bound: {self.lower_bound_seconds * 1e3:.3f} ms ({self.bottleneck}-bound)",
+            f"  memory traffic: {self.iteration.total_bytes / 1e6:.2f} MB (weights {self.iteration.model_weight_bytes / 1e6:.2f} MB, KV read {self.iteration.kv_cache_read_bytes / 1e6:.2f} MB)",
+        ]
+        if (
+            self.bottleneck == "memory"
+            and self.optimal_prefill_tokens_to_saturate > self.iteration.prefill_tokens
+        ):
+            lines.append(
+                f"  target saturation: inject ~{self.optimal_prefill_tokens_to_saturate} prefill chunk tokens to reach compute roofline"
+            )
+        lines.extend(f"  finding: {f}" for f in self.findings)
+        return "\n".join(lines)
+
+
+def analyze_continuous_batch_iteration(
+    iteration: ContinuousBatchIterationEstimate,
+    hardware: HardwareSpec,
+) -> ContinuousBatchGapAnalysis:
+    """Evaluate continuous batch operational regime and compute prefill chunking targets."""
+    t_comp = iteration.total_flops / hardware.peak_flops
+    t_mem = iteration.total_bytes / hardware.memory_bandwidth
+    lower_bound_s = max(t_comp, t_mem)
+    bottleneck = "compute" if t_comp >= t_mem else "memory"
+
+    ridge = hardware.ridge_point
+    findings: list[str] = []
+
+    if bottleneck == "compute":
+        findings.append(
+            f"Iteration is compute-bound (AI: {iteration.arithmetic_intensity:.1f} FLOP/B >= ridge: {ridge:.1f} FLOP/B); Tensor Cores are fully utilized."
+        )
+        opt_prefill = iteration.prefill_tokens
+    else:
+        flops_per_tok = iteration.total_flops / max(1, iteration.total_tokens)
+        needed_tokens = max(
+            1,
+            int((iteration.model_weight_bytes * ridge) / flops_per_tok),
+        )
+        opt_prefill = max(0, needed_tokens - iteration.decode_tokens)
+        findings.append(
+            f"Iteration is memory-bandwidth bound (AI: {iteration.arithmetic_intensity:.1f} FLOP/B < ridge: {ridge:.1f} FLOP/B)."
+        )
+        if iteration.prefill_tokens == 0:
+            findings.append(
+                "Decode-only iteration; co-locating chunked prefill will amortize weight DRAM reads and increase throughput."
+            )
+        else:
+            findings.append(
+                f"Increase prefill chunk budget to ~{opt_prefill} tokens to transition iteration to compute-bound."
+            )
+
+    return ContinuousBatchGapAnalysis(
+        iteration=iteration,
+        hardware=hardware,
+        lower_bound_seconds=lower_bound_s,
+        compute_bound_seconds=t_comp,
+        bandwidth_bound_seconds=t_mem,
+        bottleneck=bottleneck,
+        optimal_prefill_tokens_to_saturate=opt_prefill,
         findings=tuple(findings),
     )

@@ -22,6 +22,7 @@ OperationKind = Literal[
     "attention",
     "swiglu",
     "moe",
+    "paged_attention",
 ]
 
 

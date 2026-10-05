@@ -26,7 +26,9 @@ if str(REPO_ROOT / "src") not in sys.path:
 from neural_cost import (
     HardwareSpec,
     detect_hardware,
+    estimate_continuous_batch_iteration,
     estimate_moe,
+    estimate_paged_attention,
     estimate_speculative_decoding,
 )
 
@@ -395,6 +397,94 @@ def benchmark_speculative_decoding(
         baseline_ms_per_token=baseline_ms,
         speedup=speedup,
         breakeven_acceptance_rate=breakeven_alpha,
+    )
+
+
+@dataclass
+class PagedAttentionMetrics:
+    """Benchmark metrics for PagedAttention execution."""
+
+    batch_size: int
+    context_len: int
+    block_size: int
+    allocated_kv_bytes: int
+    compulsory_kv_bytes: int
+    fragmentation_bytes: int
+    fragmentation_ratio: float
+    total_blocks: int
+    latency_ms: float
+    achieved_gbw: float
+    memory_bw_util: float
+
+
+def benchmark_paged_attention(
+    batch_size: int = 1,
+    context_len: int = 512,
+    embed_dim: int = 1024,
+    num_heads: int = 8,
+    num_kv_heads: int | None = None,
+    block_size: int = 16,
+    num_layers: int = 4,
+    warmup: int = 3,
+    repeats: int = 10,
+    hardware: HardwareSpec | None = None,
+) -> PagedAttentionMetrics:
+    """Benchmark empirical latency and memory traffic of a PagedAttention decode step."""
+    import torch
+
+    head_dim = embed_dim // num_heads
+    kv_heads = num_heads if num_kv_heads is None else int(num_kv_heads)
+
+    q = torch.randn(batch_size, num_heads, 1, head_dim)
+    k_cache = torch.randn(batch_size, kv_heads, context_len, head_dim)
+    v_cache = torch.randn(batch_size, kv_heads, context_len, head_dim)
+
+    # Warmup
+    for _ in range(warmup):
+        _ = torch.nn.functional.scaled_dot_product_attention(
+            q, k_cache, v_cache, enable_gqa=(kv_heads != num_heads)
+        )
+
+    t0 = time.perf_counter_ns()
+    for _ in range(repeats):
+        _ = torch.nn.functional.scaled_dot_product_attention(
+            q, k_cache, v_cache, enable_gqa=(kv_heads != num_heads)
+        )
+    elapsed_ns = time.perf_counter_ns() - t0
+    latency_ms = (elapsed_ns / repeats) / 1e6
+
+    paged_est = estimate_paged_attention(
+        batch_size=batch_size,
+        context_lens=context_len,
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        num_kv_heads=kv_heads,
+        block_size=block_size,
+        num_layers=num_layers,
+        dtype_bytes=4,
+    )
+
+    achieved_gbw = (paged_est.total_bytes / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
+    if hardware is None:
+        hardware, _ = detect_hardware()
+    bw_util = (
+        (achieved_gbw * 1e9) / hardware.memory_bandwidth
+        if hardware.memory_bandwidth > 0
+        else 0.0
+    )
+
+    return PagedAttentionMetrics(
+        batch_size=batch_size,
+        context_len=context_len,
+        block_size=block_size,
+        allocated_kv_bytes=paged_est.allocated_kv_bytes,
+        compulsory_kv_bytes=paged_est.compulsory_kv_bytes,
+        fragmentation_bytes=paged_est.fragmentation_bytes,
+        fragmentation_ratio=paged_est.fragmentation_ratio,
+        total_blocks=paged_est.total_blocks,
+        latency_ms=latency_ms,
+        achieved_gbw=achieved_gbw,
+        memory_bw_util=bw_util,
     )
 
 
