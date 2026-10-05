@@ -7,6 +7,7 @@ import json
 
 from neural_cost.analysis import (
     analyze_continuous_batch_iteration,
+    analyze_kernel_launch_floor,
     analyze_moe_gap,
     analyze_paged_attention_gap,
     analyze_speculative_decoding,
@@ -22,6 +23,10 @@ from neural_cost.estimate import (
     estimate_moe,
     estimate_paged_attention,
     estimate_ssm,
+)
+from neural_cost.quantization import (
+    analyze_quantization_gap,
+    estimate_quantized_linear,
 )
 
 
@@ -198,6 +203,66 @@ def register_llm_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     ssm_p.add_argument("--memory-bandwidth", type=float, default=None)
     ssm_p.add_argument("--json", action="store_true")
     ssm_p.set_defaults(func=run_ssm)
+
+    # Subcommand: quant
+    quant_p = llm_sub.add_parser(
+        "quant", help="Sub-byte quantization and dequantization ALU tax analyzer."
+    )
+    quant_p.add_argument(
+        "--batch-size",
+        "-b",
+        type=int,
+        default=1,
+        help="Token batch size (tokens = batch * seq_len).",
+    )
+    quant_p.add_argument("--in-features", "-k", type=int, default=4096, help="Input dimension K.")
+    quant_p.add_argument("--out-features", "-n", type=int, default=4096, help="Output dimension N.")
+    quant_p.add_argument(
+        "--quantization",
+        "-q",
+        type=str,
+        default="w4a16_awq",
+        choices=["w4a16_awq", "w4a16_gptq", "w8a16", "w8a8_fp8", "w8a8_int8", "w4a4_fp4"],
+        help="Quantization scheme / preset (default: w4a16_awq).",
+    )
+    quant_p.add_argument("--peak-flops", type=float, default=None)
+    quant_p.add_argument("--memory-bandwidth", type=float, default=None)
+    quant_p.add_argument("--json", action="store_true")
+    quant_p.set_defaults(func=run_quant)
+
+    # Subcommand: launch-floor
+    launch_p = llm_sub.add_parser(
+        "launch-floor",
+        help="Host CPU kernel launch overhead and CUDA graph speedup analyzer.",
+    )
+    launch_p.add_argument(
+        "--num-kernels",
+        "-k",
+        type=int,
+        default=640,
+        help="Number of accelerator kernels dispatched per step (default: 640).",
+    )
+    launch_p.add_argument(
+        "--arithmetic-floor-ms",
+        "-a",
+        type=float,
+        default=0.5,
+        help="Theoretical arithmetic roofline latency floor in ms (default: 0.5 ms).",
+    )
+    launch_p.add_argument(
+        "--launch-overhead-us",
+        type=float,
+        default=5.0,
+        help="Host CPU launch overhead per kernel in microseconds (default: 5.0 us).",
+    )
+    launch_p.add_argument(
+        "--measured-latency-ms",
+        type=float,
+        default=None,
+        help="Optional measured wall-clock step latency in ms.",
+    )
+    launch_p.add_argument("--json", action="store_true")
+    launch_p.set_defaults(func=run_launch_floor)
 
 
 def run_moe(args: argparse.Namespace) -> int:
@@ -389,4 +454,83 @@ def run_ssm(args: argparse.Namespace) -> int:
         return 0
 
     print(gap.render())
+    return 0
+
+
+def run_quant(args: argparse.Namespace) -> int:
+    hw, _ = resolve_hardware(peak_flops=args.peak_flops, memory_bandwidth=args.memory_bandwidth)
+    est = estimate_quantized_linear(
+        batch_size=args.batch_size,
+        in_features=args.in_features,
+        out_features=args.out_features,
+        quantization=args.quantization,
+    )
+    gap = analyze_quantization_gap(est, hw)
+
+    if args.json:
+        data = {
+            "quantization": est.quantization.name,
+            "batch_size": est.batch_size,
+            "in_features": est.in_features,
+            "out_features": est.out_features,
+            "unquantized_weight_bytes": est.unquantized_weight_bytes,
+            "quantized_weight_bytes": est.quantized_weight_bytes,
+            "scale_zero_bytes": est.scale_zero_bytes,
+            "total_weight_bytes": est.total_weight_bytes,
+            "weight_compression_ratio": est.weight_compression_ratio,
+            "input_activation_bytes": est.input_activation_bytes,
+            "output_activation_bytes": est.output_activation_bytes,
+            "total_memory_bytes": est.total_memory_bytes,
+            "gemm_flops": est.gemm_flops,
+            "dequant_unpack_flops": est.dequant_unpack_flops,
+            "total_flops": est.total_flops,
+            "arithmetic_intensity": est.arithmetic_intensity,
+            "unquantized_latency_ms": gap.unquantized_latency_seconds * 1e3,
+            "quantized_latency_ms": gap.quantized_latency_seconds * 1e3,
+            "speedup": gap.speedup,
+            "unquantized_bottleneck": gap.unquantized_bottleneck,
+            "quantized_bottleneck": gap.quantized_bottleneck,
+            "dequant_overhead_ratio": gap.dequant_overhead_ratio,
+            "findings": list(gap.findings),
+        }
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(gap.render())
+    return 0
+
+
+def run_launch_floor(args: argparse.Namespace) -> int:
+    launch_overhead_s = args.launch_overhead_us * 1e-6
+    arith_floor_s = args.arithmetic_floor_ms * 1e-3
+    measured_s = args.measured_latency_ms * 1e-3 if args.measured_latency_ms is not None else None
+
+    analysis = analyze_kernel_launch_floor(
+        num_kernels=args.num_kernels,
+        model_arithmetic_floor_seconds=arith_floor_s,
+        launch_overhead_seconds=launch_overhead_s,
+        measured_latency_seconds=measured_s,
+    )
+
+    if args.json:
+        data = {
+            "num_kernels": analysis.num_kernels,
+            "launch_overhead_us": analysis.launch_overhead_seconds * 1e6,
+            "total_launch_floor_ms": analysis.total_launch_floor_seconds * 1e3,
+            "model_arithmetic_floor_ms": analysis.model_arithmetic_floor_seconds * 1e3,
+            "effective_lower_bound_ms": analysis.effective_lower_bound_seconds * 1e3,
+            "is_launch_bound": analysis.is_launch_bound,
+            "launch_to_arithmetic_ratio": analysis.launch_to_arithmetic_ratio,
+            "cuda_graph_potential_speedup": analysis.cuda_graph_potential_speedup,
+            "measured_latency_ms": (
+                analysis.measured_latency_seconds * 1e3
+                if analysis.measured_latency_seconds is not None
+                else None
+            ),
+            "findings": list(analysis.findings),
+        }
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(analysis.render())
     return 0

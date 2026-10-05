@@ -159,6 +159,30 @@ def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--width", type=int, default=224, help="Image width for ConvNet.")
     parser.add_argument("--kernel-size", type=int, default=3, help="Kernel size for ConvNet.")
 
+    # Quantization
+    parser.add_argument(
+        "--quantization",
+        "-q",
+        type=str,
+        default=None,
+        choices=["w4a16_awq", "w4a16_gptq", "w8a16", "w8a8_fp8", "w8a8_int8", "w4a4_fp4"],
+        help="Quantization scheme (e.g. w4a16_awq, w8a8_fp8). Models weight compression and dequantization tax.",
+    )
+
+    # Kernel launch floor
+    parser.add_argument(
+        "--num-kernels",
+        type=int,
+        default=None,
+        help="Number of dispatched kernels to model host CPU launch overhead floor.",
+    )
+    parser.add_argument(
+        "--launch-overhead-us",
+        type=float,
+        default=5.0,
+        help="Host CPU launch overhead per kernel in microseconds (default: 5.0 us).",
+    )
+
     # Hardware & output
     parser.add_argument(
         "--peak-flops", type=float, default=None, help="Target peak FLOP/s override."
@@ -225,6 +249,27 @@ def profile_transformer(args: argparse.Namespace, dtype_bytes: int) -> dict[str,
 
     # Memory:
     weight_bytes = total_params * dtype_bytes
+    dequant_flops = 0
+    quant_spec_name = None
+
+    if getattr(args, "quantization", None):
+        from neural_cost.quantization import get_quantization_preset
+
+        q_spec = get_quantization_preset(args.quantization)
+        quant_spec_name = q_spec.name
+        linear_params = (attn_proj_params + mlp_params) * layers
+        q_weight_bytes = int(linear_params * q_spec.weight_format.bytes_per_element)
+        num_groups = (linear_params + q_spec.group_size - 1) // q_spec.group_size
+        scale_bytes = num_groups * 2
+        zero_bytes = num_groups * 2 if q_spec.has_zero_point else 0
+        total_q_linear_bytes = q_weight_bytes + scale_bytes + zero_bytes
+        norm_bytes = norm_params * layers * dtype_bytes
+        weight_bytes = total_q_linear_bytes + norm_bytes
+
+        if not q_spec.native_hardware_mma and q_spec.is_weight_only:
+            dequant_flops = 4 * linear_params
+        total_flops += dequant_flops
+
     # KV Cache: 2 (K and V) * layers * batch_size * kv_h * head_dim * seq_len * dtype_bytes
     kv_cache_bytes = 2 * layers * b * kv_h * head_dim * s * dtype_bytes
     # Activations per token: input + post-attn + post-mlp
@@ -233,7 +278,7 @@ def profile_transformer(args: argparse.Namespace, dtype_bytes: int) -> dict[str,
     total_bytes = weight_bytes + kv_cache_bytes + activation_bytes
     arithmetic_intensity = total_flops / total_bytes if total_bytes > 0 else 0.0
 
-    return {
+    res = {
         "architecture": "transformer",
         "batch_size": b,
         "seq_len": s,
@@ -250,6 +295,10 @@ def profile_transformer(args: argparse.Namespace, dtype_bytes: int) -> dict[str,
         "flops": total_flops,
         "arithmetic_intensity": arithmetic_intensity,
     }
+    if quant_spec_name:
+        res["quantization"] = quant_spec_name
+        res["dequant_flops"] = dequant_flops
+    return res
 
 
 def profile_mlp(args: argparse.Namespace, dtype_bytes: int) -> dict[str, Any]:
@@ -515,12 +564,32 @@ def run_profile(args: argparse.Namespace) -> int:
         "bottleneck": bottleneck,
     }
 
+    if getattr(args, "num_kernels", None) and args.num_kernels > 0:
+        from neural_cost.analysis import analyze_kernel_launch_floor
+
+        kl_analysis = analyze_kernel_launch_floor(
+            num_kernels=args.num_kernels,
+            model_arithmetic_floor_seconds=lower_bound_sec,
+            launch_overhead_seconds=args.launch_overhead_us * 1e-6,
+        )
+        res["kernel_launch"] = {
+            "num_kernels": kl_analysis.num_kernels,
+            "total_launch_floor_ms": kl_analysis.total_launch_floor_seconds * 1e3,
+            "effective_lower_bound_ms": kl_analysis.effective_lower_bound_seconds * 1e3,
+            "is_launch_bound": kl_analysis.is_launch_bound,
+            "cuda_graph_potential_speedup": kl_analysis.cuda_graph_potential_speedup,
+        }
+
     if args.json:
         print(json.dumps(res, indent=2))
         return 0
 
     print("┌─ Neural Cost Static Profile ───────────────────────────────────────────────")
     print(f"│  Architecture:        {res['architecture']} (dtype: {res['dtype']})")
+    if "quantization" in res:
+        print(f"│  Quantization:        {res['quantization']}")
+        if res.get("dequant_flops", 0) > 0:
+            print(f"│  Dequant ALU Tax:     {format_flops(res['dequant_flops'])}")
     if "total_parameters" in res:
         print(f"│  Total Parameters:    {res['total_parameters']:,}")
     if "active_parameters" in res:
@@ -552,5 +621,15 @@ def run_profile(args: argparse.Namespace) -> int:
     print(f"│  Lower-Bound Latency: {lower_bound_sec * 1e3:.3f} ms")
     print(f"│    Compute bound:     {compute_sec * 1e3:.3f} ms")
     print(f"│    Bandwidth bound:   {bandwidth_sec * 1e3:.3f} ms")
+    if "kernel_launch" in res:
+        kl = res["kernel_launch"]
+        print("├─ Kernel Launch Floor ──────────────────────────────────────────────────────")
+        print(f"│  Dispatched Kernels:  {kl['num_kernels']}")
+        print(f"│  Host Dispatch Floor: {kl['total_launch_floor_ms']:.3f} ms")
+        print(
+            f"│  Launch Bound:        {'YES (STARVED)' if kl['is_launch_bound'] else 'NO (HIDDEN)'}"
+        )
+        print(f"│  Effective Floor:     {kl['effective_lower_bound_ms']:.3f} ms")
+        print(f"│  CUDA Graph Speedup:  {kl['cuda_graph_potential_speedup']:.2f}x")
     print("└────────────────────────────────────────────────────────────────────────────")
     return 0
