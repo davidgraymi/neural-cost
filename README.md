@@ -510,19 +510,110 @@ to return portable `Operation` records.  The adapter can also override
 statistics.  This contract keeps model extraction separate from the framework-
 independent estimator and analyzer.
 
-## CLI
+## CLI Suite
 
-The `neural-cost-compare` CLI command is installed automatically with the package:
+`neural-cost` provides a unified command-line suite for hardware detection, theoretical profiling, empirical benchmarking, LLM serving analysis, and CI/CD budget assertions:
 
 ```bash
-# Direct invocation after pip install:
-neural-cost-compare
+# General help and subcommands:
+neural-cost --help
+```
 
-# Or run instantly without manual installation using uvx:
-uvx --from neural-cost neural-cost-compare
+### 1. Hardware Detection & STREAM Benchmark
 
-# Or with overrides:
-neural-cost-compare --peak-flops 3.6e12 --memory-bandwidth 100e9
+Probe attached accelerators, lookup Apple Silicon / NVIDIA published specs, and measure live NumPy STREAM memory bandwidth:
+
+```bash
+# Live probe with memory bandwidth benchmark:
+neural-cost hardware
+
+# Instant detection without STREAM benchmark:
+neural-cost hardware --no-bench
+
+# Machine-readable JSON output:
+neural-cost hardware --json
+```
+
+### 2. Static Architecture Profiling
+
+Compute forward FLOPs, parameter counts, KV cache size, activation memory, arithmetic intensity, and theoretical latency floor on detected or target hardware:
+
+```bash
+# Profile a 7B Transformer (Llama-style) at batch size 8:
+neural-cost profile --arch transformer --batch-size 8 --seq-len 4096 --embed-dim 4096 --num-heads 32 --num-kv-heads 8 --num-layers 32 --dtype fp16
+
+# Profile an 8x7B Mixture-of-Experts layer:
+neural-cost profile --arch moe --num-experts 8 --top-k 2 --embed-dim 4096 --expert-hidden-dim 14336 --decode
+
+# Profile PagedAttention KV cache with shared prefix caching:
+neural-cost profile --arch paged-attention --batch-size 32 --seq-len 2048 --block-size 16 --shared-prefix-tokens 128
+```
+
+### 3. Empirical Benchmarking
+
+Benchmark real execution latency, achieved compute throughput (GFLOP/s), achieved DRAM bandwidth (GB/s), and roofline efficiency on your local machine:
+
+```bash
+# Microbenchmark matrix multiplication:
+neural-cost benchmark --arch linear --batch-size 64 --in-features 1024 --out-features 1024
+
+# Benchmark MoE decode step:
+neural-cost benchmark --arch moe --batch-size 1 --num-experts 8 --top-k 2
+
+# Benchmark PagedAttention kernel:
+neural-cost benchmark --arch paged-attention --batch-size 32 --seq-len 1024 --block-size 16
+
+# Benchmark live NumPy STREAM memory bandwidth:
+neural-cost benchmark --arch stream
+```
+
+### 4. CI Budget Gate (`audit`)
+
+Enforce automated performance budgets and VRAM ceilings in your CI/CD pipelines. Exits with status `0` if all assertions pass, or `1` if any budget is exceeded:
+
+```bash
+# Fail CI if model exceeds 16GB VRAM or 50ms latency floor:
+neural-cost audit \
+    --arch transformer \
+    --batch-size 1 \
+    --seq-len 2048 \
+    --embed-dim 4096 \
+    --num-heads 32 \
+    --num-layers 32 \
+    --max-vram 16GB \
+    --max-latency-ms 50.0
+
+# JSON output for CI pipeline reporting:
+neural-cost audit --arch mlp --in-features 1024 --out-features 1024 --max-vram 1GB --json
+```
+
+### 5. Modern LLM Serving Primitives (`llm`)
+
+Dedicated analytical calculators for production serving architectures:
+
+```bash
+# Mixture-of-Experts routing & memory traffic:
+neural-cost llm moe --batch-size 1 --num-experts 8 --top-k 2 --decode
+
+# Speculative decoding analytical breakeven solver:
+neural-cost llm speculative --gamma 4 --acceptance-rate 0.75
+
+# PagedAttention KV cache capacity and fragmentation:
+neural-cost llm paged --batch-size 32 --context-len 2048 --block-size 16
+
+# Continuous batching mixed iteration cost simulator:
+neural-cost llm continuous --decode-streams 64 --prefill-tokens 512
+```
+
+### 6. Multi-Framework Comparison (`compare`)
+
+Run head-to-head empirical benchmarks across PyTorch, JAX, and TensorFlow (backward-compatible with `neural-cost-compare`):
+
+```bash
+# Multi-framework benchmark runner:
+neural-cost compare
+# Or using the legacy binary:
+neural-cost-compare --warmup 10 --repeats 30
 ```
 
 ## Current scope

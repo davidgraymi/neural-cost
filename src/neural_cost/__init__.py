@@ -1,5 +1,16 @@
 """Framework-neutral neural-network compute and memory cost analysis."""
 
+try:
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _version
+
+    try:
+        __version__ = _version("neural-cost")
+    except PackageNotFoundError:
+        __version__ = "0.7.0.dev0"
+except ImportError:
+    __version__ = "0.7.0.dev0"
+
 from .adapters import available_adapters, get_adapter
 from .analysis import (
     ContinuousBatchGapAnalysis,
@@ -66,6 +77,7 @@ __all__ = [
     "PagedAttentionGapAnalysis",
     "SpeculativeCostEstimate",
     "SpeculativeDecodingAnalysis",
+    "__version__",
     "analyze_continuous_batch_iteration",
     "analyze_gap",
     "analyze_layers_gap",
