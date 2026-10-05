@@ -44,6 +44,11 @@ class HardwareSpec:
         """Arithmetic intensity (FLOP/byte) at the compute/memory boundary."""
         return self.peak_flops / self.memory_bandwidth
 
+    @property
+    def device_name(self) -> str:
+        """Alias for name."""
+        return self.name
+
     def get_cache(self, name: str) -> CacheSpec | None:
         """Find a cache level by name."""
         for cache in self.caches:

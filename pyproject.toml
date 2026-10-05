@@ -55,7 +55,8 @@ tensorflow = ["tensorflow>=2.12"]
 dev = ["pytest>=7.4", "ruff>=0.4"]
 
 [project.scripts]
-neural-cost-compare = "neural_cost._cli:main"
+neural-cost = "neural_cost.cli:main"
+neural-cost-compare = "neural_cost.cli:compare_main"
 
 [project.urls]
 Homepage = "https://github.com/davidgraymi/neural-cost"

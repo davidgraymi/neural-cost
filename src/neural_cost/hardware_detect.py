@@ -84,7 +84,7 @@ class DetectionResult:
     chip_name: str | None
     logical_cores: int
     clock_hz: float | None
-    measured_bandwidth_gb_s: float
+    measured_bandwidth_gb_s: float | None
     peak_flops: float
     memory_bandwidth: float
     source: str  # human-readable description of where values came from
@@ -279,6 +279,7 @@ def _probe_cpu_flops() -> tuple[int, float | None]:
 def detect_hardware(
     bandwidth_benchmark_mb: int = 256,
     precision: str = "fp32",
+    benchmark_memory: bool = True,
 ) -> tuple[HardwareSpec, DetectionResult]:
     """Probe this machine and return a :class:`HardwareSpec` for roofline analysis.
 
@@ -290,6 +291,8 @@ def detect_hardware(
     precision:
         Target precision ('fp32', 'fp16', 'bf16', 'int8'). Accelerators report
         higher peak compute for lower precisions.
+    benchmark_memory:
+        Whether to execute the live NumPy STREAM benchmark (default True).
 
     Returns
     -------
@@ -298,7 +301,9 @@ def detect_hardware(
     result:
         :class:`DetectionResult` with all raw probed values for display.
     """
-    measured_bw = _measure_bandwidth_gb_s(size_mb=bandwidth_benchmark_mb)
+    measured_bw = (
+        _measure_bandwidth_gb_s(size_mb=bandwidth_benchmark_mb) if benchmark_memory else None
+    )
     mult = _precision_multiplier(precision)
 
     # --- Apple Silicon ---
@@ -306,8 +311,14 @@ def detect_hardware(
     if apple_peak_flops is not None:
         peak_flops = apple_peak_flops * mult
         # Prefer manufacturer bandwidth; measured value is a lower bound.
-        memory_bandwidth = max(apple_bw or 0.0, measured_bw * 1e9)
-        source = f"Apple Silicon table ({chip_name}) [{precision.upper()}] + NumPy STREAM triad"
+        memory_bandwidth = (
+            max(apple_bw or 0.0, measured_bw * 1e9)
+            if measured_bw is not None
+            else (apple_bw or 0.0)
+        )
+        source = f"Apple Silicon table ({chip_name}) [{precision.upper()}]"
+        if measured_bw is not None:
+            source += " + NumPy STREAM triad"
         cores, clock_hz = _probe_cpu_flops()
         return (
             HardwareSpec(
@@ -327,8 +338,12 @@ def detect_hardware(
     # --- NVIDIA GPU ---
     gpu_name, nvidia_flops, nvidia_bw, nvidia_caches = _probe_nvidia(precision=precision)
     if nvidia_flops is not None and nvidia_bw is not None:
-        memory_bandwidth = max(nvidia_bw, measured_bw * 1e9)
-        source = f"NVIDIA profile ({gpu_name}) [{precision.upper()}] + NumPy STREAM triad"
+        memory_bandwidth = (
+            max(nvidia_bw, measured_bw * 1e9) if measured_bw is not None else nvidia_bw
+        )
+        source = f"NVIDIA profile ({gpu_name}) [{precision.upper()}]"
+        if measured_bw is not None:
+            source += " + NumPy STREAM triad"
         cores, clock_hz = _probe_cpu_flops()
         return (
             HardwareSpec(
@@ -354,12 +369,15 @@ def detect_hardware(
         # Very conservative: assume 2 GFLOP/s per core at unknown speed
         peak_flops = cores * 2e9 * mult
 
-    memory_bandwidth = measured_bw * 1e9
+    memory_bandwidth = (measured_bw * 1e9) if measured_bw is not None else 30e9
     source = (
         f"CPU estimate ({cores} cores"
         + (f" @ {clock_hz / 1e9:.2f} GHz" if clock_hz else "")
-        + f" [{precision.upper()}]) + NumPy STREAM triad"
+        + f" [{precision.upper()}])"
     )
+    if measured_bw is not None:
+        source += " + NumPy STREAM triad"
+
     return (
         HardwareSpec("CPU", peak_flops, memory_bandwidth),
         DetectionResult(
