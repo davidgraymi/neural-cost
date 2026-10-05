@@ -7,6 +7,7 @@ from .estimate import (
     FusedCostEstimate,
     MoECostEstimate,
     PagedAttentionCostEstimate,
+    SSMCostEstimate,
     estimate_fused_operations,
     estimate_operation,
 )
@@ -689,5 +690,100 @@ def analyze_continuous_batch_iteration(
         bandwidth_bound_seconds=t_mem,
         bottleneck=bottleneck,
         optimal_prefill_tokens_to_saturate=opt_prefill,
+        findings=tuple(findings),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SSMGapAnalysis:
+    """Gap analysis and KV-cache elimination diagnosis for State Space Models (Mamba/S6/SSD)."""
+
+    cost: SSMCostEstimate
+    hardware: HardwareSpec
+    lower_bound_seconds: float
+    compute_bound_seconds: float
+    bandwidth_bound_seconds: float
+    bottleneck: str
+    speedup_vs_transformer: float | None
+    findings: tuple[str, ...]
+
+    def render(self) -> str:
+        phase = "decode" if self.cost.is_decode else "prefill"
+        lines = [
+            f"State Space Model Analysis ({phase}, B={self.cost.batch_size}, L={self.cost.seq_len}, D={self.cost.embed_dim}, N={self.cost.state_dim})",
+            f"  total params: {self.cost.total_parameters:,} ({self.cost.parameter_bytes / 1e6:.1f} MB)",
+            f"  recurrent state size: {self.cost.state_bytes / 1e6:.2f} MB (constant O(1) in sequence length)",
+            f"  arithmetic intensity: {self.cost.arithmetic_intensity:.2f} FLOP/B (ridge: {self.hardware.ridge_point:.1f} FLOP/B)",
+            f"  lower bound: {self.lower_bound_seconds * 1e3:.3f} ms ({self.bottleneck}-bound)",
+        ]
+        if self.cost.equivalent_transformer_kv_bytes > 0:
+            lines.append(
+                f"  KV elimination: {self.cost.memory_savings_ratio_vs_transformer:.1%} memory savings vs Transformer KV cache ({self.cost.equivalent_transformer_kv_bytes / 1e6:.2f} MB -> {self.cost.state_bytes / 1e6:.2f} MB)"
+            )
+        if self.speedup_vs_transformer is not None:
+            lines.append(
+                f"  decode throughput advantage: {self.speedup_vs_transformer:.2f}x vs attention KV retrieval"
+            )
+        lines.extend(f"  finding: {f}" for f in self.findings)
+        return "\n".join(lines)
+
+
+def analyze_ssm_gap(
+    ssm_cost: SSMCostEstimate,
+    hardware: HardwareSpec,
+    equivalent_transformer_bound_seconds: float | None = None,
+) -> SSMGapAnalysis:
+    """Analyze compute roofline efficiency and KV cache elimination for a State Space Model."""
+    t_comp = ssm_cost.total_flops / hardware.peak_flops if hardware.peak_flops > 0 else 0.0
+    t_mem = (
+        ssm_cost.total_bytes / hardware.memory_bandwidth if hardware.memory_bandwidth > 0 else 0.0
+    )
+    bound_s = max(t_comp, t_mem)
+    bottleneck = "compute" if t_comp >= t_mem else "memory"
+
+    speedup: float | None = None
+    if equivalent_transformer_bound_seconds is not None and bound_s > 0:
+        speedup = equivalent_transformer_bound_seconds / bound_s
+    elif ssm_cost.is_decode and bound_s > 0 and hardware.memory_bandwidth > 0:
+        # In Transformer decode, reading full context KV cache is the dominant memory bottleneck
+        tf_mem_bytes = (
+            ssm_cost.parameter_bytes
+            + ssm_cost.equivalent_transformer_kv_bytes
+            + ssm_cost.input_read_bytes
+            + ssm_cost.output_write_bytes
+        )
+        tf_bound_s = tf_mem_bytes / hardware.memory_bandwidth
+        speedup = tf_bound_s / bound_s
+
+    findings: list[str] = []
+    if ssm_cost.is_decode:
+        if bottleneck == "memory":
+            findings.append(
+                f"Decode step is memory-bandwidth bound (AI: {ssm_cost.arithmetic_intensity:.2f} FLOP/B < ridge: {hardware.ridge_point:.1f} FLOP/B)."
+            )
+        else:
+            findings.append("Decode step reaches compute roofline thanks to batching.")
+        if ssm_cost.memory_savings_ratio_vs_transformer > 0.5:
+            findings.append(
+                f"State Space recurrence eliminates {ssm_cost.memory_savings_ratio_vs_transformer:.1%} of memory traffic vs Transformer KV cache at context {ssm_cost.seq_len}."
+            )
+    else:
+        if bottleneck == "compute":
+            findings.append(
+                "Prefill parallel scan is compute-bound; state updates stay resident on-chip."
+            )
+        else:
+            findings.append(
+                "Prefill is memory-bound; consider increasing sequence length or batch size."
+            )
+
+    return SSMGapAnalysis(
+        cost=ssm_cost,
+        hardware=hardware,
+        lower_bound_seconds=bound_s,
+        compute_bound_seconds=t_comp,
+        bandwidth_bound_seconds=t_mem,
+        bottleneck=bottleneck,
+        speedup_vs_transformer=speedup,
         findings=tuple(findings),
     )

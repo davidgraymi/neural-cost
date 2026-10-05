@@ -21,6 +21,7 @@ from .analysis import (
     MoEGapAnalysis,
     PagedAttentionGapAnalysis,
     SpeculativeDecodingAnalysis,
+    SSMGapAnalysis,
     analyze_continuous_batch_iteration,
     analyze_gap,
     analyze_layers_gap,
@@ -29,6 +30,7 @@ from .analysis import (
     analyze_moe_gap,
     analyze_paged_attention_gap,
     analyze_speculative_decoding,
+    analyze_ssm_gap,
 )
 from .api import estimate_model
 from .estimate import (
@@ -38,6 +40,7 @@ from .estimate import (
     MoECostEstimate,
     PagedAttentionCostEstimate,
     SpeculativeCostEstimate,
+    SSMCostEstimate,
     estimate_adamw_traffic,
     estimate_continuous_batch_iteration,
     estimate_conv2d,
@@ -47,6 +50,7 @@ from .estimate import (
     estimate_operations,
     estimate_paged_attention,
     estimate_speculative_decoding,
+    estimate_ssm,
 )
 from .hardware import CacheSpec, HardwareSpec
 from .hardware_detect import DetectionResult, detect_hardware
@@ -75,6 +79,8 @@ __all__ = [
     "Operation",
     "PagedAttentionCostEstimate",
     "PagedAttentionGapAnalysis",
+    "SSMCostEstimate",
+    "SSMGapAnalysis",
     "SpeculativeCostEstimate",
     "SpeculativeDecodingAnalysis",
     "__version__",
@@ -86,6 +92,7 @@ __all__ = [
     "analyze_moe_gap",
     "analyze_paged_attention_gap",
     "analyze_speculative_decoding",
+    "analyze_ssm_gap",
     "available_adapters",
     "benchmark",
     "detect_hardware",
@@ -100,6 +107,7 @@ __all__ = [
     "estimate_operations",
     "estimate_paged_attention",
     "estimate_speculative_decoding",
+    "estimate_ssm",
     "get_adapter",
     "profile_model",
 ]

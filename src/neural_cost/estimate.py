@@ -256,6 +256,58 @@ def estimate_operation(operation: Operation) -> CostEstimate:
         read_bytes = token_read_bytes + allocated_kv_bytes + block_table_bytes
         new_kv_write = n_tokens * 2 * kv_head_dim * num_layers * operation.dtype_bytes
         write_bytes = numel(operation.output) * operation.dtype_bytes + new_kv_write
+    elif kind == "state_space_model":
+        out_shape = operation.output
+        embed_dim = out_shape[-1]
+        n_tokens = numel(out_shape[:-1]) if len(out_shape) > 1 else 1
+
+        state_dim = int(operation.attrs.get("state_dim", 16))
+        expand_factor = int(operation.attrs.get("expand_factor", 2))
+        conv_kernel_size = int(operation.attrs.get("conv_kernel_size", 4))
+        num_layers = int(operation.attrs.get("num_layers", 1))
+        is_decode = bool(operation.attrs.get("is_decode", False))
+
+        d_in = expand_factor * embed_dim
+
+        in_proj_flops = 2 * n_tokens * embed_dim * (2 * d_in) * num_layers
+        conv_flops = 2 * n_tokens * d_in * conv_kernel_size * num_layers
+        dt_rank = max(1, embed_dim // 16)
+        delta_flops = 2 * n_tokens * (d_in * dt_rank + dt_rank * d_in) * num_layers
+        bc_flops = 2 * 2 * n_tokens * d_in * state_dim * num_layers
+        core_flops = 6 * n_tokens * d_in * state_dim * num_layers
+        gate_flops = n_tokens * d_in * num_layers
+        out_proj_flops = 2 * n_tokens * d_in * embed_dim * num_layers
+
+        flops = (
+            in_proj_flops
+            + conv_flops
+            + delta_flops
+            + bc_flops
+            + core_flops
+            + gate_flops
+            + out_proj_flops
+        )
+
+        in_proj_params = embed_dim * (2 * d_in)
+        conv_params = d_in * conv_kernel_size
+        delta_params = d_in * dt_rank + dt_rank * d_in
+        bc_params = 2 * d_in * state_dim
+        out_proj_params = d_in * embed_dim
+        total_params = (
+            in_proj_params + conv_params + delta_params + bc_params + out_proj_params
+        ) * num_layers
+
+        batch_size = n_tokens if is_decode else (out_shape[0] if len(out_shape) > 1 else 1)
+        state_bytes = batch_size * d_in * state_dim * operation.dtype_bytes * num_layers
+        token_bytes = sum(numel(shape) for shape in operation.inputs) * operation.dtype_bytes
+        param_bytes = total_params * operation.dtype_bytes
+
+        if is_decode:
+            read_bytes = token_bytes + param_bytes + state_bytes
+            write_bytes = numel(operation.output) * operation.dtype_bytes + state_bytes
+        else:
+            read_bytes = token_bytes + param_bytes
+            write_bytes = numel(operation.output) * operation.dtype_bytes
     else:  # Defensive in case a caller bypasses static typing.
         raise ValueError(f"unsupported operation kind: {kind}")
     return CostEstimate(flops, read_bytes, write_bytes, 1)
@@ -877,4 +929,168 @@ def estimate_continuous_batch_iteration(
         arithmetic_intensity=arithmetic_intensity,
         is_compute_bound=is_compute_bound,
         hardware_lower_bound_seconds=lower_bound_s,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SSMCostEstimate:
+    """Theoretical compute, parameter footprint, and state traffic for a State Space Model (e.g. Mamba/RWKV)."""
+
+    total_flops: int
+    in_proj_flops: int
+    conv_flops: int
+    ssm_core_flops: int
+    out_proj_flops: int
+    total_parameters: int
+    parameter_bytes: int
+    state_bytes: int
+    input_read_bytes: int
+    output_write_bytes: int
+    state_read_bytes: int
+    state_write_bytes: int
+    total_bytes: int
+    arithmetic_intensity: float
+    is_decode: bool
+    batch_size: int
+    seq_len: int
+    embed_dim: int
+    state_dim: int
+    expand_factor: int
+    num_layers: int
+    equivalent_transformer_kv_bytes: int
+    memory_savings_ratio_vs_transformer: float
+
+
+def estimate_ssm(
+    batch_size: int,
+    seq_len: int,
+    embed_dim: int,
+    state_dim: int = 16,
+    expand_factor: int = 2,
+    conv_kernel_size: int = 4,
+    num_layers: int = 1,
+    dtype_bytes: int = 2,
+    is_decode: bool = False,
+    num_heads: int = 32,
+    num_kv_heads: int | None = None,
+) -> SSMCostEstimate:
+    """Model compute FLOPs, parameter footprint, and state traffic for a State Space Model (Mamba/S6/SSD).
+
+    Parameters:
+        batch_size: Number of concurrent sequences.
+        seq_len: Sequence length (use 1 for autoregressive decode token step).
+        embed_dim: Hidden dimension D.
+        state_dim: Recurrent state dimension N (e.g. 16 for Mamba-1, 64-128 for Mamba-2).
+        expand_factor: Hidden dimension expansion E (usually 2, so D_in = E * D).
+        conv_kernel_size: 1D depthwise convolution filter width (usually 4).
+        num_layers: Number of SSM layers.
+        dtype_bytes: Bytes per floating point element (default 2 for FP16/BF16).
+        is_decode: If True, evaluates single-token autoregressive recurrent generation.
+        num_heads: Attention heads in equivalent Transformer (for KV cache comparison).
+        num_kv_heads: KV heads in equivalent Transformer (for GQA/MQA comparison).
+    """
+    if batch_size <= 0 or seq_len <= 0 or embed_dim <= 0:
+        raise ValueError("batch_size, seq_len, and embed_dim must be positive")
+    if state_dim <= 0 or expand_factor <= 0 or conv_kernel_size <= 0 or num_layers <= 0:
+        raise ValueError(
+            "state_dim, expand_factor, conv_kernel_size, and num_layers must be positive"
+        )
+    if dtype_bytes <= 0:
+        raise ValueError("dtype_bytes must be positive")
+
+    d_in = expand_factor * embed_dim
+    n_tokens = batch_size if is_decode else batch_size * seq_len
+
+    # 1. Input projection: D -> 2 * D_in (gated branch z and main branch x')
+    in_proj_params_per_layer = embed_dim * (2 * d_in)
+    in_proj_flops = 2 * n_tokens * in_proj_params_per_layer * num_layers
+
+    # 2. 1D Depthwise Conv: kernel_size * D_in
+    conv_params_per_layer = d_in * conv_kernel_size
+    conv_flops = 2 * n_tokens * conv_params_per_layer * num_layers
+
+    # 3. SSM parameter projections:
+    dt_rank = max(1, embed_dim // 16)
+    delta_params_per_layer = d_in * dt_rank + dt_rank * d_in
+    delta_flops = 2 * n_tokens * delta_params_per_layer * num_layers
+
+    bc_params_per_layer = 2 * d_in * state_dim
+    bc_flops = 2 * n_tokens * bc_params_per_layer * num_layers
+
+    # 4. SSM recurrence core:
+    # In prefill (parallel scan): ~6 FLOPs per token per state element
+    # In decode (recurrent update): h_t = A * h_{t-1} + B * x_t, y_t = C * h_t (~6 FLOPs)
+    core_flops = 6 * n_tokens * d_in * state_dim * num_layers
+
+    # 5. Output projection and gating:
+    gate_flops = n_tokens * d_in * num_layers
+    out_proj_params_per_layer = d_in * embed_dim
+    out_proj_flops = (2 * n_tokens * out_proj_params_per_layer + gate_flops) * num_layers
+
+    total_flops = in_proj_flops + conv_flops + delta_flops + bc_flops + core_flops + out_proj_flops
+
+    params_per_layer = (
+        in_proj_params_per_layer
+        + conv_params_per_layer
+        + delta_params_per_layer
+        + bc_params_per_layer
+        + out_proj_params_per_layer
+    )
+    total_params = params_per_layer * num_layers
+    param_bytes = total_params * dtype_bytes
+
+    # Recurrent state: B * D_in * N * dtype_bytes per layer
+    # Constant O(1) in sequence length!
+    state_bytes = batch_size * d_in * state_dim * dtype_bytes * num_layers
+
+    input_read_bytes = n_tokens * embed_dim * dtype_bytes
+    output_write_bytes = n_tokens * embed_dim * dtype_bytes
+
+    if is_decode:
+        # Decode: reading weights + reading state + writing updated state + token I/O
+        state_read_bytes = state_bytes
+        state_write_bytes = state_bytes
+    else:
+        # Prefill: associative parallel scan in SRAM tile; state stays on-chip
+        state_read_bytes = 0
+        state_write_bytes = state_bytes
+
+    total_bytes = (
+        param_bytes + input_read_bytes + output_write_bytes + state_read_bytes + state_write_bytes
+    )
+    arithmetic_intensity = total_flops / total_bytes if total_bytes > 0 else 0.0
+
+    # Equivalent Transformer KV cache comparison:
+    tf_kv_heads = num_kv_heads or num_heads
+    tf_head_dim = embed_dim // num_heads
+    equiv_tf_kv_bytes = (
+        2 * batch_size * seq_len * (tf_kv_heads * tf_head_dim) * dtype_bytes * num_layers
+    )
+    savings_bytes = max(0, equiv_tf_kv_bytes - state_bytes)
+    savings_ratio = savings_bytes / equiv_tf_kv_bytes if equiv_tf_kv_bytes > 0 else 0.0
+
+    return SSMCostEstimate(
+        total_flops=total_flops,
+        in_proj_flops=in_proj_flops,
+        conv_flops=conv_flops,
+        ssm_core_flops=core_flops,
+        out_proj_flops=out_proj_flops,
+        total_parameters=total_params,
+        parameter_bytes=param_bytes,
+        state_bytes=state_bytes,
+        input_read_bytes=input_read_bytes,
+        output_write_bytes=output_write_bytes,
+        state_read_bytes=state_read_bytes,
+        state_write_bytes=state_write_bytes,
+        total_bytes=total_bytes,
+        arithmetic_intensity=arithmetic_intensity,
+        is_decode=is_decode,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        embed_dim=embed_dim,
+        state_dim=state_dim,
+        expand_factor=expand_factor,
+        num_layers=num_layers,
+        equivalent_transformer_kv_bytes=equiv_tf_kv_bytes,
+        memory_savings_ratio_vs_transformer=savings_ratio,
     )

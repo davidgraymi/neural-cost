@@ -23,6 +23,7 @@ OperationKind = Literal[
     "swiglu",
     "moe",
     "paged_attention",
+    "state_space_model",
 ]
 
 

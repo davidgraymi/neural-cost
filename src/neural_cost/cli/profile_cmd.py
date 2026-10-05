@@ -20,6 +20,7 @@ from neural_cost.estimate import (
     estimate_moe,
     estimate_operation,
     estimate_paged_attention,
+    estimate_ssm,
 )
 from neural_cost.operations import Operation
 
@@ -39,7 +40,7 @@ def register_profile_parser(
 def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--arch",
-        choices=["transformer", "moe", "paged-attention", "mlp", "convnet"],
+        choices=["transformer", "moe", "paged-attention", "mlp", "convnet", "ssm", "mamba"],
         default="transformer",
         help="Architecture family to profile (default: transformer).",
     )
@@ -123,6 +124,26 @@ def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         help="Number of shared prompt tokens for prefix caching.",
+    )
+
+    # State Space Model (SSM / Mamba) specific
+    parser.add_argument(
+        "--state-dim",
+        type=int,
+        default=16,
+        help="SSM recurrent state dimension N (default: 16).",
+    )
+    parser.add_argument(
+        "--expand-factor",
+        type=int,
+        default=2,
+        help="SSM hidden expansion factor E (default: 2).",
+    )
+    parser.add_argument(
+        "--conv-kernel-size",
+        type=int,
+        default=4,
+        help="SSM 1D depthwise convolution filter width (default: 4).",
     )
 
     # MLP / Convnet specific
@@ -395,6 +416,54 @@ def profile_paged_attention(args: argparse.Namespace, dtype_bytes: int) -> dict[
     }
 
 
+def profile_ssm(args: argparse.Namespace, dtype_bytes: int) -> dict[str, Any]:
+    b = args.batch_size
+    s = args.seq_len
+    d = args.embed_dim
+    state_dim = getattr(args, "state_dim", 16)
+    expand = getattr(args, "expand_factor", 2)
+    conv_k = getattr(args, "conv_kernel_size", 4)
+    layers = args.num_layers
+    is_decode = getattr(args, "decode", False)
+    num_heads = getattr(args, "num_heads", 32)
+    num_kv_heads = getattr(args, "num_kv_heads", None)
+
+    est = estimate_ssm(
+        batch_size=b,
+        seq_len=s,
+        embed_dim=d,
+        state_dim=state_dim,
+        expand_factor=expand,
+        conv_kernel_size=conv_k,
+        num_layers=layers,
+        dtype_bytes=dtype_bytes,
+        is_decode=is_decode,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+    )
+
+    return {
+        "architecture": args.arch,
+        "batch_size": b,
+        "seq_len": s,
+        "embed_dim": d,
+        "state_dim": state_dim,
+        "expand_factor": expand,
+        "conv_kernel_size": conv_k,
+        "num_layers": layers,
+        "dtype": args.dtype,
+        "is_decode": is_decode,
+        "total_parameters": est.total_parameters,
+        "weight_bytes": est.parameter_bytes,
+        "state_bytes": est.state_bytes,
+        "equivalent_transformer_kv_bytes": est.equivalent_transformer_kv_bytes,
+        "memory_savings_ratio_vs_transformer": est.memory_savings_ratio_vs_transformer,
+        "total_bytes": est.total_bytes,
+        "flops": est.total_flops,
+        "arithmetic_intensity": est.arithmetic_intensity,
+    }
+
+
 def run_profile(args: argparse.Namespace) -> int:
     dtype_bytes = parse_dtype_bytes(args.dtype)
 
@@ -409,6 +478,8 @@ def run_profile(args: argparse.Namespace) -> int:
         res = profile_mlp(args, dtype_bytes)
     elif args.arch == "convnet":
         res = profile_convnet(args, dtype_bytes)
+    elif args.arch in ("ssm", "mamba"):
+        res = profile_ssm(args, dtype_bytes)
     else:
         sys.stderr.write(f"Unknown architecture: {args.arch}\n")
         return 1
@@ -460,6 +531,12 @@ def run_profile(args: argparse.Namespace) -> int:
         print(f"│  KV Cache Footprint:  {format_bytes(res['kv_cache_bytes'])}")
     if "activation_bytes" in res:
         print(f"│  Activation Memory:   {format_bytes(res['activation_bytes'])}")
+    if "state_bytes" in res:
+        print(f"│  Recurrent State:     {format_bytes(res['state_bytes'])} (O(1) in seq_len)")
+    if res.get("memory_savings_ratio_vs_transformer", 0.0) > 0:
+        print(
+            f"│  KV Elimination:      {res['memory_savings_ratio_vs_transformer']:.1%} savings vs Transformer KV ({format_bytes(res['equivalent_transformer_kv_bytes'])})"
+        )
     if "fragmentation_ratio" in res:
         print(
             f"│  KV Fragmentation:    {res['fragmentation_ratio']:.1%} ({format_bytes(res['fragmentation_bytes'])})"
