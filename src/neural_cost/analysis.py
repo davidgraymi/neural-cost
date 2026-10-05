@@ -952,3 +952,102 @@ def analyze_distributed_gap(
         memory_fit=memory_fit,
         findings=tuple(findings),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class KernelLaunchAnalysis:
+    """Analysis of host CPU dispatch overhead and kernel launch latency floor."""
+
+    num_kernels: int
+    launch_overhead_seconds: float
+    total_launch_floor_seconds: float
+    model_arithmetic_floor_seconds: float
+    effective_lower_bound_seconds: float
+    is_launch_bound: bool
+    launch_to_arithmetic_ratio: float
+    cuda_graph_potential_speedup: float
+    measured_latency_seconds: float | None
+    findings: tuple[str, ...]
+
+    def render(self) -> str:
+        lines = [
+            f"Kernel Launch Floor Analysis ({self.num_kernels} micro-kernels, overhead: {self.launch_overhead_seconds * 1e6:.1f} µs/launch)",
+            f"  dispatch floor: {self.total_launch_floor_seconds * 1e3:.3f} ms CPU host submission latency",
+            f"  arithmetic floor: {self.model_arithmetic_floor_seconds * 1e3:.3f} ms theoretical roofline lower bound",
+            f"  dispatch ratio: {self.launch_to_arithmetic_ratio:.2f}x (launch floor / arithmetic floor)",
+            f"  regime: {'HOST-DISPATCH BOUND' if self.is_launch_bound else 'ACCELERATOR-EXECUTION BOUND'}",
+            f"  CUDA Graph / fusion potential: {self.cuda_graph_potential_speedup:.2f}x speedup by collapsing {self.num_kernels} launches into 1",
+        ]
+        if self.measured_latency_seconds is not None:
+            gap_ms = (self.measured_latency_seconds - self.effective_lower_bound_seconds) * 1e3
+            lines.append(
+                f"  measured gap: {self.measured_latency_seconds * 1e3:.3f} ms ({gap_ms:+.3f} ms vs effective floor)"
+            )
+        lines.extend(f"  finding: {f}" for f in self.findings)
+        return "\n".join(lines)
+
+
+def analyze_kernel_launch_floor(
+    num_kernels: int,
+    model_arithmetic_floor_seconds: float,
+    launch_overhead_seconds: float = 5.0e-6,
+    measured_latency_seconds: float | None = None,
+) -> KernelLaunchAnalysis:
+    """Analyze whether host CPU launch overhead limits execution latency.
+
+    Parameters:
+        num_kernels: Number of individual accelerator kernels dispatched in the step/forward pass.
+        model_arithmetic_floor_seconds: Theoretical roofline latency floor (max(T_compute, T_bandwidth)).
+        launch_overhead_seconds: Per-kernel host dispatch overhead (typically 3 to 10 microseconds).
+        measured_latency_seconds: Optional empirical wall-clock time for causal gap diagnosis.
+    """
+    if num_kernels <= 0:
+        raise ValueError("num_kernels must be positive")
+    if model_arithmetic_floor_seconds <= 0:
+        raise ValueError("model_arithmetic_floor_seconds must be positive")
+    if launch_overhead_seconds < 0:
+        raise ValueError("launch_overhead_seconds cannot be negative")
+
+    total_launch_floor = num_kernels * launch_overhead_seconds
+    effective_floor = max(model_arithmetic_floor_seconds, total_launch_floor)
+    is_launch_bound = total_launch_floor > model_arithmetic_floor_seconds
+    ratio = total_launch_floor / model_arithmetic_floor_seconds
+
+    # If CUDA Graphs or torch.compile is used, all N kernels become 1 launch:
+    fused_latency = model_arithmetic_floor_seconds + launch_overhead_seconds
+    graph_speedup = effective_floor / fused_latency if fused_latency > 0 else 1.0
+
+    findings: list[str] = []
+    if is_launch_bound:
+        findings.append(
+            f"Host kernel dispatch overhead ({total_launch_floor * 1e3:.2f} ms) exceeds tensor execution time ({model_arithmetic_floor_seconds * 1e3:.2f} ms). The accelerator is starved of work."
+        )
+        findings.append(
+            f"Capturing with CUDA Graphs (`torch.cuda.make_graphed_callables`) or `torch.compile(mode='reduce-overhead')` can deliver up to {graph_speedup:.2f}x speedup."
+        )
+    else:
+        findings.append(
+            f"Execution is tensor-arithmetic bound ({model_arithmetic_floor_seconds * 1e3:.2f} ms > {total_launch_floor * 1e3:.2f} ms launch floor). Dispatch overhead is hidden."
+        )
+
+    if (
+        measured_latency_seconds is not None
+        and measured_latency_seconds > total_launch_floor
+        and is_launch_bound
+    ):
+        findings.append(
+            f"Empirical latency ({measured_latency_seconds * 1e3:.2f} ms) closely correlates with host launch tax rather than memory bandwidth."
+        )
+
+    return KernelLaunchAnalysis(
+        num_kernels=num_kernels,
+        launch_overhead_seconds=launch_overhead_seconds,
+        total_launch_floor_seconds=total_launch_floor,
+        model_arithmetic_floor_seconds=model_arithmetic_floor_seconds,
+        effective_lower_bound_seconds=effective_floor,
+        is_launch_bound=is_launch_bound,
+        launch_to_arithmetic_ratio=ratio,
+        cuda_graph_potential_speedup=graph_speedup,
+        measured_latency_seconds=measured_latency_seconds,
+        findings=tuple(findings),
+    )

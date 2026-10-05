@@ -620,6 +620,9 @@ Compute forward FLOPs, parameter counts, KV cache size, activation memory, arith
 # Profile a 7B Transformer (Llama-style) at batch size 8:
 neural-cost profile --arch transformer --batch-size 8 --seq-len 4096 --embed-dim 4096 --num-heads 32 --num-kv-heads 8 --num-layers 32 --dtype fp16
 
+# Profile a quantized 70B Transformer with W4A16 AWQ and launch floor:
+neural-cost profile --arch transformer --num-layers 80 --embed-dim 8192 --num-heads 64 --quantization w4a16_awq --num-kernels 640
+
 # Profile an 8x7B Mixture-of-Experts layer:
 neural-cost profile --arch moe --num-experts 8 --top-k 2 --embed-dim 4096 --expert-hidden-dim 14336 --decode
 
@@ -687,6 +690,12 @@ neural-cost llm continuous --decode-streams 64 --prefill-tokens 512
 
 # State Space Model (Mamba/S6/SSD) recurrent cost and KV elimination analyzer:
 neural-cost llm ssm --batch-size 1 --seq-len 32768 --embed-dim 4096 --num-layers 32 --decode
+
+# Sub-byte quantization and dequantization ALU unpacking tax (AWQ, GPTQ, FP8, NVFP4):
+neural-cost llm quant --batch-size 1 --in-features 4096 --out-features 4096 --quantization w4a16_awq
+
+# Kernel launch floor & CUDA Graph / torch.compile speedup analyzer:
+neural-cost llm launch-floor --num-kernels 640 --arithmetic-floor-ms 0.5 --launch-overhead-us 5.0 --measured-latency-ms 3.5
 ```
 
 ### 6. Multi-Framework Comparison (`compare`)
