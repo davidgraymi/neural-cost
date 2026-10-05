@@ -23,8 +23,12 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from neural_cost import HardwareSpec
-from neural_cost.hardware_detect import detect_hardware
+from neural_cost import (
+    HardwareSpec,
+    detect_hardware,
+    estimate_moe,
+    estimate_speculative_decoding,
+)
 
 
 @dataclass
@@ -188,6 +192,209 @@ def benchmark_llm_decode(
         achieved_gbw=achieved_gbw,
         memory_bw_util=bw_util,
         kv_cache_bytes=kv_cache_bytes,
+    )
+
+
+@dataclass
+class MoEDecodeMetrics:
+    """Performance metrics for Mixture-of-Experts decode step."""
+
+    batch_size: int
+    num_experts: int
+    top_k: int
+    embed_dim: int
+    expert_hidden_dim: int
+    latency_ms: float
+    tokens_per_sec: float
+    expected_loaded_experts: float
+    total_params: int
+    active_params: int
+    achieved_gbw: float
+    memory_bw_util: float
+    arithmetic_intensity: float
+
+
+def benchmark_moe_decode(
+    batch_size: int = 1,
+    embed_dim: int = 1024,
+    expert_hidden_dim: int = 2048,
+    num_experts: int = 8,
+    top_k: int = 2,
+    warmup: int = 3,
+    repeats: int = 10,
+    hardware: HardwareSpec | None = None,
+) -> MoEDecodeMetrics:
+    """Benchmark a single token decode step across an MoE layer."""
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class SyntheticMoE(nn.Module):
+        def __init__(self, d: int, h: int, e: int, k: int):
+            super().__init__()
+            self.router = nn.Linear(d, e, bias=False)
+            self.experts = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(d, h, bias=False),
+                    nn.SiLU(),
+                    nn.Linear(h, d, bias=False),
+                )
+                for _ in range(e)
+            ])
+            self.k = k
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            b, s, d = x.shape
+            x_flat = x.view(-1, d)
+            logits = self.router(x_flat)
+            weights, indices = torch.topk(F.softmax(logits, dim=-1), self.k, dim=-1)
+            out = torch.zeros_like(x_flat)
+            for i in range(self.k):
+                expert_idx = indices[:, i]
+                for exp_id in torch.unique(expert_idx):
+                    mask = expert_idx == exp_id
+                    if mask.any():
+                        out[mask] += weights[mask, i : i + 1] * self.experts[exp_id](x_flat[mask])
+            return out.view(b, s, d)
+
+    model = SyntheticMoE(embed_dim, expert_hidden_dim, num_experts, top_k)
+    x = torch.randn(batch_size, 1, embed_dim)
+
+    for _ in range(warmup):
+        _ = model(x)
+
+    t0 = time.perf_counter_ns()
+    for _ in range(repeats):
+        _ = model(x)
+    elapsed_ns = time.perf_counter_ns() - t0
+    latency_ms = (elapsed_ns / repeats) / 1e6
+
+    tokens_per_sec = (batch_size / (latency_ms / 1e3)) if latency_ms > 0 else 0.0
+
+    moe_est = estimate_moe(
+        batch_size=batch_size,
+        seq_len=1,
+        embed_dim=embed_dim,
+        expert_hidden_dim=expert_hidden_dim,
+        num_experts=num_experts,
+        top_k=top_k,
+        dtype_bytes=4,
+        is_decode=True,
+    )
+
+    achieved_gbw = (moe_est.total_bytes / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
+    if hardware is None:
+        hardware, _ = detect_hardware()
+    bw_util = (
+        (achieved_gbw * 1e9) / hardware.memory_bandwidth
+        if hardware.memory_bandwidth > 0
+        else 0.0
+    )
+
+    return MoEDecodeMetrics(
+        batch_size=batch_size,
+        num_experts=num_experts,
+        top_k=top_k,
+        embed_dim=embed_dim,
+        expert_hidden_dim=expert_hidden_dim,
+        latency_ms=latency_ms,
+        tokens_per_sec=tokens_per_sec,
+        expected_loaded_experts=moe_est.expected_loaded_experts,
+        total_params=moe_est.total_parameters,
+        active_params=moe_est.active_parameters,
+        achieved_gbw=achieved_gbw,
+        memory_bw_util=bw_util,
+        arithmetic_intensity=moe_est.arithmetic_intensity,
+    )
+
+
+@dataclass
+class SpeculativeDecodeMetrics:
+    """Performance metrics for speculative decoding execution."""
+
+    gamma: int
+    acceptance_rate: float
+    expected_tokens_per_step: float
+    draft_latency_ms: float
+    verify_latency_ms: float
+    spec_step_latency_ms: float
+    effective_ms_per_token: float
+    baseline_ms_per_token: float
+    speedup: float
+    breakeven_acceptance_rate: float
+
+
+def benchmark_speculative_decoding(
+    gamma: int = 4,
+    acceptance_rate: float = 0.7,
+    batch_size: int = 1,
+    target_embed_dim: int = 1024,
+    draft_embed_dim: int = 512,
+    prompt_len: int = 128,
+    warmup: int = 3,
+    repeats: int = 10,
+) -> SpeculativeDecodeMetrics:
+    """Benchmark empirical latency of speculative decode cycle vs baseline autoregressive decode."""
+    import torch
+
+    draft_head_dim = draft_embed_dim // 8
+    q_draft = torch.randn(batch_size, 8, 1, draft_head_dim)
+    k_draft = torch.randn(batch_size, 8, prompt_len, draft_head_dim)
+    v_draft = torch.randn(batch_size, 8, prompt_len, draft_head_dim)
+
+    target_head_dim = target_embed_dim // 8
+    q_verify = torch.randn(batch_size, 8, gamma + 1, target_head_dim)
+    k_verify = torch.randn(batch_size, 8, prompt_len + gamma + 1, target_head_dim)
+    v_verify = torch.randn(batch_size, 8, prompt_len + gamma + 1, target_head_dim)
+
+    q_target = torch.randn(batch_size, 8, 1, target_head_dim)
+    k_target = torch.randn(batch_size, 8, prompt_len, target_head_dim)
+    v_target = torch.randn(batch_size, 8, prompt_len, target_head_dim)
+
+    for _ in range(warmup):
+        for _ in range(gamma):
+            _ = torch.nn.functional.scaled_dot_product_attention(q_draft, k_draft, v_draft)
+        _ = torch.nn.functional.scaled_dot_product_attention(q_verify, k_verify, v_verify)
+        _ = torch.nn.functional.scaled_dot_product_attention(q_target, k_target, v_target)
+
+    t0 = time.perf_counter_ns()
+    for _ in range(repeats):
+        for _ in range(gamma):
+            _ = torch.nn.functional.scaled_dot_product_attention(q_draft, k_draft, v_draft)
+    draft_ms = ((time.perf_counter_ns() - t0) / repeats) / 1e6
+
+    t0 = time.perf_counter_ns()
+    for _ in range(repeats):
+        _ = torch.nn.functional.scaled_dot_product_attention(q_verify, k_verify, v_verify)
+    verify_ms = ((time.perf_counter_ns() - t0) / repeats) / 1e6
+
+    t0 = time.perf_counter_ns()
+    for _ in range(repeats):
+        _ = torch.nn.functional.scaled_dot_product_attention(q_target, k_target, v_target)
+    baseline_ms = ((time.perf_counter_ns() - t0) / repeats) / 1e6
+
+    spec_step_ms = draft_ms + verify_ms
+
+    from neural_cost.estimate import _expected_speculative_tokens, _find_breakeven_alpha
+
+    e_tokens = _expected_speculative_tokens(gamma, acceptance_rate)
+    eff_ms_per_token = spec_step_ms / e_tokens if e_tokens > 0 else float("inf")
+    speedup = baseline_ms / eff_ms_per_token if eff_ms_per_token > 0 else 0.0
+
+    ratio = spec_step_ms / baseline_ms if baseline_ms > 0 else float("inf")
+    breakeven_alpha = _find_breakeven_alpha(gamma, ratio)
+
+    return SpeculativeDecodeMetrics(
+        gamma=gamma,
+        acceptance_rate=acceptance_rate,
+        expected_tokens_per_step=e_tokens,
+        draft_latency_ms=draft_ms,
+        verify_latency_ms=verify_ms,
+        spec_step_latency_ms=spec_step_ms,
+        effective_ms_per_token=eff_ms_per_token,
+        baseline_ms_per_token=baseline_ms,
+        speedup=speedup,
+        breakeven_acceptance_rate=breakeven_alpha,
     )
 
 
