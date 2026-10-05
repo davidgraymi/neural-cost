@@ -183,6 +183,20 @@ def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
         help="Host CPU launch overhead per kernel in microseconds (default: 5.0 us).",
     )
 
+    # Training & Checkpointing
+    parser.add_argument(
+        "--checkpointing",
+        type=str,
+        default=None,
+        choices=["none", "full", "selective"],
+        help="Activation checkpointing policy (none, full, selective) for training memory modeling.",
+    )
+    parser.add_argument(
+        "--training",
+        action="store_true",
+        help="Model training pass (forward + backward + Adam moments) instead of inference only.",
+    )
+
     # Hardware & output
     parser.add_argument(
         "--peak-flops", type=float, default=None, help="Target peak FLOP/s override."
@@ -270,12 +284,55 @@ def profile_transformer(args: argparse.Namespace, dtype_bytes: int) -> dict[str,
             dequant_flops = 4 * linear_params
         total_flops += dequant_flops
 
-    # KV Cache: 2 (K and V) * layers * batch_size * kv_h * head_dim * seq_len * dtype_bytes
-    kv_cache_bytes = 2 * layers * b * kv_h * head_dim * s * dtype_bytes
-    # Activations per token: input + post-attn + post-mlp
-    activation_bytes = layers * (b * s * d * 3) * dtype_bytes
+    ckpt_strategy = getattr(args, "checkpointing", None)
+    is_training = getattr(args, "training", False) or ckpt_strategy is not None
 
-    total_bytes = weight_bytes + kv_cache_bytes + activation_bytes
+    if is_training:
+        gradient_bytes = total_params * dtype_bytes
+        optimizer_bytes = 2 * total_params * dtype_bytes
+    else:
+        gradient_bytes = 0
+        optimizer_bytes = 0
+
+    ckpt_res = None
+    if ckpt_strategy:
+        from neural_cost.checkpointing import estimate_activation_checkpointing
+
+        ckpt_est = estimate_activation_checkpointing(
+            batch_size=b,
+            seq_len=s,
+            embed_dim=d,
+            num_layers=layers,
+            num_heads=h,
+            intermediate_dim=inter_d,
+            num_kv_heads=kv_h,
+            dtype_bytes=dtype_bytes,
+            strategy=ckpt_strategy,
+        )
+        activation_bytes = ckpt_est.checkpointed_activation_bytes
+        total_flops = ckpt_est.total_training_flops
+        ckpt_res = {
+            "strategy": ckpt_est.strategy.value,
+            "uncheckpointed_activation_bytes": ckpt_est.uncheckpointed_activation_bytes,
+            "checkpointed_activation_bytes": ckpt_est.checkpointed_activation_bytes,
+            "activation_savings_ratio": ckpt_est.activation_savings_ratio,
+            "recompute_flops": ckpt_est.recompute_flops,
+            "compute_overhead_ratio": ckpt_est.compute_overhead_ratio,
+        }
+    elif is_training:
+        total_flops = total_flops * 3  # 1x forward + 2x backward
+        # Activations per token: input + post-attn + post-mlp
+        activation_bytes = layers * (b * s * d * 3) * dtype_bytes
+    else:
+        # Activations per token: input + post-attn + post-mlp
+        activation_bytes = layers * (b * s * d * 3) * dtype_bytes
+
+    # KV Cache: 2 (K and V) * layers * batch_size * kv_h * head_dim * seq_len * dtype_bytes
+    kv_cache_bytes = 0 if is_training else 2 * layers * b * kv_h * head_dim * s * dtype_bytes
+
+    total_bytes = (
+        weight_bytes + gradient_bytes + optimizer_bytes + kv_cache_bytes + activation_bytes
+    )
     arithmetic_intensity = total_flops / total_bytes if total_bytes > 0 else 0.0
 
     res = {
@@ -289,12 +346,17 @@ def profile_transformer(args: argparse.Namespace, dtype_bytes: int) -> dict[str,
         "dtype": args.dtype,
         "total_parameters": total_params,
         "weight_bytes": weight_bytes,
+        "is_training": is_training,
+        "gradient_bytes": gradient_bytes,
+        "optimizer_bytes": optimizer_bytes,
         "kv_cache_bytes": kv_cache_bytes,
         "activation_bytes": activation_bytes,
         "total_bytes": total_bytes,
         "flops": total_flops,
         "arithmetic_intensity": arithmetic_intensity,
     }
+    if ckpt_res:
+        res["checkpointing"] = ckpt_res
     if quant_spec_name:
         res["quantization"] = quant_spec_name
         res["dequant_flops"] = dequant_flops
@@ -600,6 +662,18 @@ def run_profile(args: argparse.Namespace) -> int:
         print(f"│  KV Cache Footprint:  {format_bytes(res['kv_cache_bytes'])}")
     if "activation_bytes" in res:
         print(f"│  Activation Memory:   {format_bytes(res['activation_bytes'])}")
+    if "checkpointing" in res:
+        ck = res["checkpointing"]
+        print(
+            f"│  Checkpointing:       {ck['strategy'].upper()} ({ck['activation_savings_ratio']:.1%} memory saved)"
+        )
+        if ck.get("recompute_flops", 0) > 0:
+            print(
+                f"│  Recompute FLOPs:     {format_flops(ck['recompute_flops'])} (+{ck['compute_overhead_ratio']:.1%})"
+            )
+    if res.get("is_training"):
+        print(f"│  Gradient Memory:     {format_bytes(res['gradient_bytes'])}")
+        print(f"│  Optimizer Moments:   {format_bytes(res['optimizer_bytes'])}")
     if "state_bytes" in res:
         print(f"│  Recurrent State:     {format_bytes(res['state_bytes'])} (O(1) in seq_len)")
     if res.get("memory_savings_ratio_vs_transformer", 0.0) > 0:

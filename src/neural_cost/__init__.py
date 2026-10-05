@@ -37,6 +37,13 @@ from .analysis import (
     analyze_ssm_gap,
 )
 from .api import estimate_model
+from .checkpointing import (
+    ActivationCheckpointingEstimate,
+    ActivationCheckpointingGapAnalysis,
+    CheckpointingStrategy,
+    analyze_activation_checkpointing,
+    estimate_activation_checkpointing,
+)
 from .estimate import (
     ContinuousBatchIterationEstimate,
     CostEstimate,
@@ -88,7 +95,10 @@ __all__ = [
     "INTERCONNECT_PRESETS",
     "PRECISION_FORMATS",
     "QUANTIZATION_PRESETS",
+    "ActivationCheckpointingEstimate",
+    "ActivationCheckpointingGapAnalysis",
     "CacheSpec",
+    "CheckpointingStrategy",
     "ClusterTopology",
     "ContinuousBatchGapAnalysis",
     "ContinuousBatchIterationEstimate",
@@ -121,6 +131,7 @@ __all__ = [
     "SpeculativeCostEstimate",
     "SpeculativeDecodingAnalysis",
     "__version__",
+    "analyze_activation_checkpointing",
     "analyze_continuous_batch_iteration",
     "analyze_distributed_gap",
     "analyze_gap",
@@ -136,6 +147,7 @@ __all__ = [
     "available_adapters",
     "benchmark",
     "detect_hardware",
+    "estimate_activation_checkpointing",
     "estimate_adamw_traffic",
     "estimate_continuous_batch_iteration",
     "estimate_conv2d",
