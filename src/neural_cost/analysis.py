@@ -7,11 +7,12 @@ from .estimate import (
     FusedCostEstimate,
     MoECostEstimate,
     PagedAttentionCostEstimate,
+    ParallelismCostEstimate,
     SSMCostEstimate,
     estimate_fused_operations,
     estimate_operation,
 )
-from .hardware import HardwareSpec
+from .hardware import ClusterTopology, HardwareSpec
 from .memory import MemoryEstimate
 from .model import ModelProfile
 from .operations import Operation
@@ -785,5 +786,169 @@ def analyze_ssm_gap(
         bandwidth_bound_seconds=t_mem,
         bottleneck=bottleneck,
         speedup_vs_transformer=speedup,
+        findings=tuple(findings),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DistributedGapAnalysis:
+    """Roofline scaling analysis, communication overheads, and MFU diagnosis for distributed 3D parallelism."""
+
+    cost: ParallelismCostEstimate
+    topology: ClusterTopology
+    compute_time_seconds: float
+    intra_node_comm_time_seconds: float
+    inter_node_comm_time_seconds: float
+    total_comm_time_seconds: float
+    bubble_time_seconds: float
+    step_time_seconds: float
+    overlap_efficiency: float
+    model_flops_utilization: float
+    hardware_flops_utilization: float
+    samples_per_second: float
+    tokens_per_second: float
+    bottleneck: str
+    memory_fit: bool
+    findings: tuple[str, ...]
+
+    def render(self) -> str:
+        phase = "training" if self.cost.is_training else "inference"
+        lines = [
+            f"Distributed 3D Parallelism Roofline ({phase}, {self.topology.total_devices}x {self.topology.device.name})",
+            f"  parallelism: TP={self.cost.tp_degree}, PP={self.cost.pp_degree}, DP={self.cost.dp_degree} (total devices: {self.cost.total_devices})",
+            f"  topology: {self.topology.num_nodes} nodes x {self.topology.devices_per_node} devices/node",
+            f"  throughput: {self.step_time_seconds * 1e3:.2f} ms/step | {self.samples_per_second:.2f} samples/s | {self.tokens_per_second:,.0f} tokens/s",
+            f"  efficiency: MFU={self.model_flops_utilization:.1%} | HFU={self.hardware_flops_utilization:.1%} | bubble={self.cost.pp_bubble_fraction:.1%}",
+            f"  time breakdown: compute={self.compute_time_seconds * 1e3:.2f} ms | bubble={self.bubble_time_seconds * 1e3:.2f} ms | comm={self.total_comm_time_seconds * 1e3:.2f} ms (intra: {self.intra_node_comm_time_seconds * 1e3:.2f} ms, inter: {self.inter_node_comm_time_seconds * 1e3:.2f} ms)",
+            f"  memory per device: {self.cost.per_device_total_memory_bytes / 1e9:.2f} GB (params: {self.cost.per_device_param_bytes / 1e9:.2f} GB, opt: {self.cost.per_device_optimizer_bytes / 1e9:.2f} GB, acts: {self.cost.per_device_activation_bytes / 1e9:.2f} GB)",
+            f"  bottleneck: {self.bottleneck.upper()}",
+        ]
+        lines.extend(f"  finding: {f}" for f in self.findings)
+        return "\n".join(lines)
+
+
+def analyze_distributed_gap(
+    cost: ParallelismCostEstimate,
+    topology: ClusterTopology,
+    overlap_efficiency: float = 0.85,
+) -> DistributedGapAnalysis:
+    """Analyze communication rooflines, scaling efficiency, and MFU for 3D parallelism."""
+    if overlap_efficiency < 0.0 or overlap_efficiency > 1.0:
+        raise ValueError("overlap_efficiency must be between 0.0 and 1.0")
+
+    # 1. Compute time per device
+    t_comp = (
+        cost.per_device_flops / topology.device.peak_flops
+        if topology.device.peak_flops > 0
+        else 0.0
+    )
+
+    # 2. Pipeline bubble idle time
+    if cost.pp_bubble_fraction > 0 and cost.pp_bubble_fraction < 1.0:
+        # 1F1B schedule bubble stretches compute duration:
+        t_bubble = t_comp * (cost.pp_bubble_fraction / (1.0 - cost.pp_bubble_fraction))
+    else:
+        t_bubble = 0.0
+
+    # 3. Communication time:
+    # Intra-node communication:
+    if topology.intra_node is not None:
+        t_intra = topology.intra_node.transfer_time_seconds(cost.intra_node_comm_bytes)
+    elif cost.intra_node_comm_bytes > 0:
+        # Default fallback: 900 GB/s (NVLink4)
+        t_intra = cost.intra_node_comm_bytes / 900e9
+    else:
+        t_intra = 0.0
+
+    # Inter-node communication:
+    if topology.inter_node is not None:
+        t_inter = topology.inter_node.transfer_time_seconds(cost.inter_node_comm_bytes)
+    elif cost.inter_node_comm_bytes > 0:
+        # Default fallback: 50 GB/s (InfiniBand NDR)
+        t_inter = cost.inter_node_comm_bytes / 50e9
+    else:
+        t_inter = 0.0
+
+    t_comm = t_intra + t_inter
+
+    # 4. Overlap model:
+    # T_step = max(T_comp + T_bubble, T_comm) + (1 - overlap_efficiency) * min(T_comp + T_bubble, T_comm)
+    t_work = t_comp + t_bubble
+    step_time = max(t_work, t_comm) + (1.0 - overlap_efficiency) * min(t_work, t_comm)
+
+    # 5. Throughput & FLOP utilization:
+    samples_per_s = cost.batch_size / step_time if step_time > 0 else 0.0
+    tokens_per_s = (cost.batch_size * cost.seq_len) / step_time if step_time > 0 else 0.0
+
+    cluster_peak_flops = topology.total_peak_flops
+    # Ideal theoretical model FLOPs per step (excluding recomputation overhead):
+    ideal_multiplier = 4 if cost.is_training else 2
+    ideal_step_flops = ideal_multiplier * cost.total_parameters * cost.seq_len * cost.batch_size
+    mfu = (
+        ideal_step_flops / (step_time * cluster_peak_flops)
+        if (step_time > 0 and cluster_peak_flops > 0)
+        else 0.0
+    )
+    # Hardware FLOPs (actual FLOPs computed including activation recomputation):
+    hfu = (
+        cost.total_step_flops / (step_time * cluster_peak_flops)
+        if (step_time > 0 and cluster_peak_flops > 0)
+        else 0.0
+    )
+
+    # 6. Memory capacity check:
+    memory_fit = True
+    if topology.device.memory_capacity is not None:
+        memory_fit = cost.per_device_total_memory_bytes <= topology.device.memory_capacity
+
+    # 7. Bottleneck identification:
+    findings: list[str] = []
+    if not memory_fit:
+        bottleneck = "out_of_memory"
+        findings.append(
+            f"VRAM capacity exceeded: {cost.per_device_total_memory_bytes / 1e9:.2f} GB required vs {topology.device.memory_capacity / 1e9:.2f} GB available. Increase TP, PP, or switch to ZeRO-3/FSDP."
+        )
+    elif t_bubble > 0.3 * t_work and cost.pp_degree > 1:
+        bottleneck = "pipeline_bubble"
+        findings.append(
+            f"Pipeline bubble overhead ({cost.pp_bubble_fraction:.1%}) degrades scaling efficiency. Increase num_microbatches (currently {cost.num_microbatches})."
+        )
+    elif t_inter > t_work:
+        bottleneck = "network_inter_node"
+        findings.append(
+            f"Inter-node network fabric ({topology.inter_node.name if topology.inter_node else 'InfiniBand'}) is the primary bottleneck ({t_inter * 1e3:.1f} ms comm > {t_work * 1e3:.1f} ms compute)."
+        )
+    elif t_intra > t_work:
+        bottleneck = "nvlink_intra_node"
+        findings.append(
+            f"Intra-node interconnect ({topology.intra_node.name if topology.intra_node else 'NVLink'}) bandwidth limits scaling. Consider Sequence Parallelism."
+        )
+    else:
+        bottleneck = "compute"
+        findings.append(
+            f"Compute-bound execution: cluster achieves {mfu:.1%} MFU ({hfu:.1%} HFU) with {overlap_efficiency:.0%} comm-compute overlap."
+        )
+
+    if cost.dp_mode == "zero3_fsdp":
+        findings.append(
+            f"ZeRO-3/FSDP sharding achieves {cost.per_device_total_memory_bytes / 1e9:.2f} GB/device footprint across {cost.dp_degree} DP ranks."
+        )
+
+    return DistributedGapAnalysis(
+        cost=cost,
+        topology=topology,
+        compute_time_seconds=t_comp,
+        intra_node_comm_time_seconds=t_intra,
+        inter_node_comm_time_seconds=t_inter,
+        total_comm_time_seconds=t_comm,
+        bubble_time_seconds=t_bubble,
+        step_time_seconds=step_time,
+        overlap_efficiency=overlap_efficiency,
+        model_flops_utilization=mfu,
+        hardware_flops_utilization=hfu,
+        samples_per_second=samples_per_s,
+        tokens_per_second=tokens_per_s,
+        bottleneck=bottleneck,
+        memory_fit=memory_fit,
         findings=tuple(findings),
     )
