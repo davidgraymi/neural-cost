@@ -13,6 +13,10 @@ from neural_cost.analysis import (
     analyze_speculative_decoding,
     analyze_ssm_gap,
 )
+from neural_cost.checkpointing import (
+    analyze_activation_checkpointing,
+    estimate_activation_checkpointing,
+)
 from neural_cost.cli.helpers import (
     parse_dtype_bytes,
     resolve_hardware,
@@ -24,6 +28,7 @@ from neural_cost.estimate import (
     estimate_paged_attention,
     estimate_ssm,
 )
+from neural_cost.hardware import HardwareSpec
 from neural_cost.quantization import (
     analyze_quantization_gap,
     estimate_quantized_linear,
@@ -263,6 +268,39 @@ def register_llm_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     )
     launch_p.add_argument("--json", action="store_true")
     launch_p.set_defaults(func=run_launch_floor)
+
+    # Subcommand: checkpointing
+    ckpt_p = llm_sub.add_parser(
+        "checkpointing",
+        help="Activation checkpointing (rematerialization) memory savings and recompute FLOP tax analyzer.",
+    )
+    ckpt_p.add_argument(
+        "--strategy",
+        "-m",
+        type=str,
+        default="selective",
+        choices=["none", "full", "selective"],
+        help="Checkpointing strategy (default: selective).",
+    )
+    ckpt_p.add_argument("--batch-size", "-b", type=int, default=4, help="Micro-batch size.")
+    ckpt_p.add_argument("--seq-len", "-s", type=int, default=4096, help="Sequence length.")
+    ckpt_p.add_argument("--embed-dim", "-d", type=int, default=4096, help="Hidden dimension.")
+    ckpt_p.add_argument("--num-layers", "-l", type=int, default=32, help="Number of layers.")
+    ckpt_p.add_argument("--num-heads", type=int, default=32, help="Attention heads.")
+    ckpt_p.add_argument("--num-kv-heads", type=int, default=8, help="KV heads for GQA.")
+    ckpt_p.add_argument("--intermediate-dim", type=int, default=None, help="FFN dimension.")
+    ckpt_p.add_argument(
+        "--no-flash-attention",
+        action="store_true",
+        help="Model un-fused quadratic attention matrix memory.",
+    )
+    ckpt_p.add_argument(
+        "--vram-gb", type=float, default=80.0, help="Device VRAM capacity in GB (default: 80 GB)."
+    )
+    ckpt_p.add_argument("--peak-flops", type=float, default=None)
+    ckpt_p.add_argument("--memory-bandwidth", type=float, default=None)
+    ckpt_p.add_argument("--json", action="store_true")
+    ckpt_p.set_defaults(func=run_checkpointing)
 
 
 def run_moe(args: argparse.Namespace) -> int:
@@ -527,6 +565,63 @@ def run_launch_floor(args: argparse.Namespace) -> int:
                 if analysis.measured_latency_seconds is not None
                 else None
             ),
+            "findings": list(analysis.findings),
+        }
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(analysis.render())
+    return 0
+
+
+def run_checkpointing(args: argparse.Namespace) -> int:
+    hw, _ = resolve_hardware(peak_flops=args.peak_flops, memory_bandwidth=args.memory_bandwidth)
+    if args.vram_gb is not None:
+        hw = HardwareSpec(
+            name=hw.name,
+            peak_flops=hw.peak_flops,
+            memory_bandwidth=hw.memory_bandwidth,
+            memory_capacity=int(args.vram_gb * 1e9),
+            caches=hw.caches,
+        )
+
+    est = estimate_activation_checkpointing(
+        batch_size=args.batch_size,
+        seq_len=args.seq_len,
+        embed_dim=args.embed_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        intermediate_dim=args.intermediate_dim,
+        num_kv_heads=args.num_kv_heads,
+        strategy=args.strategy,
+        is_flash_attention=not args.no_flash_attention,
+    )
+    analysis = analyze_activation_checkpointing(est, hw)
+
+    if args.json:
+        data = {
+            "strategy": est.strategy.value,
+            "batch_size": est.batch_size,
+            "seq_len": est.seq_len,
+            "embed_dim": est.embed_dim,
+            "num_layers": est.num_layers,
+            "uncheckpointed_activation_bytes": est.uncheckpointed_activation_bytes,
+            "checkpointed_activation_bytes": est.checkpointed_activation_bytes,
+            "activation_memory_saved_bytes": est.activation_memory_saved_bytes,
+            "activation_savings_ratio": est.activation_savings_ratio,
+            "static_model_bytes": analysis.static_model_bytes,
+            "total_training_memory_bytes": analysis.total_training_memory_bytes,
+            "uncheckpointed_training_memory_bytes": analysis.uncheckpointed_training_memory_bytes,
+            "is_oom": analysis.is_oom,
+            "uncheckpointed_is_oom": analysis.uncheckpointed_is_oom,
+            "memory_capacity_utilization": analysis.memory_capacity_utilization,
+            "forward_flops": est.forward_flops,
+            "backward_flops": est.backward_flops,
+            "recompute_flops": est.recompute_flops,
+            "compute_overhead_ratio": est.compute_overhead_ratio,
+            "total_step_ms": analysis.total_step_seconds * 1e3,
+            "throughput_tokens_per_second": analysis.throughput_tokens_per_second,
+            "max_trainable_seq_len": analysis.max_trainable_seq_len,
             "findings": list(analysis.findings),
         }
         print(json.dumps(data, indent=2))
