@@ -258,6 +258,38 @@ print(gap.render())
 # Identifies compute vs memory bottleneck and optimal prefill chunk sizing to reach the roofline ridge
 ```
 
+### State Space Models (Mamba / S6 / SSD) & Linear Attention
+
+State Space Models replace the quadratic $O(L^2)$ attention mechanism and linear-growth $O(L)$ KV cache with a fixed-size $O(1)$ hidden recurrent state ($h_t \in \mathbb{R}^{B \times D_{\text{in}} \times N}$).
+
+`neural-cost` models the associative parallel scan in prefill and constant-memory recurrent step in decode:
+
+```python
+from neural_cost import analyze_ssm_gap, detect_hardware, estimate_ssm
+
+# Mamba-3B layer: hidden dim 4096, state dim 16, expand factor 2
+est = estimate_ssm(
+    batch_size=1,
+    seq_len=8192,
+    embed_dim=4096,
+    state_dim=16,
+    expand_factor=2,
+    conv_kernel_size=4,
+    num_layers=32,
+    is_decode=True,
+)
+
+print(f"Recurrent state footprint: {est.state_bytes / 1e6:.2f} MB (constant O(1) in seq_len)")
+print(
+    f"KV cache eliminated: {est.memory_savings_ratio_vs_transformer:.1%} savings vs Transformer KV"
+)
+
+hardware, _ = detect_hardware()
+gap = analyze_ssm_gap(est, hardware)
+print(gap.render())
+# Reports constant-memory decode lower bound and throughput advantage over Transformer KV cache retrieval
+```
+
 ## Hardware detection
 
 Auto-detection via `detect_hardware()` returns a `(HardwareSpec, DetectionResult)` tuple
@@ -547,6 +579,9 @@ neural-cost profile --arch moe --num-experts 8 --top-k 2 --embed-dim 4096 --expe
 
 # Profile PagedAttention KV cache with shared prefix caching:
 neural-cost profile --arch paged-attention --batch-size 32 --seq-len 2048 --block-size 16 --shared-prefix-tokens 128
+
+# Profile State Space Model (Mamba) recurrent state and constant memory:
+neural-cost profile --arch ssm --batch-size 1 --seq-len 4096 --embed-dim 4096 --num-layers 32
 ```
 
 ### 3. Empirical Benchmarking
@@ -603,6 +638,9 @@ neural-cost llm paged --batch-size 32 --context-len 2048 --block-size 16
 
 # Continuous batching mixed iteration cost simulator:
 neural-cost llm continuous --decode-streams 64 --prefill-tokens 512
+
+# State Space Model (Mamba/S6/SSD) recurrent cost and KV elimination analyzer:
+neural-cost llm ssm --batch-size 1 --seq-len 32768 --embed-dim 4096 --num-layers 32 --decode
 ```
 
 ### 6. Multi-Framework Comparison (`compare`)

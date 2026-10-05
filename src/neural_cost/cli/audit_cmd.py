@@ -18,6 +18,7 @@ from neural_cost.cli.profile_cmd import (
     profile_mlp,
     profile_moe,
     profile_paged_attention,
+    profile_ssm,
     profile_transformer,
 )
 
@@ -71,7 +72,7 @@ def _add_audit_arguments(parser: argparse.ArgumentParser) -> None:
     # Architecture parameters
     parser.add_argument(
         "--arch",
-        choices=["transformer", "moe", "paged-attention", "mlp", "convnet"],
+        choices=["transformer", "moe", "paged-attention", "mlp", "convnet", "ssm", "mamba"],
         default="transformer",
         help="Architecture family to audit (default: transformer).",
     )
@@ -124,6 +125,17 @@ def _add_audit_arguments(parser: argparse.ArgumentParser) -> None:
         "--shared-prefix-tokens", type=int, default=0, help="Shared prompt prefix tokens."
     )
 
+    # State Space Model (SSM / Mamba) specific
+    parser.add_argument(
+        "--state-dim", type=int, default=16, help="SSM recurrent state dimension N."
+    )
+    parser.add_argument(
+        "--expand-factor", type=int, default=2, help="SSM hidden expansion factor E."
+    )
+    parser.add_argument(
+        "--conv-kernel-size", type=int, default=4, help="SSM 1D depthwise convolution filter width."
+    )
+
     # MLP / Convnet
     parser.add_argument("--in-features", type=int, default=1024, help="MLP input features.")
     parser.add_argument("--out-features", type=int, default=1024, help="MLP output features.")
@@ -157,6 +169,8 @@ def run_audit(args: argparse.Namespace) -> int:
         res = profile_mlp(args, dtype_bytes)
     elif args.arch == "convnet":
         res = profile_convnet(args, dtype_bytes)
+    elif args.arch in ("ssm", "mamba"):
+        res = profile_ssm(args, dtype_bytes)
     else:
         sys.stderr.write(f"Unknown architecture: {args.arch}\n")
         return 1
@@ -179,8 +193,10 @@ def run_audit(args: argparse.Namespace) -> int:
     lower_bound_ms = lower_bound_sec * 1e3
     bottleneck = "compute" if ai >= hw.ridge_point else "memory"
 
-    # Memory footprint: weights + kv_cache or total_bytes
-    vram_bytes = res.get("weight_bytes", 0) + res.get("kv_cache_bytes", 0)
+    # Memory footprint: weights + kv_cache + recurrent state or total_bytes
+    vram_bytes = (
+        res.get("weight_bytes", 0) + res.get("kv_cache_bytes", 0) + res.get("state_bytes", 0)
+    )
     if vram_bytes == 0:
         vram_bytes = total_bytes
 

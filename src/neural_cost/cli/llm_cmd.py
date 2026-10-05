@@ -10,8 +10,10 @@ from neural_cost.analysis import (
     analyze_moe_gap,
     analyze_paged_attention_gap,
     analyze_speculative_decoding,
+    analyze_ssm_gap,
 )
 from neural_cost.cli.helpers import (
+    parse_dtype_bytes,
     resolve_hardware,
 )
 from neural_cost.estimate import (
@@ -19,13 +21,14 @@ from neural_cost.estimate import (
     estimate_continuous_batch_iteration,
     estimate_moe,
     estimate_paged_attention,
+    estimate_ssm,
 )
 
 
 def register_llm_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     llm_parser = subparsers.add_parser(
         "llm",
-        help="Modern LLM serving primitives (MoE, Speculative Decoding, PagedAttention, Continuous Batching).",
+        help="Modern LLM serving primitives (MoE, Speculative Decoding, PagedAttention, Continuous Batching, SSM).",
         description="Dedicated analytical models and roofline calculators for LLM inference architectures.",
     )
     llm_sub = llm_parser.add_subparsers(dest="llm_subcommand", required=True)
@@ -149,6 +152,52 @@ def register_llm_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     cb_p.add_argument("--memory-bandwidth", type=float, default=None)
     cb_p.add_argument("--json", action="store_true")
     cb_p.set_defaults(func=run_continuous)
+
+    # Subcommand: ssm
+    ssm_p = llm_sub.add_parser(
+        "ssm", help="State Space Model (Mamba/S6/SSD) recurrent cost and KV elimination analyzer."
+    )
+    ssm_p.add_argument("--batch-size", "-b", type=int, default=1, help="Batch size.")
+    ssm_p.add_argument(
+        "--seq-len",
+        "-s",
+        type=int,
+        default=4096,
+        help="Sequence length (or context history for decode).",
+    )
+    ssm_p.add_argument("--embed-dim", "-d", type=int, default=4096, help="Embedding dimension.")
+    ssm_p.add_argument(
+        "--state-dim", "-n", type=int, default=16, help="SSM recurrent state dimension."
+    )
+    ssm_p.add_argument(
+        "--expand-factor", "-e", type=int, default=2, help="Hidden expansion factor."
+    )
+    ssm_p.add_argument(
+        "--conv-kernel-size", type=int, default=4, help="1D depthwise convolution kernel size."
+    )
+    ssm_p.add_argument("--num-layers", "-l", type=int, default=32, help="Number of layers.")
+    ssm_p.add_argument(
+        "--num-heads", type=int, default=32, help="Attention heads for Transformer comparison."
+    )
+    ssm_p.add_argument(
+        "--num-kv-heads", type=int, default=8, help="KV heads for Transformer comparison."
+    )
+    ssm_p.add_argument(
+        "--dtype",
+        type=str,
+        default="fp16",
+        choices=["fp32", "fp16", "bf16", "int8", "fp8", "int4"],
+        help="Data precision (default: fp16).",
+    )
+    ssm_p.add_argument(
+        "--decode",
+        action="store_true",
+        help="Profile token-by-token autoregressive recurrent decode.",
+    )
+    ssm_p.add_argument("--peak-flops", type=float, default=None)
+    ssm_p.add_argument("--memory-bandwidth", type=float, default=None)
+    ssm_p.add_argument("--json", action="store_true")
+    ssm_p.set_defaults(func=run_ssm)
 
 
 def run_moe(args: argparse.Namespace) -> int:
@@ -294,6 +343,46 @@ def run_continuous(args: argparse.Namespace) -> int:
             "lower_bound_ms": gap.lower_bound_seconds * 1e3,
             "bottleneck": gap.bottleneck,
             "optimal_prefill_tokens_to_saturate": gap.optimal_prefill_tokens_to_saturate,
+            "findings": list(gap.findings),
+        }
+        print(json.dumps(data, indent=2))
+        return 0
+
+    print(gap.render())
+    return 0
+
+
+def run_ssm(args: argparse.Namespace) -> int:
+    hw, _ = resolve_hardware(peak_flops=args.peak_flops, memory_bandwidth=args.memory_bandwidth)
+    dtype_bytes = parse_dtype_bytes(args.dtype)
+    est = estimate_ssm(
+        batch_size=args.batch_size,
+        seq_len=args.seq_len,
+        embed_dim=args.embed_dim,
+        state_dim=args.state_dim,
+        expand_factor=args.expand_factor,
+        conv_kernel_size=args.conv_kernel_size,
+        num_layers=args.num_layers,
+        dtype_bytes=dtype_bytes,
+        is_decode=args.decode,
+        num_heads=args.num_heads,
+        num_kv_heads=args.num_kv_heads,
+    )
+    gap = analyze_ssm_gap(est, hw)
+
+    if args.json:
+        data = {
+            "total_parameters": est.total_parameters,
+            "parameter_bytes": est.parameter_bytes,
+            "state_bytes": est.state_bytes,
+            "flops": est.total_flops,
+            "total_bytes": est.total_bytes,
+            "arithmetic_intensity": est.arithmetic_intensity,
+            "is_decode": est.is_decode,
+            "equivalent_transformer_kv_bytes": est.equivalent_transformer_kv_bytes,
+            "memory_savings_ratio_vs_transformer": est.memory_savings_ratio_vs_transformer,
+            "bottleneck": gap.bottleneck,
+            "lower_bound_ms": gap.lower_bound_seconds * 1e3,
             "findings": list(gap.findings),
         }
         print(json.dumps(data, indent=2))
