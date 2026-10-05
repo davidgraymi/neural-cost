@@ -14,6 +14,7 @@ except ImportError:
 from .adapters import available_adapters, get_adapter
 from .analysis import (
     ContinuousBatchGapAnalysis,
+    DistributedGapAnalysis,
     GapAnalysis,
     LayerGapAnalysis,
     MemoryGapAnalysis,
@@ -23,6 +24,7 @@ from .analysis import (
     SpeculativeDecodingAnalysis,
     SSMGapAnalysis,
     analyze_continuous_batch_iteration,
+    analyze_distributed_gap,
     analyze_gap,
     analyze_layers_gap,
     analyze_memory_gap,
@@ -39,6 +41,7 @@ from .estimate import (
     FusedCostEstimate,
     MoECostEstimate,
     PagedAttentionCostEstimate,
+    ParallelismCostEstimate,
     SpeculativeCostEstimate,
     SSMCostEstimate,
     estimate_adamw_traffic,
@@ -49,10 +52,18 @@ from .estimate import (
     estimate_operation,
     estimate_operations,
     estimate_paged_attention,
+    estimate_parallelism,
     estimate_speculative_decoding,
     estimate_ssm,
 )
-from .hardware import CacheSpec, HardwareSpec
+from .hardware import (
+    INTERCONNECT_PRESETS,
+    CacheSpec,
+    ClusterTopology,
+    HardwareSpec,
+    InterconnectSpec,
+    get_interconnect_preset,
+)
 from .hardware_detect import DetectionResult, detect_hardware
 from .memory import MemoryEstimate, estimate_memory
 from .model import ModelProfile, profile_model
@@ -60,14 +71,18 @@ from .operations import Operation
 from .profiler import Measurement, benchmark
 
 __all__ = [
+    "INTERCONNECT_PRESETS",
     "CacheSpec",
+    "ClusterTopology",
     "ContinuousBatchGapAnalysis",
     "ContinuousBatchIterationEstimate",
     "CostEstimate",
     "DetectionResult",
+    "DistributedGapAnalysis",
     "FusedCostEstimate",
     "GapAnalysis",
     "HardwareSpec",
+    "InterconnectSpec",
     "LayerGapAnalysis",
     "Measurement",
     "MemoryEstimate",
@@ -79,12 +94,14 @@ __all__ = [
     "Operation",
     "PagedAttentionCostEstimate",
     "PagedAttentionGapAnalysis",
+    "ParallelismCostEstimate",
     "SSMCostEstimate",
     "SSMGapAnalysis",
     "SpeculativeCostEstimate",
     "SpeculativeDecodingAnalysis",
     "__version__",
     "analyze_continuous_batch_iteration",
+    "analyze_distributed_gap",
     "analyze_gap",
     "analyze_layers_gap",
     "analyze_memory_gap",
@@ -106,8 +123,10 @@ __all__ = [
     "estimate_operation",
     "estimate_operations",
     "estimate_paged_attention",
+    "estimate_parallelism",
     "estimate_speculative_decoding",
     "estimate_ssm",
     "get_adapter",
+    "get_interconnect_preset",
     "profile_model",
 ]

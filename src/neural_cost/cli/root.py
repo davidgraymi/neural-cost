@@ -9,6 +9,7 @@ from neural_cost import __version__
 from neural_cost.cli.audit_cmd import register_audit_parser
 from neural_cost.cli.benchmark_cmd import register_benchmark_parser
 from neural_cost.cli.compare_cmd import register_compare_parser
+from neural_cost.cli.distributed_cmd import register_distributed_parser
 from neural_cost.cli.hardware_cmd import register_hardware_parser
 from neural_cost.cli.llm_cmd import register_llm_parser
 from neural_cost.cli.profile_cmd import register_profile_parser
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     register_compare_parser(subparsers)
     register_audit_parser(subparsers)
     register_llm_parser(subparsers)
+    register_distributed_parser(subparsers)
 
     return parser
 

@@ -290,6 +290,52 @@ print(gap.render())
 # Reports constant-memory decode lower bound and throughput advantage over Transformer KV cache retrieval
 ```
 
+### Distributed 3D Parallelism & Interconnect Rooflines (v0.8.0)
+
+When scaling large models across multi-node clusters, training throughput is governed by the interaction between compute rooflines, network interconnect fabrics, and 3D parallelism strategy.
+
+`neural-cost` models **Tensor Parallelism (TP)**, **Pipeline Parallelism (PP)**, and **Data Parallelism / ZeRO / FSDP** communication volumes, Hockney ($\alpha$-$\beta$) network transfer times, 1F1B schedule bubble fractions, and per-device memory sharding:
+
+```python
+from neural_cost import (
+    ClusterTopology,
+    HardwareSpec,
+    analyze_distributed_gap,
+    estimate_parallelism,
+    get_interconnect_preset,
+)
+
+# 128x H100 cluster across 16 nodes (8 GPUs per node)
+h100 = HardwareSpec(
+    "H100", peak_flops=989e12, memory_bandwidth=3.35e12, memory_capacity=80 * 1024**3
+)
+topo = ClusterTopology(
+    device=h100,
+    num_nodes=16,
+    devices_per_node=8,
+    intra_node=get_interconnect_preset("nvlink4"),  # 900 GB/s
+    inter_node=get_interconnect_preset("infiniband_ndr"),  # 50 GB/s
+)
+
+# Train Llama-3 70B with TP=8, PP=4, DP=4 (ZeRO-3 / FSDP)
+cost = estimate_parallelism(
+    total_parameters=70_000_000_000,
+    batch_size=128,
+    seq_len=4096,
+    embed_dim=8192,
+    num_layers=80,
+    tp_degree=8,
+    pp_degree=4,
+    dp_degree=4,
+    num_microbatches=8,
+    dp_mode="zero3_fsdp",
+)
+
+gap = analyze_distributed_gap(cost, topo, overlap_efficiency=0.85)
+print(gap.render())
+# Reports MFU, step time, communication overhead, pipeline bubble fraction, and memory fit
+```
+
 ## Hardware detection
 
 Auto-detection via `detect_hardware()` returns a `(HardwareSpec, DetectionResult)` tuple
@@ -652,6 +698,32 @@ Run head-to-head empirical benchmarks across PyTorch, JAX, and TensorFlow (backw
 neural-cost compare
 # Or using the legacy binary:
 neural-cost-compare --warmup 10 --repeats 30
+```
+
+### 7. Distributed Cluster & 3D Parallelism (`distributed`)
+
+Model cluster scaling efficiency, network communication volume, and MFU for frontier models:
+
+```bash
+# Model Llama-3 70B training across 16 nodes of 8x H100 with TP=8, PP=4, DP=4:
+neural-cost distributed \
+    --parameters 70e9 \
+    --batch-size 128 \
+    --seq-len 4096 \
+    --embed-dim 8192 \
+    --num-layers 80 \
+    --num-nodes 16 \
+    --devices-per-node 8 \
+    --tp 8 \
+    --pp 4 \
+    --dp 4 \
+    --microbatches 8 \
+    --dp-mode zero3_fsdp \
+    --intra-node nvlink4 \
+    --inter-node infiniband_ndr
+
+# Output cluster performance and communication breakdown as JSON:
+neural-cost distributed --parameters 7e9 --batch-size 32 --tp 2 --dp 4 --json
 ```
 
 ## Current scope

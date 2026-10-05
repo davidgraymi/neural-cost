@@ -1,8 +1,11 @@
 """Theoretical operation cost estimation."""
 
+from __future__ import annotations
+
 from collections.abc import Iterable
 from dataclasses import dataclass
 from math import prod
+from typing import Literal
 
 from .hardware import HardwareSpec
 from .operations import Operation, numel
@@ -25,7 +28,7 @@ class CostEstimate:
     def arithmetic_intensity(self) -> float:
         return self.flops / self.total_bytes if self.total_bytes else 0.0
 
-    def __add__(self, other: "CostEstimate") -> "CostEstimate":
+    def __add__(self, other: CostEstimate) -> CostEstimate:
         return CostEstimate(
             self.flops + other.flops,
             self.read_bytes + other.read_bytes,
@@ -1093,4 +1096,248 @@ def estimate_ssm(
         num_layers=num_layers,
         equivalent_transformer_kv_bytes=equiv_tf_kv_bytes,
         memory_savings_ratio_vs_transformer=savings_ratio,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelismCostEstimate:
+    """Analytical communication volume, memory sharding, and pipeline bubble fractions for 3D parallelism."""
+
+    tp_degree: int
+    pp_degree: int
+    dp_degree: int
+    total_devices: int
+    num_microbatches: int
+    batch_size: int
+    seq_len: int
+    embed_dim: int
+    num_layers: int
+    total_parameters: int
+    dtype_bytes: int
+    is_training: bool
+    dp_mode: str
+    sequence_parallel: bool
+    # Tensor Parallelism
+    tp_bytes_per_step: int
+    # Pipeline Parallelism
+    pp_bubble_fraction: float
+    pp_bytes_per_step: int
+    # Data Parallelism / FSDP / ZeRO
+    dp_bytes_per_step: int
+    # Aggregate communication
+    total_comm_bytes_per_step: int
+    intra_node_comm_bytes: int
+    inter_node_comm_bytes: int
+    # Memory footprint per device (bytes)
+    per_device_param_bytes: int
+    per_device_grad_bytes: int
+    per_device_optimizer_bytes: int
+    per_device_activation_bytes: int
+    per_device_total_memory_bytes: int
+    # Theoretical compute FLOPs per device
+    per_device_flops: int
+    total_step_flops: int
+
+
+def estimate_parallelism(
+    total_parameters: int,
+    batch_size: int,
+    seq_len: int,
+    embed_dim: int,
+    num_layers: int,
+    tp_degree: int = 1,
+    pp_degree: int = 1,
+    dp_degree: int = 1,
+    num_microbatches: int = 1,
+    devices_per_node: int = 8,
+    dp_mode: Literal["ddp", "zero1", "zero2", "zero3_fsdp"] = "zero3_fsdp",
+    sequence_parallel: bool = True,
+    activation_checkpointing: bool = True,
+    is_training: bool = True,
+    dtype_bytes: int = 2,
+    optimizer_state_multiplier: int = 2,
+) -> ParallelismCostEstimate:
+    """Model 3D parallelism communication volume, memory sharding, and pipeline bubble fraction.
+
+    Parameters:
+        total_parameters: Total model parameter count.
+        batch_size: Global batch size across all devices.
+        seq_len: Sequence length in tokens.
+        embed_dim: Model hidden dimension.
+        num_layers: Total transformer layers.
+        tp_degree: Tensor Parallelism degree.
+        pp_degree: Pipeline Parallelism degree.
+        dp_degree: Data Parallelism / ZeRO degree.
+        num_microbatches: Number of microbatches for 1F1B pipeline schedule.
+        devices_per_node: Accelerators per physical server node (e.g. 8 for DGX/HGX).
+        dp_mode: Data parallel sharding strategy ("ddp", "zero1", "zero2", "zero3_fsdp").
+        sequence_parallel: Whether Sequence Parallelism is enabled (Megatron-LM SP).
+        activation_checkpointing: Whether full activation recomputation is enabled.
+        is_training: If True, models forward + backward + optimizer updates.
+        dtype_bytes: Bytes per floating point element (default 2 for FP16/BF16).
+        optimizer_state_multiplier: Multiplier for optimizer moment buffers (2 for AdamW).
+    """
+    if (
+        total_parameters <= 0
+        or batch_size <= 0
+        or seq_len <= 0
+        or embed_dim <= 0
+        or num_layers <= 0
+    ):
+        raise ValueError("model dimensions and parameter count must be positive")
+    if tp_degree <= 0 or pp_degree <= 0 or dp_degree <= 0 or num_microbatches <= 0:
+        raise ValueError("parallelism degrees and microbatches must be positive")
+    if devices_per_node <= 0:
+        raise ValueError("devices_per_node must be positive")
+    if dp_mode not in ("ddp", "zero1", "zero2", "zero3_fsdp"):
+        raise ValueError(f"unsupported dp_mode: '{dp_mode}'")
+
+    total_devices = tp_degree * pp_degree * dp_degree
+    layers_per_stage = max(1, num_layers // pp_degree)
+    local_batch = max(1, batch_size // dp_degree)
+
+    # 1. Tensor Parallelism Communication:
+    # 2 AllReduce/ReduceScatter-AllGather ops per transformer layer (Attention + MLP)
+    # Each op transfers 2 * (TP - 1) / TP * tensor_size bytes per rank
+    if tp_degree > 1:
+        tp_scale = 2 * (tp_degree - 1) / tp_degree
+        activation_elements = local_batch * seq_len * embed_dim
+        comm_bytes_per_op = int(tp_scale * activation_elements * dtype_bytes)
+        # 2 ops per layer, in forward pass
+        tp_fwd_bytes = 2 * layers_per_stage * comm_bytes_per_op
+        # In backward pass, gradient backprop mirrors the forward communication
+        tp_bwd_bytes = tp_fwd_bytes if is_training else 0
+        tp_bytes_per_step = tp_fwd_bytes + tp_bwd_bytes
+    else:
+        tp_bytes_per_step = 0
+
+    # 2. Pipeline Parallelism:
+    # 1F1B schedule bubble fraction: (P - 1) / (M + P - 1)
+    if pp_degree > 1:
+        pp_bubble_fraction = (pp_degree - 1) / (num_microbatches + pp_degree - 1)
+        # Activation transfer between stages: local_batch * seq_len * embed_dim * dtype
+        stage_act_bytes = local_batch * seq_len * embed_dim * dtype_bytes
+        # Forward pass sends activations, backward pass sends activation gradients
+        pp_bytes_per_step = stage_act_bytes * (2 if is_training else 1)
+    else:
+        pp_bubble_fraction = 0.0
+        pp_bytes_per_step = 0
+
+    # 3. Data Parallelism / ZeRO / FSDP Communication:
+    # Sharded parameters across TP:
+    param_bytes = total_parameters * dtype_bytes
+    tp_sharded_param_bytes = param_bytes // tp_degree
+
+    if dp_degree > 1 and is_training:
+        dp_scale = (dp_degree - 1) / dp_degree
+        if dp_mode in ("ddp", "zero1"):
+            # AllReduce gradients across DP ranks: 2 * (DP-1)/DP * params
+            dp_bytes_per_step = int(2 * dp_scale * tp_sharded_param_bytes)
+        elif dp_mode == "zero2":
+            # ReduceScatter gradients across DP ranks: (DP-1)/DP * params
+            dp_bytes_per_step = int(dp_scale * tp_sharded_param_bytes)
+        else:  # zero3_fsdp
+            # FSDP: AllGather params in fwd (1x), AllGather params in bwd (1x), ReduceScatter grads in bwd (1x)
+            dp_bytes_per_step = int(3 * dp_scale * tp_sharded_param_bytes)
+    else:
+        dp_bytes_per_step = 0
+
+    # 4. Topology Mapping: Intra-node vs Inter-node:
+    # Standard mapping: TP ranks are strictly packed intra-node
+    # If TP <= devices_per_node, TP uses intra-node NVLink/NVSwitch.
+    # DP and PP cross node boundaries if TP * PP > devices_per_node.
+    intra_node_comm = 0
+    inter_node_comm = 0
+
+    if tp_degree <= devices_per_node:
+        intra_node_comm += tp_bytes_per_step
+    else:
+        inter_node_comm += tp_bytes_per_step
+
+    if tp_degree * pp_degree <= devices_per_node:
+        intra_node_comm += pp_bytes_per_step
+    else:
+        inter_node_comm += pp_bytes_per_step
+
+    # DP always goes over the outer interconnect if cluster has > 1 node
+    if total_devices > devices_per_node:
+        inter_node_comm += dp_bytes_per_step
+    else:
+        intra_node_comm += dp_bytes_per_step
+
+    total_comm_bytes = tp_bytes_per_step + pp_bytes_per_step + dp_bytes_per_step
+
+    # 5. Per-Device Memory Footprint:
+    # Model parameters:
+    if dp_mode == "zero3_fsdp":
+        per_dev_param = param_bytes // (dp_degree * tp_degree * pp_degree)
+    else:
+        per_dev_param = param_bytes // (tp_degree * pp_degree)
+
+    # Gradients (in training):
+    if not is_training:
+        per_dev_grad = 0
+    elif dp_mode in ("zero2", "zero3_fsdp"):
+        per_dev_grad = param_bytes // (dp_degree * tp_degree * pp_degree)
+    else:
+        per_dev_grad = param_bytes // (tp_degree * pp_degree)
+
+    # Optimizer state:
+    # Standard AdamW: 4B FP32 master weight + 4B FP32 moment1 + 4B FP32 moment2 = 12 bytes/param
+    opt_bytes_total = total_parameters * 4 * (1 + optimizer_state_multiplier)
+    if not is_training:
+        per_dev_opt = 0
+    elif dp_mode in ("zero1", "zero2", "zero3_fsdp"):
+        per_dev_opt = opt_bytes_total // (dp_degree * tp_degree * pp_degree)
+    else:
+        per_dev_opt = opt_bytes_total // (tp_degree * pp_degree)
+
+    # Activation memory per device:
+    # Approximate activation volume per transformer layer per token:
+    # With recomputation: ~ 10 * embed_dim * dtype_bytes
+    # Without recomputation: ~ 34 * embed_dim * dtype_bytes
+    act_coeff = 10 if activation_checkpointing else 34
+    per_token_act = act_coeff * embed_dim * dtype_bytes
+    if sequence_parallel:
+        per_token_act //= tp_degree
+    per_dev_act = layers_per_stage * local_batch * seq_len * per_token_act
+
+    per_dev_total_mem = per_dev_param + per_dev_grad + per_dev_opt + per_dev_act
+
+    # 6. Theoretical Compute FLOPs:
+    # Forward: 2 * params * seq_len * batch_size
+    # Backward: 4 * params * seq_len * batch_size (or 6x with activation recomputation)
+    multiplier = 6 if (is_training and activation_checkpointing) else (4 if is_training else 2)
+    total_step_flops = multiplier * total_parameters * seq_len * batch_size
+    per_dev_flops = total_step_flops // total_devices
+
+    return ParallelismCostEstimate(
+        tp_degree=tp_degree,
+        pp_degree=pp_degree,
+        dp_degree=dp_degree,
+        total_devices=total_devices,
+        num_microbatches=num_microbatches,
+        batch_size=batch_size,
+        seq_len=seq_len,
+        embed_dim=embed_dim,
+        num_layers=num_layers,
+        total_parameters=total_parameters,
+        dtype_bytes=dtype_bytes,
+        is_training=is_training,
+        dp_mode=dp_mode,
+        sequence_parallel=sequence_parallel,
+        tp_bytes_per_step=tp_bytes_per_step,
+        pp_bubble_fraction=pp_bubble_fraction,
+        pp_bytes_per_step=pp_bytes_per_step,
+        dp_bytes_per_step=dp_bytes_per_step,
+        total_comm_bytes_per_step=total_comm_bytes,
+        intra_node_comm_bytes=intra_node_comm,
+        inter_node_comm_bytes=inter_node_comm,
+        per_device_param_bytes=per_dev_param,
+        per_device_grad_bytes=per_dev_grad,
+        per_device_optimizer_bytes=per_dev_opt,
+        per_device_activation_bytes=per_dev_act,
+        per_device_total_memory_bytes=per_dev_total_mem,
+        per_device_flops=per_dev_flops,
+        total_step_flops=total_step_flops,
     )
