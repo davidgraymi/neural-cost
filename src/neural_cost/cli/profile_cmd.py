@@ -39,10 +39,24 @@ def register_profile_parser(
 
 def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "model",
+        nargs="?",
+        default=None,
+        help="Optional Hugging Face model ID (e.g. 'meta-llama/Meta-Llama-3-8B', 'hf:mistralai/Mistral-7B-v0.1') or path to config.json.",
+    )
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=None,
+        dest="model_flag",
+        help="Hugging Face model ID or path to config.json.",
+    )
+    parser.add_argument(
         "--arch",
         choices=["transformer", "moe", "paged-attention", "mlp", "convnet", "ssm", "mamba"],
-        default="transformer",
-        help="Architecture family to profile (default: transformer).",
+        default=None,
+        help="Architecture family to profile (default: transformer or inferred from model).",
     )
     # General dimensions
     parser.add_argument("--batch-size", "-b", type=int, default=1, help="Batch size (default: 1).")
@@ -81,9 +95,9 @@ def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dtype",
         type=str,
-        default="fp16",
+        default=None,
         choices=["fp32", "fp16", "bf16", "int8", "fp8", "int4"],
-        help="Data precision (default: fp16).",
+        help="Data precision (default: fp16 or inferred from model).",
     )
 
     # MoE specific
@@ -214,6 +228,19 @@ def _add_profile_arguments(parser: argparse.ArgumentParser) -> None:
         help="Skip live STREAM memory benchmark if detecting hardware.",
     )
     parser.add_argument("--json", action="store_true", help="Output profile report as JSON.")
+    parser.add_argument(
+        "--plot",
+        type=str,
+        default=None,
+        help="Export publication-quality vector SVG roofline diagram to file path.",
+    )
+    parser.add_argument(
+        "--plot-theme",
+        type=str,
+        default="dark",
+        choices=["dark", "light"],
+        help="Color theme for SVG plot: 'dark' or 'light' (default: dark).",
+    )
 
 
 def profile_transformer(args: argparse.Namespace, dtype_bytes: int) -> dict[str, Any]:
@@ -576,6 +603,54 @@ def profile_ssm(args: argparse.Namespace, dtype_bytes: int) -> dict[str, Any]:
 
 
 def run_profile(args: argparse.Namespace) -> int:
+    target_model = getattr(args, "model_flag", None) or args.model
+    hf_cfg = None
+    if target_model:
+        from neural_cost.hub import from_huggingface
+
+        try:
+            hf_cfg = from_huggingface(target_model)
+        except (
+            FileNotFoundError,
+            PermissionError,
+            ConnectionError,
+            ValueError,
+            RuntimeError,
+            OSError,
+        ) as e:
+            sys.stderr.write(f"Error loading Hugging Face model '{target_model}': {e}\n")
+            return 1
+
+        if args.arch is None:
+            args.arch = hf_cfg.architecture
+        args.embed_dim = hf_cfg.embed_dim
+        args.num_layers = hf_cfg.num_layers
+        args.num_heads = hf_cfg.num_heads
+        args.num_kv_heads = hf_cfg.num_kv_heads
+        args.intermediate_dim = hf_cfg.intermediate_dim
+        if hf_cfg.num_experts is not None:
+            args.num_experts = hf_cfg.num_experts
+            args.expert_hidden_dim = hf_cfg.intermediate_dim
+        if hf_cfg.top_k is not None:
+            args.top_k = hf_cfg.top_k
+        if hf_cfg.state_dim is not None:
+            args.state_dim = hf_cfg.state_dim
+        if hf_cfg.expand_factor is not None:
+            args.expand_factor = hf_cfg.expand_factor
+        if hf_cfg.conv_kernel_size is not None:
+            args.conv_kernel_size = hf_cfg.conv_kernel_size
+        if args.dtype is None:
+            args.dtype = (
+                hf_cfg.dtype
+                if hf_cfg.dtype in ["fp32", "fp16", "bf16", "int8", "fp8", "int4"]
+                else "fp16"
+            )
+    else:
+        if args.arch is None:
+            args.arch = "transformer"
+        if args.dtype is None:
+            args.dtype = "fp16"
+
     dtype_bytes = parse_dtype_bytes(args.dtype)
 
     # 1. Profile architecture
@@ -594,6 +669,10 @@ def run_profile(args: argparse.Namespace) -> int:
     else:
         sys.stderr.write(f"Unknown architecture: {args.arch}\n")
         return 1
+
+    if hf_cfg:
+        res["model_id"] = hf_cfg.model_id
+        res["model_type"] = hf_cfg.model_type
 
     # 2. Hardware roofline analysis
     hw, _ = resolve_hardware(
@@ -642,11 +721,40 @@ def run_profile(args: argparse.Namespace) -> int:
             "cuda_graph_potential_speedup": kl_analysis.cuda_graph_potential_speedup,
         }
 
+    # 3. Export SVG roofline diagram if requested
+    if getattr(args, "plot", None):
+        from neural_cost.plot import RooflinePoint, save_roofline_svg
+
+        achieved_flops = flops / lower_bound_sec if lower_bound_sec > 0 else 0.0
+        model_label = res.get("model_id") or args.arch.upper()
+        if hasattr(args, "batch_size"):
+            seq_info = f", s={args.seq_len}" if hasattr(args, "seq_len") else ""
+            label_text = f"{model_label} (b={args.batch_size}{seq_info})"
+        else:
+            label_text = model_label
+
+        point = RooflinePoint(
+            arithmetic_intensity=ai,
+            flops=achieved_flops,
+            label=label_text,
+            bottleneck=bottleneck,
+            latency_ms=lower_bound_sec * 1e3,
+        )
+        saved_path = save_roofline_svg(
+            filepath=args.plot,
+            hardware=hw,
+            points=point,
+            theme=getattr(args, "plot_theme", "dark"),
+        )
+        res["plot_path"] = str(saved_path)
+
     if args.json:
         print(json.dumps(res, indent=2))
         return 0
 
     print("┌─ Neural Cost Static Profile ───────────────────────────────────────────────")
+    if "model_id" in res:
+        print(f"│  Model ID:            {res['model_id']} ({res['model_type']})")
     print(f"│  Architecture:        {res['architecture']} (dtype: {res['dtype']})")
     if "quantization" in res:
         print(f"│  Quantization:        {res['quantization']}")
@@ -705,5 +813,7 @@ def run_profile(args: argparse.Namespace) -> int:
         )
         print(f"│  Effective Floor:     {kl['effective_lower_bound_ms']:.3f} ms")
         print(f"│  CUDA Graph Speedup:  {kl['cuda_graph_potential_speedup']:.2f}x")
+    if "plot_path" in res:
+        print(f"│  Roofline SVG Plot:   {res['plot_path']}")
     print("└────────────────────────────────────────────────────────────────────────────")
     return 0

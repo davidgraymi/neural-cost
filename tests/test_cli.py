@@ -149,6 +149,52 @@ class TestProfileCommand:
         assert "Roofline Projection" in out
         assert "Lower-Bound Latency" in out
 
+    def test_profile_hf_model_positional(self, tmp_path, capsys):
+        cfg = {
+            "model_type": "llama",
+            "hidden_size": 2048,
+            "num_hidden_layers": 16,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "intermediate_size": 5632,
+            "torch_dtype": "bfloat16",
+        }
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+        main(["profile", str(cfg_path), "--no-bench", "--json"])
+        out, _ = capsys.readouterr()
+        data = json.loads(out)
+        assert data["architecture"] == "transformer"
+        assert data["embed_dim"] == 2048
+        assert data["num_layers"] == 16
+        assert data["num_heads"] == 16
+        assert data["num_kv_heads"] == 4
+        assert data["dtype"] == "bf16"
+
+    def test_profile_svg_plot_export(self, tmp_path, capsys):
+        plot_file = tmp_path / "test_roofline.svg"
+        main(
+            [
+                "profile",
+                "--arch",
+                "transformer",
+                "--plot",
+                str(plot_file),
+                "--plot-theme",
+                "light",
+                "--no-bench",
+                "--json",
+            ]
+        )
+        out, _ = capsys.readouterr()
+        data = json.loads(out)
+        assert "plot_path" in data
+        assert plot_file.is_file()
+        svg_content = plot_file.read_text(encoding="utf-8")
+        assert svg_content.startswith("<svg")
+        assert 'fill="#ffffff"' in svg_content
+
 
 class TestAuditCommand:
     """Test neural-cost audit CI assertions and budget gates."""
@@ -231,6 +277,34 @@ class TestAuditCommand:
         assert data["status"] == "PASS"
         assert len(data["checks"]) == 1
         assert data["checks"][0]["passed"] is True
+
+    def test_audit_hf_model(self, tmp_path, capsys):
+        cfg = {
+            "model_type": "llama",
+            "hidden_size": 1024,
+            "num_hidden_layers": 8,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 4,
+            "intermediate_size": 2048,
+            "torch_dtype": "bfloat16",
+        }
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+        main(
+            [
+                "audit",
+                "--model",
+                str(cfg_path),
+                "--max-vram",
+                "10GB",
+                "--no-bench",
+                "--json",
+            ]
+        )
+        out, _ = capsys.readouterr()
+        data = json.loads(out)
+        assert data["status"] == "PASS"
 
 
 class TestLLMCommand:

@@ -74,9 +74,20 @@ from .hardware import (
     get_interconnect_preset,
 )
 from .hardware_detect import DetectionResult, detect_hardware
+from .hub import (
+    HFModelConfig,
+    fetch_hf_config,
+    from_huggingface,
+    parse_hf_config,
+)
 from .memory import MemoryEstimate, estimate_memory
 from .model import ModelProfile, profile_model
 from .operations import Operation
+from .plot import (
+    RooflinePoint,
+    generate_roofline_svg,
+    save_roofline_svg,
+)
 from .profiler import Measurement, benchmark
 from .quantization import (
     PRECISION_FORMATS,
@@ -108,6 +119,7 @@ __all__ = [
     "DistributedGapAnalysis",
     "FusedCostEstimate",
     "GapAnalysis",
+    "HFModelConfig",
     "HardwareSpec",
     "InterconnectSpec",
     "KernelLaunchAnalysis",
@@ -126,6 +138,7 @@ __all__ = [
     "PrecisionFormat",
     "QuantizationGapAnalysis",
     "QuantizationSpec",
+    "RooflinePoint",
     "SSMCostEstimate",
     "SSMGapAnalysis",
     "SpeculativeCostEstimate",
@@ -162,9 +175,14 @@ __all__ = [
     "estimate_quantized_linear",
     "estimate_speculative_decoding",
     "estimate_ssm",
+    "fetch_hf_config",
+    "from_huggingface",
+    "generate_roofline_svg",
     "get_adapter",
     "get_interconnect_preset",
     "get_precision_format",
     "get_quantization_preset",
+    "parse_hf_config",
     "profile_model",
+    "save_roofline_svg",
 ]
