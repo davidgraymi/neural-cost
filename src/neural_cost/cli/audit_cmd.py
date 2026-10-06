@@ -69,12 +69,26 @@ def _add_audit_arguments(parser: argparse.ArgumentParser) -> None:
         help="Maximum allowable KV cache fragmentation ratio (0.0 to 1.0).",
     )
 
-    # Architecture parameters
+    # Model & Architecture parameters
+    parser.add_argument(
+        "model",
+        nargs="?",
+        default=None,
+        help="Optional Hugging Face model ID (e.g. 'meta-llama/Meta-Llama-3-8B', 'hf:mistralai/Mistral-7B-v0.1') or path to config.json.",
+    )
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=None,
+        dest="model_flag",
+        help="Hugging Face model ID or path to config.json.",
+    )
     parser.add_argument(
         "--arch",
         choices=["transformer", "moe", "paged-attention", "mlp", "convnet", "ssm", "mamba"],
-        default="transformer",
-        help="Architecture family to audit (default: transformer).",
+        default=None,
+        help="Architecture family to audit (default: transformer or inferred from model).",
     )
     parser.add_argument("--batch-size", "-b", type=int, default=1, help="Batch size (default: 1).")
     parser.add_argument(
@@ -102,9 +116,9 @@ def _add_audit_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dtype",
         type=str,
-        default="fp16",
+        default=None,
         choices=["fp32", "fp16", "bf16", "int8", "fp8", "int4"],
-        help="Data precision (default: fp16).",
+        help="Data precision (default: fp16 or inferred from model).",
     )
 
     # MoE specific
@@ -156,6 +170,54 @@ def _add_audit_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def run_audit(args: argparse.Namespace) -> int:
+    target_model = getattr(args, "model_flag", None) or args.model
+    hf_cfg = None
+    if target_model:
+        from neural_cost.hub import from_huggingface
+
+        try:
+            hf_cfg = from_huggingface(target_model)
+        except (
+            FileNotFoundError,
+            PermissionError,
+            ConnectionError,
+            ValueError,
+            RuntimeError,
+            OSError,
+        ) as e:
+            sys.stderr.write(f"Error loading Hugging Face model '{target_model}': {e}\n")
+            return 1
+
+        if args.arch is None:
+            args.arch = hf_cfg.architecture
+        args.embed_dim = hf_cfg.embed_dim
+        args.num_layers = hf_cfg.num_layers
+        args.num_heads = hf_cfg.num_heads
+        args.num_kv_heads = hf_cfg.num_kv_heads
+        args.intermediate_dim = hf_cfg.intermediate_dim
+        if hf_cfg.num_experts is not None:
+            args.num_experts = hf_cfg.num_experts
+            args.expert_hidden_dim = hf_cfg.intermediate_dim
+        if hf_cfg.top_k is not None:
+            args.top_k = hf_cfg.top_k
+        if hf_cfg.state_dim is not None:
+            args.state_dim = hf_cfg.state_dim
+        if hf_cfg.expand_factor is not None:
+            args.expand_factor = hf_cfg.expand_factor
+        if hf_cfg.conv_kernel_size is not None:
+            args.conv_kernel_size = hf_cfg.conv_kernel_size
+        if args.dtype is None:
+            args.dtype = (
+                hf_cfg.dtype
+                if hf_cfg.dtype in ["fp32", "fp16", "bf16", "int8", "fp8", "int4"]
+                else "fp16"
+            )
+    else:
+        if args.arch is None:
+            args.arch = "transformer"
+        if args.dtype is None:
+            args.dtype = "fp16"
+
     dtype_bytes = parse_dtype_bytes(args.dtype)
 
     # 1. Profile architecture

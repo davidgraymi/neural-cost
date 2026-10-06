@@ -336,6 +336,31 @@ print(gap.render())
 # Reports MFU, step time, communication overhead, pipeline bubble fraction, and memory fit
 ```
 
+### Zero-Code Hugging Face Model Ingestion & SVG Roofline Visualizer (v0.10.0)
+
+Profile any open-weight model directly by its Hugging Face repository ID (or local `config.json` path) with **zero external dependencies** and zero PyTorch/Transformers overhead:
+
+```python
+from neural_cost import HardwareSpec, from_huggingface, save_roofline_svg, RooflinePoint
+
+# 1. Ingest model architecture directly from Hugging Face Hub (cached locally)
+model_cfg = from_huggingface("meta-llama/Meta-Llama-3-8B")
+print(f"Architecture: {model_cfg.architecture}, Dim: {model_cfg.embed_dim}, Heads: {model_cfg.num_heads}/{model_cfg.num_kv_heads}")
+
+# 2. Render publication-quality vector SVG roofline charts with workload overlays
+hardware = HardwareSpec(name="NVIDIA A100-SXM4-80GB", peak_flops=312e12, memory_bandwidth=2039e9)
+point = RooflinePoint(
+    arithmetic_intensity=14.2,
+    flops=14.2 * hardware.memory_bandwidth,
+    label="LLaMA-3-8B Decode (b=1)",
+    bottleneck="memory",
+    latency_ms=1.1,
+)
+
+# Export standalone, responsive vector SVG
+save_roofline_svg("llama3_roofline.svg", hardware, points=point, theme="dark")
+```
+
 ## Hardware detection
 
 Auto-detection via `detect_hardware()` returns a `(HardwareSpec, DetectionResult)` tuple
@@ -617,6 +642,12 @@ neural-cost hardware --json
 Compute forward FLOPs, parameter counts, KV cache size, activation memory, arithmetic intensity, and theoretical latency floor on detected or target hardware:
 
 ```bash
+# Zero-code profiling directly by Hugging Face Hub Model ID:
+neural-cost profile meta-llama/Meta-Llama-3-8B
+
+# Ingest Mixtral 8x7B MoE and export publication-ready SVG roofline:
+neural-cost profile mistralai/Mixtral-8x7B-v0.1 --plot mixtral_roofline.svg --plot-theme dark
+
 # Profile a 7B Transformer (Llama-style) at batch size 8:
 neural-cost profile --arch transformer --batch-size 8 --seq-len 4096 --embed-dim 4096 --num-heads 32 --num-kv-heads 8 --num-layers 32 --dtype fp16
 
@@ -659,6 +690,9 @@ neural-cost benchmark --arch stream
 Enforce automated performance budgets and VRAM ceilings in your CI/CD pipelines. Exits with status `0` if all assertions pass, or `1` if any budget is exceeded:
 
 ```bash
+# Audit any Hugging Face model directly in CI against strict VRAM and latency bounds:
+neural-cost audit meta-llama/Meta-Llama-3-8B --max-vram 16GB --max-latency-ms 25.0
+
 # Fail CI if model exceeds 16GB VRAM or 50ms latency floor:
 neural-cost audit \
     --arch transformer \
