@@ -8,7 +8,11 @@ from neural_cost import (
     analyze_speculative_decoding,
     estimate_speculative_decoding,
 )
-from neural_cost.estimate import _expected_speculative_tokens, _find_breakeven_alpha
+from neural_cost.estimate import (
+    _expected_speculative_tokens,
+    _find_breakeven_alpha,
+    acceptance_profile_from_lengths,
+)
 
 
 class TestSpeculativeFormulas:
@@ -144,3 +148,61 @@ class TestSpeculativeAnalysis:
         assert analysis.is_favorable is False
         assert analysis.speedup < 1.0
         assert any("regresses latency" in f for f in analysis.findings)
+
+
+class TestPositionDependentAcceptance:
+    """Per-position conditional acceptance instead of a single i.i.d. alpha."""
+
+    def test_uniform_profile_matches_scalar(self):
+        assert _expected_speculative_tokens(4, [0.7] * 4) == pytest.approx(
+            _expected_speculative_tokens(4, 0.7)
+        )
+
+    def test_profile_expected_tokens_is_survival_sum(self):
+        # 1 + 0.9 + 0.9*0.6 + 0.9*0.6*0.5 = 2.71
+        assert _expected_speculative_tokens(3, [0.9, 0.6, 0.5]) == pytest.approx(2.71)
+
+    def test_decaying_profile_yields_fewer_tokens_than_its_first_position(self):
+        decaying = [0.9, 0.8, 0.7, 0.6]
+        assert _expected_speculative_tokens(4, decaying) < _expected_speculative_tokens(4, 0.9)
+
+    def test_profile_length_and_range_validated(self):
+        with pytest.raises(ValueError):
+            _expected_speculative_tokens(4, [0.5, 0.5])
+        with pytest.raises(ValueError):
+            _expected_speculative_tokens(2, [0.5, 1.5])
+
+    def test_profile_from_observed_lengths(self):
+        # Cycles accepting 0, 1, 2, 2, 4 of gamma=4 drafts.
+        profile = acceptance_profile_from_lengths([0, 1, 2, 2, 4], gamma=4)
+        assert profile == pytest.approx((4 / 5, 3 / 4, 1 / 3, 1.0))
+        # The profile reproduces the empirical mean tokens per cycle (+1 bonus).
+        empirical = 1 + sum([0, 1, 2, 2, 4]) / 5
+        assert _expected_speculative_tokens(4, profile) == pytest.approx(empirical)
+
+    def test_profile_from_lengths_validates(self):
+        with pytest.raises(ValueError):
+            acceptance_profile_from_lengths([], gamma=4)
+        with pytest.raises(ValueError):
+            acceptance_profile_from_lengths([5], gamma=4)
+        assert acceptance_profile_from_lengths([0, 0], gamma=2) == (0.0, 0.0)
+
+    def test_estimate_and_analysis_accept_profile(self):
+        draft = CostEstimate(flops=1_000, read_bytes=1_000_000, write_bytes=0, operations=1)
+        verify = CostEstimate(flops=50_000, read_bytes=10_000_000, write_bytes=0, operations=1)
+        target = CostEstimate(flops=10_000, read_bytes=10_000_000, write_bytes=0, operations=1)
+        hw = HardwareSpec(name="t", peak_flops=1e12, memory_bandwidth=1e12)
+        profile = [0.9, 0.8, 0.6, 0.4]
+        est = estimate_speculative_decoding(draft, verify, target, gamma=4, acceptance_rate=profile)
+        gap = analyze_speculative_decoding(
+            draft, verify, target, hw, gamma=4, acceptance_rate=profile
+        )
+        e_tokens = _expected_speculative_tokens(4, profile)
+        assert est.expected_tokens_per_step == pytest.approx(e_tokens)
+        assert gap.expected_tokens_per_step == pytest.approx(e_tokens)
+        assert est.acceptance_profile == tuple(profile)
+        # Reported scalar alpha is the i.i.d. equivalent with the same E[N].
+        assert _expected_speculative_tokens(4, gap.acceptance_rate) == pytest.approx(
+            e_tokens, rel=1e-6
+        )
+        assert "acceptance by position" in gap.render()

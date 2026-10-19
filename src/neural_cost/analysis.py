@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from .estimate import (
@@ -347,11 +347,19 @@ class SpeculativeDecodingAnalysis:
     breakeven_acceptance_rate: float
     is_favorable: bool
     findings: tuple[str, ...]
+    acceptance_profile: tuple[float, ...] = ()
 
     def render(self) -> str:
         lines = [
             f"Speculative Decoding Analysis (gamma={self.gamma}, alpha={self.acceptance_rate:.1%})",
             f"  expected tokens/cycle: {self.expected_tokens_per_step:.2f}",
+        ]
+        if len(set(self.acceptance_profile)) > 1:
+            lines.append(
+                "  acceptance by position: "
+                + ", ".join(f"{a:.0%}" for a in self.acceptance_profile)
+            )
+        lines += [
             f"  draft cycle bound: {self.draft_step_lower_bound_seconds * 1e3:.3f} ms",
             f"  target verify bound: {self.target_verify_lower_bound_seconds * 1e3:.3f} ms",
             f"  speculative step bound: {self.spec_step_lower_bound_seconds * 1e3:.3f} ms",
@@ -372,18 +380,29 @@ def analyze_speculative_decoding(
     target_decode_cost: CostEstimate,
     hardware: HardwareSpec,
     gamma: int = 4,
-    acceptance_rate: float = 0.7,
+    acceptance_rate: float | Sequence[float] = 0.7,
 ) -> SpeculativeDecodingAnalysis:
     """Analyze speculative decoding wall-clock speedup on target hardware.
 
     Evaluates whether the parallel verification in the target model plus the
     draft autoregressive steps achieves lower latency per token than standard
     autoregressive decoding in the target model alone.
+
+    ``acceptance_rate`` is a scalar alpha or a length-gamma sequence of
+    per-position conditional acceptance probabilities; ``acceptance_rate`` on the
+    result is the scalar alpha with the same expected tokens per cycle.
     """
+    from .estimate import (
+        _acceptance_profile,
+        _expected_speculative_tokens,
+        _find_breakeven_alpha,
+        _uniform_equivalent_alpha,
+    )
+
     if gamma <= 0:
         raise ValueError("gamma (speculation depth) must be positive")
-    if not (0.0 <= acceptance_rate <= 1.0):
-        raise ValueError("acceptance_rate must be between 0.0 and 1.0")
+    profile = _acceptance_profile(gamma, acceptance_rate)
+    alpha = _uniform_equivalent_alpha(gamma, acceptance_rate)
 
     draft_t_comp = draft_decode_cost.flops / hardware.peak_flops
     draft_t_mem = draft_decode_cost.total_bytes / hardware.memory_bandwidth
@@ -400,8 +419,6 @@ def analyze_speculative_decoding(
     base_t_mem = target_decode_cost.total_bytes / hardware.memory_bandwidth
     baseline_bound = max(base_t_comp, base_t_mem)
 
-    from .estimate import _expected_speculative_tokens, _find_breakeven_alpha
-
     e_tokens = _expected_speculative_tokens(gamma, acceptance_rate)
     eff_latency_per_token = spec_step_bound / e_tokens if e_tokens > 0 else float("inf")
     speedup = baseline_bound / eff_latency_per_token if eff_latency_per_token > 0 else 0.0
@@ -413,7 +430,7 @@ def analyze_speculative_decoding(
     is_favorable = speedup > 1.0
     if is_favorable:
         findings.append(
-            f"Speculative decoding achieves {speedup:.2f}x speedup; acceptance rate ({acceptance_rate:.1%}) exceeds breakeven ({breakeven_alpha:.1%})."
+            f"Speculative decoding achieves {speedup:.2f}x speedup; acceptance rate ({alpha:.1%}) exceeds breakeven ({breakeven_alpha:.1%})."
         )
     else:
         if breakeven_alpha > 1.0:
@@ -422,12 +439,12 @@ def analyze_speculative_decoding(
             )
         else:
             findings.append(
-                f"Speculative decoding regresses latency ({speedup:.2f}x); acceptance rate ({acceptance_rate:.1%}) is below the {breakeven_alpha:.1%} breakeven threshold."
+                f"Speculative decoding regresses latency ({speedup:.2f}x); acceptance rate ({alpha:.1%}) is below the {breakeven_alpha:.1%} breakeven threshold."
             )
 
     return SpeculativeDecodingAnalysis(
         gamma=gamma,
-        acceptance_rate=acceptance_rate,
+        acceptance_rate=alpha,
         expected_tokens_per_step=e_tokens,
         draft_step_lower_bound_seconds=draft_step_bound,
         target_verify_lower_bound_seconds=verify_bound,
@@ -438,6 +455,7 @@ def analyze_speculative_decoding(
         breakeven_acceptance_rate=breakeven_alpha,
         is_favorable=is_favorable,
         findings=tuple(findings),
+        acceptance_profile=profile,
     )
 
 
@@ -882,7 +900,7 @@ def analyze_distributed_gap(
 
     cluster_peak_flops = topology.total_peak_flops
     # Ideal theoretical model FLOPs per step (excluding recomputation overhead):
-    ideal_multiplier = 4 if cost.is_training else 2
+    ideal_multiplier = 6 if cost.is_training else 2
     ideal_step_flops = ideal_multiplier * cost.total_parameters * cost.seq_len * cost.batch_size
     mfu = (
         ideal_step_flops / (step_time * cluster_peak_flops)

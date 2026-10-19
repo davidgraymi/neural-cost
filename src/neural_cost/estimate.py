@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from math import prod
 from typing import Literal
@@ -597,16 +597,88 @@ class SpeculativeCostEstimate:
     speedup_bytes: float
     breakeven_acceptance_rate_bytes: float
     breakeven_acceptance_rate_flops: float
+    # Conditional acceptance probability of each draft position given all earlier
+    # positions were accepted; acceptance_rate is its uniform-alpha equivalent.
+    acceptance_profile: tuple[float, ...] = ()
 
 
-def _expected_speculative_tokens(gamma: int, alpha: float) -> float:
-    """Compute expected number of accepted + bonus tokens: E[N] = (1 - alpha^(gamma + 1)) / (1 - alpha)."""
+AcceptanceRate = float | Sequence[float]
+
+
+def _acceptance_profile(gamma: int, acceptance: AcceptanceRate) -> tuple[float, ...]:
+    """Normalize a scalar alpha or per-position probabilities to a length-gamma profile."""
+    if isinstance(acceptance, (int, float)):
+        if not (0.0 <= acceptance <= 1.0):
+            raise ValueError("acceptance_rate must be between 0.0 and 1.0")
+        return (float(acceptance),) * max(gamma, 0)
+    profile = tuple(float(a) for a in acceptance)
+    if len(profile) != gamma:
+        raise ValueError(f"acceptance profile has {len(profile)} positions but gamma is {gamma}")
+    if any(not (0.0 <= a <= 1.0) for a in profile):
+        raise ValueError("acceptance probabilities must be between 0.0 and 1.0")
+    return profile
+
+
+def _expected_speculative_tokens(gamma: int, alpha: AcceptanceRate) -> float:
+    """Expected accepted + bonus tokens per cycle: E[N] = 1 + sum_k prod_{i<=k} alpha_i.
+
+    A scalar alpha gives the i.i.d. closed form (1 - alpha^(gamma + 1)) / (1 - alpha)
+    (Leviathan et al. 2023). A sequence gives each position's acceptance probability
+    conditional on all earlier drafts being accepted. Because E[N] depends only on
+    the probability that the first k drafts survive, this is exact for any
+    correlation between positions, not just independent ones.
+    """
     if gamma <= 0:
         return 1.0
-    alpha = max(0.0, min(1.0, float(alpha)))
-    if abs(alpha - 1.0) < 1e-9:
-        return float(1 + gamma)
-    return (1.0 - (alpha ** (gamma + 1))) / (1.0 - alpha)
+    if isinstance(alpha, (int, float)):
+        alpha = max(0.0, min(1.0, float(alpha)))
+        if abs(alpha - 1.0) < 1e-9:
+            return float(1 + gamma)
+        return (1.0 - (alpha ** (gamma + 1))) / (1.0 - alpha)
+    expected, survival = 1.0, 1.0
+    for a in _acceptance_profile(gamma, alpha):
+        survival *= a
+        expected += survival
+    return expected
+
+
+def _uniform_equivalent_alpha(gamma: int, acceptance: AcceptanceRate) -> float:
+    """The scalar alpha whose i.i.d. E[N] matches this acceptance profile."""
+    if isinstance(acceptance, (int, float)):
+        return float(acceptance)
+    e_tokens = _expected_speculative_tokens(gamma, acceptance)
+    if e_tokens >= 1 + gamma - 1e-12:
+        return 1.0
+    return _find_breakeven_alpha(gamma, e_tokens)
+
+
+def acceptance_profile_from_lengths(
+    accepted_lengths: Iterable[int], gamma: int
+) -> tuple[float, ...]:
+    """Estimate per-position conditional acceptance from observed draft runs.
+
+    Args:
+        accepted_lengths: Number of draft tokens accepted in each verify cycle
+            (0..gamma), e.g. from vLLM's spec-decode acceptance-length metrics.
+        gamma: Speculation depth those cycles ran with.
+
+    Returns:
+        alpha_k = P(position k accepted | positions 1..k-1 accepted), k = 1..gamma.
+        Positions never reached get 0.0.
+    """
+    if gamma <= 0:
+        raise ValueError("gamma (speculation depth) must be positive")
+    lengths = list(accepted_lengths)
+    if not lengths:
+        raise ValueError("accepted_lengths must not be empty")
+    if any(n < 0 or n > gamma for n in lengths):
+        raise ValueError(f"accepted lengths must be between 0 and gamma ({gamma})")
+    profile: list[float] = []
+    for k in range(1, gamma + 1):
+        reached = sum(1 for n in lengths if n >= k - 1)
+        accepted = sum(1 for n in lengths if n >= k)
+        profile.append(accepted / reached if reached else 0.0)
+    return tuple(profile)
 
 
 def _find_breakeven_alpha(gamma: int, cost_ratio: float) -> float:
@@ -637,7 +709,7 @@ def estimate_speculative_decoding(
     target_verify_cost: CostEstimate,
     target_decode_cost: CostEstimate,
     gamma: int = 4,
-    acceptance_rate: float = 0.7,
+    acceptance_rate: AcceptanceRate = 0.7,
 ) -> SpeculativeCostEstimate:
     """Estimate speculative decoding compute, memory traffic, and breakeven acceptance rate.
 
@@ -646,12 +718,13 @@ def estimate_speculative_decoding(
         target_verify_cost: Cost of parallel verification of gamma tokens in target model.
         target_decode_cost: Cost of generating 1 token autoregressively with target model (baseline).
         gamma: Lookahead speculation depth (number of candidate tokens proposed).
-        acceptance_rate: Mean probability alpha of accepting a draft token.
+        acceptance_rate: Probability alpha of accepting each draft token, or a
+            length-gamma sequence of per-position probabilities conditional on all
+            earlier drafts being accepted (see ``acceptance_profile_from_lengths``).
     """
     if gamma <= 0:
         raise ValueError("gamma (speculation depth) must be positive")
-    if not (0.0 <= acceptance_rate <= 1.0):
-        raise ValueError("acceptance_rate must be between 0.0 and 1.0")
+    profile = _acceptance_profile(gamma, acceptance_rate)
 
     e_tokens = _expected_speculative_tokens(gamma, acceptance_rate)
 
@@ -687,7 +760,7 @@ def estimate_speculative_decoding(
 
     return SpeculativeCostEstimate(
         gamma=gamma,
-        acceptance_rate=acceptance_rate,
+        acceptance_rate=_uniform_equivalent_alpha(gamma, acceptance_rate),
         expected_tokens_per_step=e_tokens,
         draft_decode_flops=draft_total_flops,
         target_verify_flops=target_verify_cost.flops,
@@ -701,6 +774,7 @@ def estimate_speculative_decoding(
         speedup_bytes=speedup_bytes,
         breakeven_acceptance_rate_bytes=breakeven_bytes,
         breakeven_acceptance_rate_flops=breakeven_flops,
+        acceptance_profile=profile,
     )
 
 
@@ -1135,11 +1209,15 @@ class ParallelismCostEstimate:
     is_training: bool
     dp_mode: str
     sequence_parallel: bool
-    # Tensor Parallelism
+    # Tensor Parallelism (per rank; includes the recomputed forward under checkpointing)
     tp_bytes_per_step: int
-    # Pipeline Parallelism
+    tp_recompute_bytes_per_step: int
+    # Pipeline Parallelism (pp_bytes_per_step is per rank, for an interior stage)
     pp_bubble_fraction: float
     pp_bytes_per_step: int
+    pp_virtual_stages: int
+    pp_boundaries: int
+    pp_total_bytes_per_step: int
     # Data Parallelism / FSDP / ZeRO
     dp_bytes_per_step: int
     # Aggregate communication
@@ -1167,6 +1245,7 @@ def estimate_parallelism(
     pp_degree: int = 1,
     dp_degree: int = 1,
     num_microbatches: int = 1,
+    pp_virtual_stages: int = 1,
     devices_per_node: int = 8,
     dp_mode: Literal["ddp", "zero1", "zero2", "zero3_fsdp"] = "zero3_fsdp",
     sequence_parallel: bool = True,
@@ -1187,6 +1266,8 @@ def estimate_parallelism(
         pp_degree: Pipeline Parallelism degree.
         dp_degree: Data Parallelism / ZeRO degree.
         num_microbatches: Number of microbatches for 1F1B pipeline schedule.
+        pp_virtual_stages: Model chunks per pipeline rank (Megatron interleaved 1F1B);
+            1 is the plain 1F1B schedule.
         devices_per_node: Accelerators per physical server node (e.g. 8 for DGX/HGX).
         dp_mode: Data parallel sharding strategy ("ddp", "zero1", "zero2", "zero3_fsdp").
         sequence_parallel: Whether Sequence Parallelism is enabled (Megatron-LM SP).
@@ -1205,6 +1286,8 @@ def estimate_parallelism(
         raise ValueError("model dimensions and parameter count must be positive")
     if tp_degree <= 0 or pp_degree <= 0 or dp_degree <= 0 or num_microbatches <= 0:
         raise ValueError("parallelism degrees and microbatches must be positive")
+    if pp_virtual_stages <= 0:
+        raise ValueError("pp_virtual_stages must be positive")
     if devices_per_node <= 0:
         raise ValueError("devices_per_node must be positive")
     if dp_mode not in ("ddp", "zero1", "zero2", "zero3_fsdp"):
@@ -1225,21 +1308,39 @@ def estimate_parallelism(
         tp_fwd_bytes = 2 * layers_per_stage * comm_bytes_per_op
         # In backward pass, gradient backprop mirrors the forward communication
         tp_bwd_bytes = tp_fwd_bytes if is_training else 0
-        tp_bytes_per_step = tp_fwd_bytes + tp_bwd_bytes
+        # Full recomputation re-runs each layer's forward inside backward, and the
+        # TP-sharded forward re-issues its collectives (Korthikanti et al. 2022).
+        tp_recompute_bytes = tp_fwd_bytes if (is_training and activation_checkpointing) else 0
+        tp_bytes_per_step = tp_fwd_bytes + tp_bwd_bytes + tp_recompute_bytes
     else:
+        tp_recompute_bytes = 0
         tp_bytes_per_step = 0
 
     # 2. Pipeline Parallelism:
-    # 1F1B schedule bubble fraction: (P - 1) / (M + P - 1)
+    # 1F1B bubble: (P - 1) / (M + P - 1). Interleaving v chunks per rank shrinks
+    # the bubble by v: (P - 1) / (v * M + P - 1) (Narayanan et al. 2021).
+    pp_boundaries = pp_degree * pp_virtual_stages - 1
     if pp_degree > 1:
-        pp_bubble_fraction = (pp_degree - 1) / (num_microbatches + pp_degree - 1)
-        # Activation transfer between stages: local_batch * seq_len * embed_dim * dtype
+        pp_bubble_fraction = (pp_degree - 1) / (
+            pp_virtual_stages * num_microbatches + pp_degree - 1
+        )
+        # Activation tensor crossing one boundary for this DP replica's batch.
         stage_act_bytes = local_batch * seq_len * embed_dim * dtype_bytes
-        # Forward pass sends activations, backward pass sends activation gradients
-        pp_bytes_per_step = stage_act_bytes * (2 if is_training else 1)
+        # With sequence parallelism each TP rank holds and sends only its 1/TP shard
+        # (Megatron scatter-gather); otherwise every TP rank sends the full tensor.
+        per_rank_act_bytes = stage_act_bytes // tp_degree if sequence_parallel else stage_act_bytes
+        directions = 2 if is_training else 1  # activations forward, gradients backward
+        # An interior rank sends once per chunk it hosts; this is the per-rank
+        # volume the link carries, comparable to the TP and DP figures.
+        pp_bytes_per_step = per_rank_act_bytes * directions * pp_virtual_stages
+        # Cluster-wide: every boundary, every TP rank, every DP replica.
+        pp_total_bytes_per_step = (
+            per_rank_act_bytes * directions * pp_boundaries * tp_degree * dp_degree
+        )
     else:
         pp_bubble_fraction = 0.0
         pp_bytes_per_step = 0
+        pp_total_bytes_per_step = 0
 
     # 3. Data Parallelism / ZeRO / FSDP Communication:
     # Sharded parameters across TP:
@@ -1323,9 +1424,9 @@ def estimate_parallelism(
     per_dev_total_mem = per_dev_param + per_dev_grad + per_dev_opt + per_dev_act
 
     # 6. Theoretical Compute FLOPs:
-    # Forward: 2 * params * seq_len * batch_size
-    # Backward: 4 * params * seq_len * batch_size (or 6x with activation recomputation)
-    multiplier = 6 if (is_training and activation_checkpointing) else (4 if is_training else 2)
+    # Forward: 2 * params * tokens; backward: 4 * params * tokens.
+    # Training is 6x, or 8x with full recomputation (one extra forward).
+    multiplier = 8 if (is_training and activation_checkpointing) else (6 if is_training else 2)
     total_step_flops = multiplier * total_parameters * seq_len * batch_size
     per_dev_flops = total_step_flops // total_devices
 
@@ -1345,8 +1446,12 @@ def estimate_parallelism(
         dp_mode=dp_mode,
         sequence_parallel=sequence_parallel,
         tp_bytes_per_step=tp_bytes_per_step,
+        tp_recompute_bytes_per_step=tp_recompute_bytes,
         pp_bubble_fraction=pp_bubble_fraction,
         pp_bytes_per_step=pp_bytes_per_step,
+        pp_virtual_stages=pp_virtual_stages,
+        pp_boundaries=pp_boundaries if pp_degree > 1 else 0,
+        pp_total_bytes_per_step=pp_total_bytes_per_step,
         dp_bytes_per_step=dp_bytes_per_step,
         total_comm_bytes_per_step=total_comm_bytes,
         intra_node_comm_bytes=intra_node_comm,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from neural_cost.hardware import HardwareSpec
@@ -275,7 +276,7 @@ def benchmark_moe_decode(
 
 def benchmark_speculative_decoding(
     gamma: int = 4,
-    acceptance_rate: float = 0.75,
+    acceptance_rate: float | Sequence[float] = 0.75,
     prompt_len: int = 512,
     batch_size: int = 1,
     draft_head_dim: int = 64,
@@ -285,7 +286,14 @@ def benchmark_speculative_decoding(
 ) -> SpeculativeDecodeMetrics:
     import torch
 
-    from neural_cost.estimate import _expected_speculative_tokens, _find_breakeven_alpha
+    from neural_cost.estimate import (
+        _acceptance_profile,
+        _expected_speculative_tokens,
+        _find_breakeven_alpha,
+        _uniform_equivalent_alpha,
+    )
+
+    _acceptance_profile(gamma, acceptance_rate)
 
     q_draft = torch.randn(batch_size, 4, 1, draft_head_dim)
     k_draft = torch.randn(batch_size, 4, prompt_len, draft_head_dim)
@@ -331,7 +339,7 @@ def benchmark_speculative_decoding(
 
     return SpeculativeDecodeMetrics(
         gamma=gamma,
-        acceptance_rate=acceptance_rate,
+        acceptance_rate=_uniform_equivalent_alpha(gamma, acceptance_rate),
         expected_tokens_per_step=e_tokens,
         draft_latency_ms=draft_ms,
         verify_latency_ms=verify_ms,

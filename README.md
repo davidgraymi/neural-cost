@@ -333,6 +333,18 @@ analysis = analyze_speculative_decoding(
 print(analysis.render())
 ```
 
+Acceptance is rarely uniform: later draft positions are accepted less often, and acceptances are correlated. Pass a per-position profile instead of a scalar, where entry *k* is the probability that draft *k* is accepted given that drafts 1..*k*−1 were. Expected tokens per cycle depend only on these survival probabilities, so this is exact under any correlation. `acceptance_profile_from_lengths` builds the profile from observed accepted-run lengths (e.g. vLLM spec-decode metrics):
+
+```python
+from neural_cost import acceptance_profile_from_lengths
+
+profile = acceptance_profile_from_lengths(observed_accepted_lengths, gamma=4)
+analysis = analyze_speculative_decoding(
+    draft_decode, target_verify, target_decode, hardware, gamma=4, acceptance_rate=profile
+)
+# analysis.acceptance_rate is the i.i.d. alpha with the same expected tokens/cycle
+```
+
 ### PagedAttention & KV Cache Memory Modeling
 
 PagedAttention (vLLM) allocates non-contiguous fixed-size blocks (e.g. 16 tokens) to eliminate external fragmentation and over-reservation. `neural-cost` models exact block allocation, compulsory vs wasted fragmentation bytes, prefix cache sharing, and concurrency capacity multipliers:
@@ -424,7 +436,10 @@ print(gap.render())
 
 When scaling large models across multi-node clusters, training throughput is governed by the interaction between compute rooflines, network interconnect fabrics, and 3D parallelism strategy.
 
-`neural-cost` models **Tensor Parallelism (TP)**, **Pipeline Parallelism (PP)**, and **Data Parallelism / ZeRO / FSDP** communication volumes, Hockney ($\alpha$-$\beta$) network transfer times, 1F1B schedule bubble fractions, and per-device memory sharding:
+`neural-cost` models **Tensor Parallelism (TP)**, **Pipeline Parallelism (PP)**, and **Data Parallelism / ZeRO / FSDP** communication volumes, Hockney ($\alpha$-$\beta$) network transfer times, 1F1B schedule bubble fractions, and per-device memory sharding.
+
+- With `activation_checkpointing=True`, the recomputed forward re-issues its TP collectives (`tp_recompute_bytes_per_step`), and step FLOPs are 8×params×tokens instead of 6×.
+- `pp_bytes_per_step` is the per-rank volume an interior stage carries; `pp_total_bytes_per_step` sums all `pp_boundaries` stage boundaries across TP ranks and DP replicas. With sequence parallelism each TP rank sends only its 1/TP shard of the boundary tensor. `pp_virtual_stages` models Megatron's interleaved 1F1B schedule, which divides the bubble by *v* and multiplies per-rank PP traffic by *v*.
 
 ```python
 from neural_cost import (
