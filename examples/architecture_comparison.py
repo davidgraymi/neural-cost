@@ -6,8 +6,8 @@ directly comparable:
 
   • FF DNN     – multi-layer feedforward classifier
   • CNN        – 3-block ConvNet with pooling
-  • RNN        – 2-layer vanilla RNN encoder
-  • LSTM       – 2-layer LSTM encoder
+  • RNN        – 2-layer vanilla (tanh) RNN encoder, bias-free
+  • LSTM       – 2-layer LSTM encoder, bias-free
   • Transformer – 2-layer encoder (multi-head attention + FFN)
 
 Run after installing one or more framework extras:
@@ -93,7 +93,12 @@ def evaluate(
     repeats: int,
 ) -> Result:
     profile = profile_model(model, inputs, adapter)
-    measurement = adapter.benchmark(model, *inputs, warmup=warmup, repeats=repeats)
+    runner = model
+    if framework == "JAX":
+        import jax
+
+        runner = jax.jit(model)  # eager lax.scan would recompile on every call
+    measurement = adapter.benchmark(runner, *inputs, warmup=warmup, repeats=repeats)
     gap = analyze_gap(profile.cost, measurement, hardware, operations=profile.operations)
 
     samples_ms = [s * 1e3 for s in measurement.samples_seconds]
@@ -177,7 +182,9 @@ def torch_rnn(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
     class RNNModel(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.rnn = torch.nn.RNN(EMBED_DIM, EMBED_DIM, num_layers=2, batch_first=True)
+            self.rnn = torch.nn.RNN(
+                EMBED_DIM, EMBED_DIM, num_layers=2, batch_first=True, bias=False
+            )
             self.fc = torch.nn.Linear(EMBED_DIM, NUM_CLASSES)
 
         def forward(self, x: Any) -> Any:
@@ -193,7 +200,9 @@ def torch_lstm(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
     class LSTMModel(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.lstm = torch.nn.LSTM(EMBED_DIM, EMBED_DIM, num_layers=2, batch_first=True)
+            self.lstm = torch.nn.LSTM(
+                EMBED_DIM, EMBED_DIM, num_layers=2, batch_first=True, bias=False
+            )
             self.fc = torch.nn.Linear(EMBED_DIM, NUM_CLASSES)
 
         def forward(self, x: Any) -> Any:
@@ -238,142 +247,177 @@ def torch_transformer(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
 
 # ---------------------------------------------------------------------------
 # JAX model builders
+#
+# Each builder is the same mathematical model as its PyTorch and TensorFlow
+# counterparts (same layers, biases and normalization parameters), so
+# ``neural_cost.cross_check`` can assert identical dense FLOPs and parameters.
+# Parameters are passed as one pytree argument after the input.
 # ---------------------------------------------------------------------------
+
+def _jax_dense(key: Any, n_in: int, n_out: int) -> dict[str, Any]:
+    import jax
+    import jax.numpy as jnp
+
+    return {"w": jax.random.normal(key, (n_in, n_out)) * n_in**-0.5, "b": jnp.zeros(n_out)}
+
+
+def _jax_layer_norm(x: Any, p: dict[str, Any]) -> Any:
+    import jax.numpy as jnp
+
+    mean = x.mean(-1, keepdims=True)
+    var = ((x - mean) ** 2).mean(-1, keepdims=True)
+    return (x - mean) / jnp.sqrt(var + 1e-5) * p["g"] + p["b"]
+
+
+def _jax_norm_params(dim: int) -> dict[str, Any]:
+    import jax.numpy as jnp
+
+    return {"g": jnp.ones(dim), "b": jnp.zeros(dim)}
+
 
 def jax_ff_dnn(batch: int, _seq: int) -> tuple[Any, tuple[Any, ...]]:
     import jax
     import jax.numpy as jnp
 
-    w1 = jnp.ones((784, EMBED_DIM))
-    w2 = jnp.ones((EMBED_DIM, EMBED_DIM))
-    w3 = jnp.ones((EMBED_DIM, NUM_CLASSES))
+    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
+    params = {
+        "fc1": _jax_dense(k1, 784, EMBED_DIM), "ln1": _jax_norm_params(EMBED_DIM),
+        "fc2": _jax_dense(k2, EMBED_DIM, EMBED_DIM), "ln2": _jax_norm_params(EMBED_DIM),
+        "fc3": _jax_dense(k3, EMBED_DIM, NUM_CLASSES),
+    }
 
-    def model(x: Any, _w1: Any = w1, _w2: Any = w2, _w3: Any = w3) -> Any:
-        x = jnp.tanh(x @ _w1)
-        x = jnp.tanh(x @ _w2)
-        return x @ _w3
+    def model(x: Any, p: Any) -> Any:
+        x = _jax_layer_norm(jnp.maximum(x @ p["fc1"]["w"] + p["fc1"]["b"], 0), p["ln1"])
+        x = _jax_layer_norm(jnp.maximum(x @ p["fc2"]["w"] + p["fc2"]["b"], 0), p["ln2"])
+        return x @ p["fc3"]["w"] + p["fc3"]["b"]
 
-    return model, (jnp.ones((batch, 784)), w1, w2, w3)
+    return model, (jnp.ones((batch, 784)), params)
 
 
 def jax_cnn(batch: int, _seq: int) -> tuple[Any, tuple[Any, ...]]:
-    """Approximate CNN via a sequence of matmuls (JAX jaxpr traces raw primitives)."""
+    import jax
+    import jax.lax as lax
     import jax.numpy as jnp
 
-    # Represent the two conv feature maps + final classifier as matmuls over flattened space.
-    # The actual convolution kernel has shape [kH, kW, Cin, Cout] in JAX (HWIO).
-    # We use conv_general_dilated via jax.lax for the jaxpr to capture conv2d.
-    import jax.lax as lax
+    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(0), 3)
+    c1, c2 = EMBED_DIM // 2, EMBED_DIM
+    params = {
+        "k1": jax.random.normal(k1, (c1, 3, 3, 3)) * 0.1, "b1": jnp.zeros(c1),
+        "bn1": {"scale": jnp.ones(c1), "shift": jnp.zeros(c1)},
+        "k2": jax.random.normal(k2, (c2, c1, 3, 3)) * 0.1, "b2": jnp.zeros(c2),
+        "bn2": {"scale": jnp.ones(c2), "shift": jnp.zeros(c2)},
+        "fc": _jax_dense(k3, c2, NUM_CLASSES),
+    }
+    dn = ("NCHW", "OIHW", "NCHW")
 
-    k1 = jnp.ones((EMBED_DIM // 2, 3, 3, 3))   # (Cout, Cin, kH, kW)  — strides NCHW
-    k2 = jnp.ones((EMBED_DIM, EMBED_DIM // 2, 3, 3))
-    w_fc = jnp.ones((EMBED_DIM, NUM_CLASSES))
+    def channel(v: Any) -> Any:
+        return v.reshape(1, -1, 1, 1)
 
-    def model(x: Any, _k1: Any = k1, _k2: Any = k2, _wfc: Any = w_fc) -> Any:
-        # x: (B, C, H, W)  NCHW
-        y = lax.conv_general_dilated(
-            x, _k1, window_strides=(1, 1), padding="SAME",
-            dimension_numbers=("NCHW", "OIHW", "NCHW"),
-        )
-        y = jnp.tanh(y)
-        y = lax.conv_general_dilated(
-            y, _k2, window_strides=(2, 2), padding="SAME",
-            dimension_numbers=("NCHW", "OIHW", "NCHW"),
-        )
-        y = jnp.tanh(y)
-        y = y.mean(axis=(2, 3))  # global avg pool -> (B, EMBED_DIM)
-        return y @ _wfc
+    def model(x: Any, p: Any) -> Any:  # x: (B, C, H, W), eval-mode BatchNorm
+        y = lax.conv_general_dilated(x, p["k1"], (1, 1), "SAME", dimension_numbers=dn)
+        y = jnp.maximum(y + channel(p["b1"]), 0)
+        y = y * channel(p["bn1"]["scale"]) + channel(p["bn1"]["shift"])
+        y = lax.reduce_window(y, -jnp.inf, lax.max, (1, 1, 2, 2), (1, 1, 2, 2), "VALID")
+        y = lax.conv_general_dilated(y, p["k2"], (1, 1), "SAME", dimension_numbers=dn)
+        y = jnp.maximum(y + channel(p["b2"]), 0)
+        y = y * channel(p["bn2"]["scale"]) + channel(p["bn2"]["shift"])
+        return y.mean(axis=(2, 3)) @ p["fc"]["w"] + p["fc"]["b"]
 
-    return model, (jnp.ones((batch, 3, 32, 32)), k1, k2, w_fc)
+    return model, (jnp.ones((batch, 3, 32, 32)), params)
+
+
+def _jax_recurrent(cell: str, batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
+    """Two-layer bias-free tanh RNN or LSTM via ``lax.scan`` plus a dense head."""
+    import jax
+    import jax.numpy as jnp
+    from jax import lax
+
+    gates = 4 if cell == "lstm" else 1
+    keys = jax.random.split(jax.random.PRNGKey(0), 5)
+    scale = EMBED_DIM**-0.5
+    layers = [
+        {
+            "ih": jax.random.normal(keys[2 * i], (EMBED_DIM, gates * EMBED_DIM)) * scale,
+            "hh": jax.random.normal(keys[2 * i + 1], (EMBED_DIM, gates * EMBED_DIM)) * scale,
+        }
+        for i in range(2)
+    ]
+    params = {"layers": layers, "fc": _jax_dense(keys[4], EMBED_DIM, NUM_CLASSES)}
+
+    def run_layer(xs: Any, p: Any) -> Any:  # xs: (T, B, D)
+        zeros = jnp.zeros((xs.shape[1], EMBED_DIM))
+        if cell == "lstm":
+            def step(carry: Any, xt: Any) -> Any:
+                h, c = carry
+                i, f, g, o = jnp.split(xt @ p["ih"] + h @ p["hh"], 4, axis=-1)
+                c = jax.nn.sigmoid(f) * c + jax.nn.sigmoid(i) * jnp.tanh(g)
+                h = jax.nn.sigmoid(o) * jnp.tanh(c)
+                return (h, c), h
+
+            return lax.scan(step, (zeros, zeros), xs)[1]
+
+        def rnn_step(h: Any, xt: Any) -> Any:
+            h = jnp.tanh(xt @ p["ih"] + h @ p["hh"])
+            return h, h
+
+        return lax.scan(rnn_step, zeros, xs)[1]
+
+    def model(x: Any, p: Any) -> Any:
+        ys = jnp.swapaxes(x, 0, 1)
+        for layer in p["layers"]:
+            ys = run_layer(ys, layer)
+        return ys[-1] @ p["fc"]["w"] + p["fc"]["b"]
+
+    return model, (jnp.ones((batch, seq, EMBED_DIM)), params)
 
 
 def jax_rnn(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
-    """Single-step RNN unrolled via scan (approximated with per-step matmuls)."""
-    import jax
-    import jax.numpy as jnp
-
-    w_ih = jnp.ones((EMBED_DIM, EMBED_DIM))
-    w_hh = jnp.ones((EMBED_DIM, EMBED_DIM))
-    w_fc = jnp.ones((EMBED_DIM, NUM_CLASSES))
-
-    def model(x: Any, _wih: Any = w_ih, _whh: Any = w_hh, _wfc: Any = w_fc) -> Any:
-        # x: (B, T, D)
-        h = jnp.zeros((x.shape[0], EMBED_DIM))
-        for t in range(x.shape[1]):
-            h = jnp.tanh(x[:, t] @ _wih + h @ _whh)
-        return h @ _wfc
-
-    dummy = jnp.ones((batch, seq, EMBED_DIM))
-    return model, (dummy, w_ih, w_hh, w_fc)
+    return _jax_recurrent("rnn", batch, seq)
 
 
 def jax_lstm(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
-    """LSTM approximated as 4-gate matmuls per timestep."""
-    import jax.numpy as jnp
-
-    gates = 4
-    w_ih = jnp.ones((EMBED_DIM, gates * EMBED_DIM))
-    w_hh = jnp.ones((EMBED_DIM, gates * EMBED_DIM))
-    w_fc = jnp.ones((EMBED_DIM, NUM_CLASSES))
-
-    def model(x: Any, _wih: Any = w_ih, _whh: Any = w_hh, _wfc: Any = w_fc) -> Any:
-        h = jnp.zeros((x.shape[0], EMBED_DIM))
-        c = jnp.zeros((x.shape[0], EMBED_DIM))
-        for t in range(x.shape[1]):
-            gates_val = x[:, t] @ _wih + h @ _whh  # (B, 4*D)
-            i, f, g, o = jnp.split(gates_val, 4, axis=-1)
-            i = jax_sigmoid(i)
-            f = jax_sigmoid(f)
-            g = jnp.tanh(g)
-            o = jax_sigmoid(o)
-            c = f * c + i * g
-            h = o * jnp.tanh(c)
-        return h @ _wfc
-
-    dummy = jnp.ones((batch, seq, EMBED_DIM))
-    return model, (dummy, w_ih, w_hh, w_fc)
-
-
-def jax_sigmoid(x: Any) -> Any:
-    import jax.numpy as jnp
-    return 1.0 / (1.0 + jnp.exp(-x))
+    return _jax_recurrent("lstm", batch, seq)
 
 
 def jax_transformer(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
-    """Transformer approximated via Q/K/V projections + softmax per head."""
+    """Two post-norm encoder layers: multi-head attention + ReLU FFN, then a dense head."""
+    import jax
     import jax.numpy as jnp
 
-    head_dim = EMBED_DIM // NUM_HEADS
-    wq = jnp.ones((EMBED_DIM, EMBED_DIM))
-    wk = jnp.ones((EMBED_DIM, EMBED_DIM))
-    wv = jnp.ones((EMBED_DIM, EMBED_DIM))
-    wo = jnp.ones((EMBED_DIM, EMBED_DIM))
-    w_ff1 = jnp.ones((EMBED_DIM, EMBED_DIM * 4))
-    w_ff2 = jnp.ones((EMBED_DIM * 4, EMBED_DIM))
-    w_fc = jnp.ones((EMBED_DIM, NUM_CLASSES))
+    keys = iter(jax.random.split(jax.random.PRNGKey(0), 16))
+    layers = [
+        {
+            "q": _jax_dense(next(keys), EMBED_DIM, EMBED_DIM),
+            "k": _jax_dense(next(keys), EMBED_DIM, EMBED_DIM),
+            "v": _jax_dense(next(keys), EMBED_DIM, EMBED_DIM),
+            "o": _jax_dense(next(keys), EMBED_DIM, EMBED_DIM),
+            "ln_a": _jax_norm_params(EMBED_DIM),
+            "ff1": _jax_dense(next(keys), EMBED_DIM, 4 * EMBED_DIM),
+            "ff2": _jax_dense(next(keys), 4 * EMBED_DIM, EMBED_DIM),
+            "ln_b": _jax_norm_params(EMBED_DIM),
+        }
+        for _ in range(2)
+    ]
+    params = {"layers": layers, "head": _jax_dense(next(keys), EMBED_DIM, NUM_CLASSES)}
 
-    def attention(x: Any, wq_: Any, wk_: Any, wv_: Any, wo_: Any) -> Any:
-        # x: (B, T, D)
-        q = x @ wq_
-        k = x @ wk_
-        v = x @ wv_
-        scale = head_dim ** -0.5
-        # Simplified single-head attention for jaxpr tracing
-        scores = (q * scale) @ k.transpose(0, 2, 1)
-        weights = jnp.exp(scores) / jnp.exp(scores).sum(axis=-1, keepdims=True)
-        return (weights @ v) @ wo_
+    def dense(x: Any, p: Any) -> Any:
+        return x @ p["w"] + p["b"]
 
-    def model(
-        x: Any,
-        _wq: Any = wq, _wk: Any = wk, _wv: Any = wv, _wo: Any = wo,
-        _wff1: Any = w_ff1, _wff2: Any = w_ff2, _wfc: Any = w_fc,
-    ) -> Any:
-        x = x + attention(x, _wq, _wk, _wv, _wo)
-        x = x + jnp.tanh(x @ _wff1) @ _wff2
-        return x.mean(axis=1) @ _wfc
+    def model(x: Any, p: Any) -> Any:  # x: (B, T, D)
+        b, t, d = x.shape
 
-    dummy = jnp.ones((batch, seq, EMBED_DIM))
-    return model, (dummy, wq, wk, wv, wo, w_ff1, w_ff2, w_fc)
+        def heads(z: Any) -> Any:
+            return z.reshape(b, t, NUM_HEADS, d // NUM_HEADS)
+
+        for layer in p["layers"]:
+            q, k, v = (heads(dense(x, layer[name])) for name in ("q", "k", "v"))
+            attn = jax.nn.dot_product_attention(q, k, v).reshape(b, t, d)
+            x = _jax_layer_norm(x + dense(attn, layer["o"]), layer["ln_a"])
+            ff = dense(jnp.maximum(dense(x, layer["ff1"]), 0), layer["ff2"])
+            x = _jax_layer_norm(x + ff, layer["ln_b"])
+        return dense(x.mean(axis=1), p["head"])
+
+    return model, (jnp.ones((batch, seq, EMBED_DIM)), params)
 
 
 # ---------------------------------------------------------------------------
@@ -412,10 +456,10 @@ def tf_cnn(batch: int, _seq: int) -> tuple[Any, tuple[Any, ...]]:
 
 def tf_rnn(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
     import tensorflow as tf
-    # Use return_sequences=False for simplicity
+    # Bias-free: PyTorch RNNs carry two bias vectors, Keras one.
     inp_layer = tf.keras.layers.Input(shape=(seq, EMBED_DIM))
-    x = tf.keras.layers.GRU(EMBED_DIM, return_sequences=True)(inp_layer)
-    x = tf.keras.layers.GRU(EMBED_DIM)(x)
+    x = tf.keras.layers.SimpleRNN(EMBED_DIM, return_sequences=True, use_bias=False)(inp_layer)
+    x = tf.keras.layers.SimpleRNN(EMBED_DIM, use_bias=False)(x)
     out = tf.keras.layers.Dense(NUM_CLASSES)(x)
     model = tf.keras.Model(inp_layer, out)
     inp = tf.ones((batch, seq, EMBED_DIM))
@@ -426,8 +470,8 @@ def tf_rnn(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
 def tf_lstm(batch: int, seq: int) -> tuple[Any, tuple[Any, ...]]:
     import tensorflow as tf
     inp_layer = tf.keras.layers.Input(shape=(seq, EMBED_DIM))
-    x = tf.keras.layers.LSTM(EMBED_DIM, return_sequences=True)(inp_layer)
-    x = tf.keras.layers.LSTM(EMBED_DIM)(x)
+    x = tf.keras.layers.LSTM(EMBED_DIM, return_sequences=True, use_bias=False)(inp_layer)
+    x = tf.keras.layers.LSTM(EMBED_DIM, use_bias=False)(x)
     out = tf.keras.layers.Dense(NUM_CLASSES)(x)
     model = tf.keras.Model(inp_layer, out)
     inp = tf.ones((batch, seq, EMBED_DIM))
@@ -534,7 +578,7 @@ def print_architecture_section(arch: str, results: list[Result], hardware: Hardw
     hdr = (
         f"{'Framework':<{col['fw']}} "
         f"{'FLOPs':>{col['flops']}} "
-        f"{'Params':>{col['params']}} "
+        f"{'Param B':>{col['params']}} "
         f"{'I/O MB':>{col['mbytes']}} "
         f"{'AI':>{col['ai']}} "
         f"{'ms(med)':>{col['ms']}} "
@@ -661,7 +705,7 @@ def main() -> None:
         if fw_name == "PyTorch":
             from neural_cost.adapters import TorchFxAdapter
             try:
-                adapter: FrameworkAdapter = TorchFxAdapter()
+                adapter: FrameworkAdapter = TorchFxAdapter(use_profiler=False)
             except Exception:  # noqa: BLE001
                 adapter = ADAPTERS[fw_name]()
         else:
@@ -694,7 +738,33 @@ def main() -> None:
             print_architecture_section(arch, all_results, hardware)
 
     print_cross_framework_summary(all_results)
+    print_consistency(args.batch, args.seq_len)
     print()
+
+
+def print_consistency(batch: int, seq: int) -> None:
+    """Verify every framework sees the same dense FLOPs and parameters per architecture."""
+    from neural_cost import cross_check
+
+    adapters = {
+        fw: ADAPTERS[fw]() for fw, pkg in PACKAGES.items() if installed(pkg)
+    }
+    if len(adapters) < 2:
+        return
+    print()
+    print("  Canonical cross-framework consistency (dense FLOPs, unique parameters)")
+    for arch in ARCHITECTURES:
+        workloads = {}
+        for fw, adapter in adapters.items():
+            model, inputs = BUILDERS[fw][arch](batch, seq)
+            workloads[fw] = adapter.operations(model, inputs)
+        report = cross_check(workloads, rtol=0.0)
+        b = report.counts[0].breakdown
+        status = "identical" if report.consistent else "MISMATCH: " + ", ".join(report.outliers)
+        print(
+            f"  {arch:<12} {b.dense_flops / 1e6:>9.1f}M dense FLOPs  "
+            f"{b.parameter_count:>9,} params  {status}"
+        )
 
 
 if __name__ == "__main__":

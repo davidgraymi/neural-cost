@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 from torch import nn
 
 from neural_cost.estimate import CostEstimate, estimate_operation

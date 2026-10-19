@@ -10,6 +10,30 @@ from ..profiler import Measurement
 from .base import FrameworkAdapter
 
 
+def _parameter_count(layer: Any) -> int:
+    """Parameter elements, excluding BatchNorm moving statistics.
+
+    ``count_params`` includes BatchNorm's moving mean/variance, which are buffers
+    rather than parameters (PyTorch and JAX never count them).  Frozen layers
+    still count: being non-trainable does not make weights disappear.
+    """
+    if type(layer).__name__ == "BatchNormalization":
+        weights = [
+            w
+            for w in (getattr(layer, "gamma", None), getattr(layer, "beta", None))
+            if w is not None
+        ]
+    else:
+        weights = list(getattr(layer, "weights", ()))
+    total = 0
+    for weight in weights:
+        count = 1
+        for dim in weight.shape:
+            count *= int(dim)
+        total += count
+    return total
+
+
 class TensorFlowAdapter(FrameworkAdapter):
     """Capture Keras Dense and Conv2D layer calls through temporary hooks."""
 
@@ -61,6 +85,7 @@ class TensorFlowAdapter(FrameworkAdapter):
                     tf.keras.layers.Embedding,
                     tf.keras.layers.LSTM,
                     tf.keras.layers.GRU,
+                    tf.keras.layers.SimpleRNN,
                     tf.keras.layers.MultiHeadAttention,
                 ),
             ):
@@ -84,7 +109,7 @@ class TensorFlowAdapter(FrameworkAdapter):
                             shape(output),
                             inputs.dtype.size,
                             {
-                                "parameter_bytes": int(_layer.count_params()) * inputs.dtype.size,
+                                "parameter_bytes": _parameter_count(_layer) * inputs.dtype.size,
                                 "parameter_id": id(_layer.kernel),
                             },
                         )
@@ -105,7 +130,7 @@ class TensorFlowAdapter(FrameworkAdapter):
                             (y[0], y[3], y[1], y[2]),
                             inputs.dtype.size,
                             {
-                                "parameter_bytes": int(_layer.count_params()) * inputs.dtype.size,
+                                "parameter_bytes": _parameter_count(_layer) * inputs.dtype.size,
                                 "parameter_id": id(_layer.kernel),
                             },
                         )
@@ -148,7 +173,7 @@ class TensorFlowAdapter(FrameworkAdapter):
                     )
                     attrs = {}
                     if hasattr(_layer, "gamma") and _layer.gamma is not None:
-                        attrs["parameter_bytes"] = int(_layer.count_params()) * inputs.dtype.size
+                        attrs["parameter_bytes"] = _parameter_count(_layer) * inputs.dtype.size
                         attrs["parameter_id"] = id(_layer.gamma)
                     x = shape(inputs)
                     y = shape(output)
@@ -201,16 +226,24 @@ class TensorFlowAdapter(FrameworkAdapter):
                             y,
                             _layer.embeddings.dtype.itemsize,
                             {
-                                "parameter_bytes": int(_layer.count_params())
+                                "parameter_bytes": _parameter_count(_layer)
                                 * _layer.embeddings.dtype.itemsize,
                                 "parameter_id": id(_layer.embeddings),
                             },
                         )
                     )
-                elif isinstance(_layer, (tf.keras.layers.LSTM, tf.keras.layers.GRU)):
+                elif isinstance(
+                    _layer,
+                    (tf.keras.layers.LSTM, tf.keras.layers.GRU, tf.keras.layers.SimpleRNN),
+                ):
                     # Capture as a linear operation representing the combined gate projections.
-                    # LSTM: 4 gates; GRU: 3 gates.
-                    gates = 4 if isinstance(_layer, tf.keras.layers.LSTM) else 3
+                    # LSTM: 4 gates; GRU: 3 gates; SimpleRNN: 1.
+                    if isinstance(_layer, tf.keras.layers.LSTM):
+                        gates = 4
+                    elif isinstance(_layer, tf.keras.layers.GRU):
+                        gates = 3
+                    else:
+                        gates = 1
                     x = shape(inputs)
                     units = _layer.units
                     # inputs shape: (batch, timesteps, features) or (batch, features)
@@ -220,7 +253,7 @@ class TensorFlowAdapter(FrameworkAdapter):
                         batch, in_features = x[0], x[-1]
                         timesteps = 1
                     flat_batch = batch * timesteps
-                    param_bytes = int(_layer.count_params()) * inputs.dtype.size
+                    param_bytes = _parameter_count(_layer) * inputs.dtype.size
                     # Keras 3 stores weights on the inner cell; Keras 2 stores on the layer.
                     cell = getattr(_layer, "cell", _layer)
                     kernel = getattr(_layer, "kernel", None) or getattr(cell, "kernel", None)
@@ -240,15 +273,18 @@ class TensorFlowAdapter(FrameworkAdapter):
                             {"parameter_bytes": param_bytes, "parameter_id": kernel_id},
                         )
                     )
-                    # hidden-hidden
+                    # hidden-hidden: T dependent (batch, units) GEMMs
+                    hh_attrs: dict[str, Any] = {"parameter_bytes": 0, "parameter_id": rec_kernel_id}
+                    if timesteps > 1:
+                        hh_attrs["repeat"] = timesteps
                     captured.append(
                         Operation(
                             f"{_layer.name}.hh",
                             "linear",
-                            ((flat_batch, units), (units, gates * units)),
-                            (flat_batch, gates * units),
+                            ((batch, units), (units, gates * units)),
+                            (batch, gates * units),
                             inputs.dtype.size,
-                            {"parameter_bytes": 0, "parameter_id": rec_kernel_id},
+                            hh_attrs,
                         )
                     )
                 elif isinstance(_layer, tf.keras.layers.MultiHeadAttention):
@@ -274,7 +310,9 @@ class TensorFlowAdapter(FrameworkAdapter):
                             {
                                 "num_heads": num_heads,
                                 "seq_len": seq_len,
-                                "parameter_bytes": int(_layer.count_params()) * query.dtype.size,
+                                "head_dim": key_dim,
+                                "proj_dim": num_heads * key_dim,
+                                "parameter_bytes": _parameter_count(_layer) * query.dtype.size,
                                 "parameter_id": id(_layer),
                             },
                         )

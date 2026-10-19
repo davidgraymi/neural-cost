@@ -1,6 +1,7 @@
 """PyTorch module adapter (available only when PyTorch is installed)."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from statistics import median
 from time import perf_counter_ns
 from typing import Any
@@ -9,11 +10,64 @@ from ..operations import Operation
 from ..profiler import Measurement
 from .base import FrameworkAdapter
 
+# ATen kernels that correspond to operations the hook adapter captures
+# (contractions, normalization, attention, embedding, pooling, RNN cells).
+_HEAVY_KERNEL_PREFIXES = (
+    "addmm",
+    "mm",
+    "bmm",
+    "baddbmm",
+    "matmul",
+    "linear",
+    "conv",
+    "convolution",
+    "mkldnn_convolution",
+    "mps_convolution",
+    "cudnn",
+    "miopen",
+    "native_layer_norm",
+    "native_batch_norm",
+    "native_group_norm",
+    "batch_norm",
+    "rms_norm",
+    "fused_rms_norm",
+    "embedding",
+    "native_multi_head_attention",
+    "scaled_dot_product",
+    "efficient_attention",
+    "flash_attention",
+    "lstm",
+    "gru",
+    "rnn",
+    "thnn_fused",
+    "adaptive_avg_pool",
+    "avg_pool",
+    "max_pool",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class KernelRecord:
+    """One dispatched ATen kernel: name, bytes read + written, and dispatch level."""
+
+    name: str
+    bytes: int
+    heavy: bool
+    python_dispatch: bool
+
 
 class TorchAdapter(FrameworkAdapter):
-    """Capture Linear and Conv2d module calls through forward hooks."""
+    """Capture Linear and Conv2d module calls through forward hooks.
+
+    ``use_profiler=False`` makes :meth:`benchmark` time without ``torch.profiler``.
+    The profiler adds per-operator overhead, so use it for validation and
+    gap attribution where the wall-clock time itself is the measurement.
+    """
 
     name = "pytorch"
+
+    def __init__(self, use_profiler: bool = True) -> None:
+        self.use_profiler = use_profiler
 
     def operations(self, model: Any, example_inputs: Sequence[Any]) -> Sequence[Operation]:
         try:
@@ -100,41 +154,45 @@ class TorchAdapter(FrameworkAdapter):
                         if isinstance(module, torch.nn.LSTM)
                         else (3 if isinstance(module, torch.nn.GRU) else 1)
                     )
-                    batch_seq = (
-                        source.shape[0] * source.shape[1] if source.dim() >= 2 else source.shape[0]
-                    )
+                    if source.dim() >= 3:
+                        steps = source.shape[1] if module.batch_first else source.shape[0]
+                        batch = source.shape[0] if module.batch_first else source.shape[1]
+                    else:  # unbatched (L, H_in)
+                        steps, batch = source.shape[0], 1
                     in_size = source.shape[-1]
                     h = module.hidden_size
                     for layer in range(module.num_layers):
                         layer_in = in_size if layer == 0 else h * directions
-                        # Input → hidden projection
-                        captured.append(
-                            Operation(
-                                f"{name}.layer{layer}.ih",
-                                "linear",
-                                ((batch_seq, layer_in), (layer_in, gates * h)),
-                                (batch_seq, gates * h),
-                                source.element_size(),
-                                {
-                                    "parameter_bytes": layer_in * gates * h * source.element_size(),
-                                    "parameter_id": id(getattr(module, f"weight_ih_l{layer}")),
-                                },
-                            )
-                        )
-                        # Hidden → hidden projection
-                        captured.append(
-                            Operation(
-                                f"{name}.layer{layer}.hh",
-                                "linear",
-                                ((batch_seq, h), (h, gates * h)),
-                                (batch_seq, gates * h),
-                                source.element_size(),
-                                {
-                                    "parameter_bytes": h * gates * h * source.element_size(),
-                                    "parameter_id": id(getattr(module, f"weight_hh_l{layer}")),
-                                },
-                            )
-                        )
+                        for direction in range(directions):
+                            suffix = f"l{layer}" + ("_reverse" if direction else "")
+                            tag = f"{name}.layer{layer}" + (".reverse" if direction else "")
+                            # The input projection is one GEMM over all timesteps; the
+                            # recurrent projection is T dependent (B, H) GEMMs.
+                            for proj, width, rows, repeat in (
+                                ("ih", layer_in, batch * steps, 1),
+                                ("hh", h, batch, steps),
+                            ):
+                                weight = getattr(module, f"weight_{proj}_{suffix}")
+                                bias = getattr(module, f"bias_{proj}_{suffix}", None)
+                                tensors = [weight] + ([bias] if bias is not None else [])
+                                attrs: dict[str, Any] = {
+                                    "parameter_bytes": sum(
+                                        t.numel() * t.element_size() for t in tensors
+                                    ),
+                                    "parameter_id": id(weight),
+                                }
+                                if repeat > 1:
+                                    attrs["repeat"] = repeat
+                                captured.append(
+                                    Operation(
+                                        f"{tag}.{proj}",
+                                        "linear",
+                                        ((rows, width), (width, gates * h)),
+                                        (rows, gates * h),
+                                        source.element_size(),
+                                        attrs,
+                                    )
+                                )
                 elif isinstance(module, torch.nn.MultiheadAttention):
                     if not isinstance(output, (tuple, list, torch.Tensor)):
                         return
@@ -143,8 +201,12 @@ class TorchAdapter(FrameworkAdapter):
                         return
                     embed_dim = module.embed_dim
                     num_heads = module.num_heads
-                    seq_len = source.shape[0] if source.dim() >= 2 else 1
-                    batch = source.shape[1] if source.dim() >= 3 else 1
+                    if source.dim() >= 3:
+                        batch_first = bool(getattr(module, "batch_first", False))
+                        seq_len = source.shape[1] if batch_first else source.shape[0]
+                        batch = source.shape[0] if batch_first else source.shape[1]
+                    else:  # unbatched (L, E)
+                        seq_len, batch = source.shape[0], 1
                     captured.append(
                         Operation(
                             name,
@@ -155,9 +217,9 @@ class TorchAdapter(FrameworkAdapter):
                             {
                                 "num_heads": num_heads,
                                 "seq_len": seq_len,
+                                # out_proj is a child module, so recurse.
                                 "parameter_bytes": sum(
-                                    p.numel() * p.element_size()
-                                    for p in module.parameters(recurse=False)
+                                    p.numel() * p.element_size() for p in module.parameters()
                                 ),
                                 "parameter_id": id(module.in_proj_weight)
                                 if module.in_proj_weight is not None
@@ -216,8 +278,22 @@ class TorchAdapter(FrameworkAdapter):
         if hasattr(torch.nn, "RMSNorm"):
             _tracked_list.append(torch.nn.RMSNorm)
         _TRACKED = tuple(_tracked_list)
+        # MultiheadAttention may dispatch to scaled_dot_product_attention internally;
+        # its hook already accounts for the full attention cost, so suppress the
+        # functional capture while inside one.
+        mha_depth = [0]
+
+        def enter_mha(*_args: Any) -> None:
+            mha_depth[0] += 1
+
+        def exit_mha(*_args: Any) -> None:
+            mha_depth[0] -= 1
+
         for name, module in model.named_modules():
             if isinstance(module, _TRACKED) or module.__class__.__name__ == "RMSNorm":
+                if isinstance(module, torch.nn.MultiheadAttention):
+                    hooks.append(module.register_forward_pre_hook(enter_mha))
+                    hooks.append(module.register_forward_hook(exit_mha))
                 hooks.append(
                     module.register_forward_hook(hook(name or module.__class__.__name__, module))
                 )
@@ -229,7 +305,11 @@ class TorchAdapter(FrameworkAdapter):
 
             def wrapped_sdpa(query, key, value, *args, **kwargs):
                 out = orig_sdpa(query, key, value, *args, **kwargs)
-                if isinstance(query, torch.Tensor) and isinstance(out, torch.Tensor):
+                if (
+                    mha_depth[0] == 0
+                    and isinstance(query, torch.Tensor)
+                    and isinstance(out, torch.Tensor)
+                ):
                     sdpa_counter[0] += 1
                     q_shape = tuple(query.shape)
                     k_shape = tuple(key.shape) if isinstance(key, torch.Tensor) else q_shape
@@ -272,11 +352,210 @@ class TorchAdapter(FrameworkAdapter):
             model.train(was_training)
         return captured
 
+    def count_kernels(self, model: Any, example_inputs: Sequence[Any]) -> int:
+        """Count ATen operator dispatches in one forward pass (≈ kernels launched in eager)."""
+        return len(self.trace_kernels(model, example_inputs))
+
+    def trace_kernels(self, model: Any, example_inputs: Sequence[Any]) -> list[KernelRecord]:
+        """Record every ATen kernel one forward pass dispatches, with its traffic.
+
+        A ``TorchDispatchMode`` sees each operator that reaches a backend
+        kernel, including activations, residual adds and copies that forward
+        hooks never capture; view/metadata ops (no kernel) are skipped.  A
+        ``TorchFunctionMode`` marks which kernels were the first issued by a
+        Python-level call: only those pay Python dispatch overhead, while
+        kernels a C++ composite issues internally (e.g. the per-timestep ops of
+        an eager CPU LSTM) do not.
+        """
+        try:
+            import torch
+            from torch.overrides import TorchFunctionMode
+            from torch.utils._python_dispatch import TorchDispatchMode
+        except ImportError as error:  # pragma: no cover
+            raise ImportError("Install neural-cost[torch] to use TorchAdapter") from error
+
+        records: list[KernelRecord] = []
+        call_state = {"depth": 0, "fresh": False}
+
+        def tensor_bytes(value: Any) -> int:
+            if isinstance(value, torch.Tensor):
+                return value.numel() * value.element_size()
+            if isinstance(value, (list, tuple)):
+                return sum(tensor_bytes(v) for v in value)
+            return 0
+
+        def is_view(func: Any) -> bool:
+            schema = getattr(func, "_schema", None)
+            returns = schema.returns if schema is not None else ()
+            return bool(returns) and all(
+                r.alias_info is not None and not r.alias_info.is_write for r in returns
+            )
+
+        class _Calls(TorchFunctionMode):
+            def __torch_function__(self, func, types, args=(), kwargs=None):
+                call_state["depth"] += 1
+                if call_state["depth"] == 1:
+                    call_state["fresh"] = True
+                try:
+                    return func(*args, **(kwargs or {}))
+                finally:
+                    call_state["depth"] -= 1
+
+        class _Kernels(TorchDispatchMode):
+            def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+                out = func(*args, **(kwargs or {}))
+                if not is_view(func):
+                    name = func.name() if hasattr(func, "name") else str(func)
+                    short = name.split("::")[-1].split(".")[0]
+                    records.append(
+                        KernelRecord(
+                            name,
+                            tensor_bytes(list(args)) + tensor_bytes(out),
+                            short.lstrip("_").startswith(_HEAVY_KERNEL_PREFIXES),
+                            python_dispatch=call_state["fresh"] or call_state["depth"] == 0,
+                        )
+                    )
+                    call_state["fresh"] = False
+                return out
+
+        with torch.no_grad(), _Calls(), _Kernels():
+            model(*example_inputs)
+        return records
+
+    def replay(self, operations: Sequence[Operation], device: Any = None) -> list[float | None]:
+        """Time each operation in isolation on ``device`` (see ``_torch_replay``).
+
+        Returns per-operation seconds (multiplied by ``repeat``) or ``None``
+        where an operation kind cannot be synthesized.  Pass the result to
+        :func:`neural_cost.attribute_gap` as ``isolated_seconds`` to split
+        kernel inefficiency from composition effects.
+        """
+        from ._torch_replay import replay_operations
+
+        return replay_operations(operations, device)
+
+    def calibrate(self, device: Any = None, *, dtype: Any = None, quick: bool = False):
+        """Measure size-dependent FLOP/s, bandwidth, dispatch and sync cost on ``device``.
+
+        Returns a :class:`neural_cost.attribution.HardwareCalibration` with
+        ``flops_curve`` (square matmuls, 32² … 4096²) and ``bandwidth_curve``
+        (copies, 64 KiB … 256 MiB) so cache-resident and small kernels are
+        modeled at the rate they actually achieve.  Per-kernel dispatch is
+        subtracted from every probe, matching the additive model
+        ``T = sync + kernels × dispatch + Σ kernel time``.
+        """
+        try:
+            import torch
+        except ImportError as error:  # pragma: no cover
+            raise ImportError("Install neural-cost[torch] to use TorchAdapter") from error
+        from ..attribution import HardwareCalibration
+
+        device = torch.device(device or "cpu")
+        dtype = dtype or torch.float32
+
+        from ._torch_replay import make_sync
+        from ._torch_replay import per_call as _per_call
+
+        sync = make_sync(torch, device)
+
+        def per_call(fn: Any, **kwargs: Any) -> float:
+            return _per_call(fn, sync, **kwargs)
+
+        # 1. Dispatch: steady-state cost of a tiny kernel.
+        tiny = torch.zeros(1, device=device, dtype=dtype)
+        out = torch.empty_like(tiny)
+        dispatch = per_call(lambda: torch.add(tiny, 1, out=out), reps=2000)
+        asynchronous = device.type in {"cuda", "mps"}
+
+        # 2. Per-call synchronization latency: one tiny kernel + sync, minus dispatch.
+        sync_latency = float("inf")
+        for _ in range(20):
+            start = perf_counter_ns()
+            torch.add(tiny, 1, out=out)
+            sync()
+            sync_latency = min(sync_latency, (perf_counter_ns() - start) / 1e9)
+        sync_latency = max(0.0, sync_latency - dispatch)
+
+        def kernel_time(seconds: float) -> float:
+            # Synchronous dispatch adds to every kernel; asynchronous launches overlap
+            # execution, so the back-to-back time already is the kernel time.
+            return seconds if asynchronous else max(seconds - dispatch, 0.01 * seconds)
+
+        # 3. Compute curve: square matmuls.
+        sizes = (64, 256, 1024) if quick else (32, 64, 128, 256, 512, 1024, 2048)
+        if device.type != "cpu" and not quick:
+            sizes += (4096,)
+        flops_curve = []
+        for n in sizes:
+            a = torch.randn(n, n, device=device, dtype=dtype)
+            b = torch.randn(n, n, device=device, dtype=dtype)
+            seconds = kernel_time(per_call(lambda a=a, b=b: torch.mm(a, b)))
+            flops_curve.append((2.0 * n**3, 2.0 * n**3 / seconds))
+
+        # 4. Bandwidth curve: copies (read + write) from cache-resident to DRAM-sized.
+        mib = 1024 * 1024
+        copy_sizes = (
+            (mib // 16, 4 * mib, 64 * mib)
+            if quick
+            else (mib // 16, mib // 4, mib, 4 * mib, 16 * mib, 64 * mib, 256 * mib)
+        )
+        bandwidth_curve = []
+        for size in copy_sizes:
+            src = torch.ones(size // tiny.element_size(), device=device, dtype=dtype)
+            dst = torch.empty_like(src)
+            seconds = kernel_time(per_call(lambda s=src, d=dst: d.copy_(s)))
+            bandwidth_curve.append((2.0 * size, 2.0 * size / seconds))
+            del src, dst
+
+        return HardwareCalibration(
+            achievable_flops=max(rate for _, rate in flops_curve),
+            achievable_bandwidth=bandwidth_curve[-1][1],
+            dispatch_seconds=dispatch,
+            call_overhead_seconds=sync_latency,
+            source=f"torch microbenchmarks ({device}, {str(dtype).replace('torch.', '')})",
+            flops_curve=tuple(flops_curve),
+            bandwidth_curve=tuple(bandwidth_curve),
+            async_dispatch=asynchronous,
+        )
+
     def benchmark(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
     ) -> Measurement:
         """Benchmark execution and capture CUDA allocator statistics when present."""
+        if not getattr(self, "use_profiler", True):
+            return self._time(function, *args, warmup=warmup, repeats=repeats, **kwargs)
         return self.trace(function, *args, warmup=warmup, repeats=repeats, **kwargs)
+
+    def _time(
+        self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
+    ) -> Measurement:
+        """Synchronized wall-clock timing with no profiler attached."""
+        import torch
+
+        if warmup < 0 or repeats < 1:
+            raise ValueError("warmup must be non-negative and repeats must be at least one")
+        device = next((arg.device for arg in args if isinstance(arg, torch.Tensor)), None)
+        kind = device.type if device is not None else "cpu"
+
+        def sync() -> None:
+            if kind == "cuda":
+                torch.cuda.synchronize(device)
+            elif kind == "mps":
+                torch.mps.synchronize()
+
+        if kind == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        for _ in range(warmup):
+            function(*args, **kwargs)
+        sync()
+        samples = []
+        for _ in range(repeats):
+            start = perf_counter_ns()
+            function(*args, **kwargs)
+            sync()
+            samples.append((perf_counter_ns() - start) / 1_000_000_000)
+        peak = torch.cuda.max_memory_allocated(device) if kind == "cuda" else None
+        return Measurement(median(samples), tuple(samples), peak, str(device or "cpu"))
 
     def trace(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
@@ -379,6 +658,32 @@ class TorchFxAdapter(TorchAdapter):
 
         captured: list[Operation] = []
         modules = dict(model.named_modules())
+        # FX treats torch.nn modules as leaves.  Recurrent and attention modules
+        # have no functional decomposition here, so take their operations from
+        # the hook-based capture (one forward pass, computed lazily).
+        delegated_types = (
+            torch.nn.RNN,
+            torch.nn.GRU,
+            torch.nn.LSTM,
+            torch.nn.MultiheadAttention,
+        )
+        hook_ops: list[Operation] | None = None
+
+        def delegated(target: str) -> list[Operation]:
+            nonlocal hook_ops
+            if hook_ops is None:
+                hook_ops = list(TorchAdapter.operations(self, model, example_inputs))
+            return [op for op in hook_ops if op.name == target or op.name.startswith(target + ".")]
+
+        def norm_attrs(mod: Any) -> dict[str, Any]:
+            if getattr(mod, "weight", None) is None:
+                return {}
+            return {
+                "parameter_bytes": sum(
+                    p.numel() * p.element_size() for p in mod.parameters(recurse=False)
+                ),
+                "parameter_id": id(mod.weight),
+            }
 
         def get_shape(val: Any) -> tuple[int, ...] | None:
             if hasattr(val, "shape"):
@@ -399,6 +704,12 @@ class TorchFxAdapter(TorchAdapter):
             return 4
 
         for node in gm.graph.nodes:
+            if node.op == "call_module" and isinstance(
+                modules.get(str(node.target)), delegated_types
+            ):
+                # Checked first: these return tuples, which carry no single output shape.
+                captured.extend(delegated(str(node.target)))
+                continue
             out_shape = get_shape(node)
             if not out_shape:
                 continue
@@ -472,7 +783,12 @@ class TorchFxAdapter(TorchAdapter):
                 elif isinstance(mod, torch.nn.LayerNorm):
                     captured.append(
                         Operation(
-                            node.name, "layernorm", in_shapes or (out_shape,), out_shape, dtype_b
+                            node.name,
+                            "layernorm",
+                            in_shapes or (out_shape,),
+                            out_shape,
+                            dtype_b,
+                            norm_attrs(mod),
                         )
                     )
                 elif (
@@ -497,7 +813,12 @@ class TorchFxAdapter(TorchAdapter):
                 elif isinstance(mod, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
                     captured.append(
                         Operation(
-                            node.name, "batchnorm", in_shapes or (out_shape,), out_shape, dtype_b
+                            node.name,
+                            "batchnorm",
+                            in_shapes or (out_shape,),
+                            out_shape,
+                            dtype_b,
+                            norm_attrs(mod),
                         )
                     )
                 elif isinstance(

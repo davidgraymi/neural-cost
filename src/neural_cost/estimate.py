@@ -76,6 +76,45 @@ def estimate_conv2d(
     return 2 * numel(output_shape) * kernel_shape[1] * kernel_shape[2] * kernel_shape[3]
 
 
+def attention_flop_parts(operation: Operation) -> tuple[int, int, int]:
+    """Split multi-head attention FLOPs into (projections, QKᵀ + AV, softmax).
+
+    Projections: 4 linear maps (Q, K, V, output) = 4 × 2 × B·T × D × proj_dim.
+    Scores and weighted sum: 2 × (2 × B·T × T × H·head_dim).
+    Softmax: 5 × B·T × H × T.
+    """
+    if len(operation.output) >= 4:
+        b = operation.output[0]
+        num_heads = int(operation.attrs.get("num_heads", operation.output[1]))
+        seq_len = int(operation.attrs.get("seq_len", operation.output[2]))
+        head_dim = int(operation.attrs.get("head_dim", operation.output[3]))
+        d = num_heads * head_dim
+        b_t = b * seq_len
+    elif len(operation.output) >= 2:
+        b_t = prod(operation.output[:-1])  # batch * seq combined
+        d = operation.output[-1]
+        num_heads = int(operation.attrs.get("num_heads", 1))
+        head_dim = int(operation.attrs.get("head_dim", d // max(num_heads, 1)))
+        seq_len = int(operation.attrs.get("seq_len", operation.output[-2]))
+    else:
+        b_t, d, num_heads, head_dim, seq_len = (
+            1,
+            numel(operation.output),
+            1,
+            numel(operation.output),
+            1,
+        )
+
+    include_projections = bool(operation.attrs.get("include_projections", True))
+    # ``proj_dim`` is the projected width (num_heads × key_dim); it differs from the
+    # model width when, e.g., Keras MultiHeadAttention uses key_dim != D / num_heads.
+    proj_dim = int(operation.attrs.get("proj_dim", d))
+    proj_flops = 4 * 2 * b_t * d * proj_dim if include_projections else 0
+    attn_flops = 4 * b_t * num_heads * seq_len * head_dim
+    softmax_flops = 5 * b_t * num_heads * seq_len
+    return proj_flops, attn_flops, softmax_flops
+
+
 def estimate_operation(operation: Operation) -> CostEstimate:
     """Estimate FLOPs and compulsory tensor I/O for one operation.
 
@@ -83,13 +122,23 @@ def estimate_operation(operation: Operation) -> CostEstimate:
     cache misses, workspace, fusion, or allocator effects.  Those differences
     become visible in :func:`neural_cost.analyze_gap`.
     """
-    read_bytes = sum(numel(shape) for shape in operation.inputs) * operation.dtype_bytes + int(
-        operation.attrs.get("parameter_bytes", 0)
-    )
+    input_bytes = sum(numel(shape) for shape in operation.inputs) * operation.dtype_bytes
+    parameter_bytes = int(operation.attrs.get("parameter_bytes", 0))
+    if operation.kind in {"matmul", "linear", "conv2d"} and len(operation.inputs) >= 2:
+        # The weight is already an input; only extra parameters (e.g. bias) add traffic.
+        weight_bytes = numel(operation.inputs[1]) * operation.dtype_bytes
+        parameter_bytes = max(0, parameter_bytes - weight_bytes)
+    elif operation.kind == "elementwise":
+        parameter_bytes = 0  # a bias/scale operand is already counted as an input
+    read_bytes = input_bytes + parameter_bytes
     write_bytes = numel(operation.output) * operation.dtype_bytes
     kind = operation.kind
 
-    if kind in {"matmul", "linear"}:
+    if kind in {"matmul", "linear"} and "flops" in operation.attrs:
+        # Adapters that understand general contractions (e.g. JAX ``dot_general``
+        # with batch and multi-axis contracting dimensions) supply exact FLOPs.
+        flops = int(operation.attrs["flops"])
+    elif kind in {"matmul", "linear"}:
         if len(operation.inputs) < 2:
             raise ValueError(f"{kind} requires input and weight shapes")
         left, right = operation.inputs[:2]
@@ -121,43 +170,7 @@ def estimate_operation(operation: Operation) -> CostEstimate:
         # output shape is (batch, seq_len, embed_dim) or (N, embed_dim).
         flops = numel(operation.output)  # 1 FLOP/element as a nominal indexing cost
     elif kind == "attention":
-        # Multi-head self-attention cost:
-        #   4 linear projections  : 4 × 2 × B × T × D² / num_heads × num_heads = 4×2×B×T×D²
-        #   QKᵀ per head         : B × H × T × T × head_dim  (2 FLOPs per element)
-        #   softmax               : 5 × B × H × T²
-        #   weighted sum (AV)     : B × H × T × T × head_dim (2 FLOPs)
-        # We approximate using output shape (B, T, D) and attrs.
-        if len(operation.output) >= 4:
-            b = operation.output[0]
-            num_heads = int(operation.attrs.get("num_heads", operation.output[1]))
-            seq_len = int(operation.attrs.get("seq_len", operation.output[2]))
-            head_dim = int(operation.attrs.get("head_dim", operation.output[3]))
-            d = num_heads * head_dim
-            b_t = b * seq_len
-        elif len(operation.output) >= 2:
-            b_t = prod(operation.output[:-1])  # batch * seq combined
-            d = operation.output[-1]
-            num_heads = int(operation.attrs.get("num_heads", 1))
-            head_dim = int(operation.attrs.get("head_dim", d // max(num_heads, 1)))
-            seq_len = int(
-                operation.attrs.get(
-                    "seq_len", operation.output[-2] if len(operation.output) >= 2 else 1
-                )
-            )
-        else:
-            b_t, d, num_heads, head_dim, seq_len = (
-                1,
-                numel(operation.output),
-                1,
-                numel(operation.output),
-                1,
-            )
-
-        include_projections = bool(operation.attrs.get("include_projections", True))
-        proj_flops = 4 * 2 * b_t * d * d if include_projections else 0
-        attn_flops = 4 * b_t * num_heads * seq_len * head_dim
-        softmax_flops = 5 * b_t * num_heads * seq_len
-        flops = proj_flops + attn_flops + softmax_flops
+        flops = sum(attention_flop_parts(operation))
     elif kind == "pooling":
         kernel_size = operation.attrs.get("kernel_size")
         if not isinstance(kernel_size, tuple) or len(kernel_size) != 2:
@@ -313,7 +326,12 @@ def estimate_operation(operation: Operation) -> CostEstimate:
             write_bytes = numel(operation.output) * operation.dtype_bytes
     else:  # Defensive in case a caller bypasses static typing.
         raise ValueError(f"unsupported operation kind: {kind}")
-    return CostEstimate(flops, read_bytes, write_bytes, 1)
+    # ``repeat`` models an operation executed N times, e.g. the body of a
+    # ``lax.scan`` over a sequence.  Each iteration is a separate kernel.
+    repeat = int(operation.attrs.get("repeat", 1))
+    if repeat < 1:
+        raise ValueError("attrs['repeat'] must be a positive integer")
+    return CostEstimate(flops * repeat, read_bytes * repeat, write_bytes * repeat, repeat)
 
 
 def estimate_operations(operations: Iterable[Operation]) -> CostEstimate:

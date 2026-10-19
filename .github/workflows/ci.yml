@@ -56,6 +56,29 @@ jobs:
       - name: Run tests
         run: uv run --extra dev python -m pytest tests/ -v
 
+  test-core:
+    # The core package has zero mandatory dependencies; prove it by running the
+    # suite and the CLI with no ML framework or NumPy installed.
+    name: Test core (no optional dependencies)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install core + test tools only
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: uv run --extra dev python -m pytest tests/ -q -rs
+
+      - name: CLI smoke test
+        run: uv run neural-cost llm moe --json
+
   semver-check:
     name: Semantic Version Check
     runs-on: ubuntu-latest

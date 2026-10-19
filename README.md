@@ -120,6 +120,136 @@ and a compute/bandwidth lower bound.  The measured gap is expected: it captures
 launch overhead, synchronization, framework behavior, unfused intermediates,
 workspaces, caches, and imperfect kernel utilization.
 
+## Explain the gap, not just its size
+
+A roofline efficiency of 4% tells you a workload is slow. It doesn't tell you
+why. `neural-cost` goes further in three ways: it checks that every framework
+counts the same model the same way, it splits the measured time into its
+physical causes, and it publishes out-of-sample error for its predictions on
+real hardware.
+
+### 1. Cross-framework consistency you can test
+
+Adapters see a model at different granularity. A PyTorch hook records one
+`attention` op, while a JAX trace records the `dot_general`, `exp` and
+`reduce_sum` primitives that implement it. `flop_breakdown` separates
+granularity-invariant **dense FLOPs** (contractions, 2 FLOPs per MAC) and
+**unique parameters** from **auxiliary FLOPs** (point-wise work, which depends
+on what the adapter captures). `cross_check` then compares adapters against
+their median:
+
+```python
+from neural_cost import cross_check
+from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchAdapter
+
+report = cross_check({
+    "torch": TorchAdapter().operations(torch_model, torch_inputs),
+    "jax": JaxAdapter().operations(jax_fn, (x, params)),
+    "tensorflow": TensorFlowAdapter().operations(keras_model, tf_inputs),
+}, rtol=0.0)
+print(report.render())
+```
+
+The test suite builds an MLP, an NHWC CNN, a 2-layer `lax.scan` LSTM and
+multi-head attention identically in all three frameworks. It asserts that the
+dense FLOPs and parameter counts match each other exactly and match
+closed-form values (`tests/test_cross_framework.py`). The five reference
+architectures in `examples/architecture_comparison.py` also agree exactly. The
+JAX tracer recurses into `jit`, `scan` (scaled by trip count), `while`,
+`cond` and `custom_jvp`, handles arbitrary `dot_general` contractions and
+NHWC convolutions, and tracks parameters through transposes and broadcasts.
+
+### 2. Gap attribution
+
+`attribute_gap` splits measured runtime into ordered, non-overlapping
+components that sum exactly to the median:
+
+| Component | What it is |
+|---|---|
+| `roofline_floor` | FLOPs and fused bytes at datasheet peak with perfect overlap. Nothing can run faster. |
+| `unfused_traffic` | Extra DRAM round-trips for intermediates a fusing compiler would keep on chip |
+| `serialization` | Lost compute/memory overlap: each op is bounded by its own roofline |
+| `peak_derate` | Datasheet peak vs. *measured achievable* throughput, at each op's size |
+| `dispatch` | Per-kernel launch overhead (only the part not hidden by async execution) plus per-call sync |
+| `kernel_inefficiency` | How much slower each op runs *alone* than its achievable roofline (op replay) |
+| `timing_jitter` | Median minus fastest sample |
+| `residual` | Composition effects: framework glue, uncaptured ops, cache interference |
+
+```python
+from neural_cost import attribute_gap, detect_hardware
+from neural_cost.adapters import TorchAdapter
+
+adapter = TorchAdapter(use_profiler=False)            # no profiler overhead in timings
+hardware, _ = detect_hardware()
+calibration = adapter.calibrate("mps")                 # size-dependent FLOP/s + bandwidth curves,
+                                                       # dispatch and sync latency
+ops = adapter.operations(model, inputs)
+measurement = adapter.benchmark(model, *inputs, repeats=30)
+kernels = adapter.trace_kernels(model, inputs)         # every ATen kernel, incl. uncaptured ones
+
+attribution = attribute_gap(
+    ops, measurement, hardware, calibration,
+    kernel_count=len(kernels),
+    extra_kernels=[(k.bytes, k.python_dispatch) for k in kernels if not k.heavy],
+    isolated_seconds=adapter.replay(ops, "mps"),       # each op timed alone at its exact shape
+    assume_fusion=False,                               # eager execution
+)
+print(attribution.render())
+for step in attribution.recommendations():
+    print(step)
+```
+
+Calibration measures throughput as a function of size: matmuls from 32² to
+4096², and copies from 64 KiB (cache-resident) to 256 MiB (DRAM). Small
+kernels and cache-resident data are therefore modeled at the rate they
+actually reach. On asynchronous devices (CUDA, MPS) a kernel only exposes
+`max(0, dispatch − runtime)` of launch overhead. Kernels issued inside a C++
+composite op, such as the per-timestep ops of an eager CPU LSTM, pay no Python
+dispatch.
+
+### 3. Published validation
+
+`benchmarks/validate.py` runs a grid of MLP, CNN, LSTM and Transformer
+workloads on every installed backend and writes
+[`VALIDATION_REPORT.md`](VALIDATION_REPORT.md). It scores three predictors,
+and none of them is ever fit to the workload it predicts:
+
+* **Zero-shot**: microbenchmark calibration only. It never sees a model runtime.
+* **Op-replay**: each captured op is timed alone with synthetic tensors, then
+  the times are composed. It never runs the model.
+* **LOO fit**: a 4-parameter non-negative model
+  (`T = c₀ + α·kernels + FLOPs/P + bytes/BW`), with each workload predicted
+  by a fit on all the others.
+
+It also checks that the roofline is a valid **lower bound**. Any measurement
+faster than the bound would falsify the model.
+
+Results on an Apple M3 (`VALIDATION_REPORT.md`, 59 workloads, 3 backends):
+
+| Backend | Bound violations | Zero-shot MAPE (median) | Op-replay MAPE (median) | LOO fit MAPE (median) | Rank corr. (best predictor) |
+|---|---:|---:|---:|---:|---:|
+| PyTorch eager, CPU | 0 / 23 | 61% (66%) | **26% (22%)** | 51% (52%) | 0.987 |
+| PyTorch eager, MPS | 0 / 23 | 29% (19%) | 30% (15%) | **22% (13%)** | 0.948 |
+| JAX jit, CPU | 0 / 13 | **39% (33%)** | n/a | 45% (41%) | 0.989 |
+
+What this shows, and what it doesn't. The bound was never violated, and both
+bound and predictions rank workloads correctly (Spearman ρ 0.91–0.99). The
+best predictor still has a typical (median) error of 13–33%. Most of what remains is the eager-LSTM
+decomposition and composition effects that only appear when ops run together.
+That is exactly what the `residual` component isolates. The report contains
+every per-workload number. Run it on your hardware with:
+
+```bash
+python benchmarks/validate.py
+```
+
+Building the validation harness surfaced and fixed real bugs: weights were
+double-counted in linear/conv traffic, the FX adapter silently dropped
+RNN/LSTM/attention layers, and Keras parameter counts included BatchNorm
+moving statistics. Recurrent layers also used to be recorded as one big GEMM
+instead of T sequential ones. These caused the up-to-6× cross-framework FLOP
+discrepancies earlier versions of this README showed.
+
 ## Profile static memory and training state
 
 `profile_model` combines FLOP/traffic estimation with parameter and activation
@@ -516,75 +646,141 @@ Known JAX MPS limitations (tracked upstream):
 ┌─ Hardware ──────────────────────────────────────────────────────────────────
 │  Device          : Apple M3
 │  Peak FP32       : 3.60 TFLOP/s
-│  Peak bandwidth  : 100.0 GB/s  (STREAM triad: 48.6 GB/s)
+│  Peak bandwidth  : 100.0 GB/s  (STREAM triad: 51.6 GB/s)
 │  Ridge point     : 36.0 FLOP/byte
-│  Detection source: Apple Silicon table (Apple M3) + NumPy STREAM triad
+│  Detection source: Apple Silicon table (Apple M3) [FP32] + NumPy STREAM triad
 └────────────────────────────────────────────────────────────────────────────
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  FF DNN   (784→128→128→10, LayerNorm)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Framework         FLOPs     Params    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-PyTorch            3.8M    475,176       0.6    6.45     0.089   0.059     6.6% [█░░░░░░░░░░░░░░░░░]     42.44     6.58 memory
-JAX                3.8M    472,064       0.6    6.43     0.068   0.006     8.6% [██░░░░░░░░░░░░░░░░]     55.26     8.60 memory
-TensorFlow         3.8M    475,176       0.6    6.45     1.844   0.124     0.3% [░░░░░░░░░░░░░░░░░░]      2.06     0.32 memory
+Benchmarking PyTorch…
+    FF DNN         0.05 ms  11.8% eff
+    CNN            4.83 ms  8.4% eff
+    RNN            0.78 ms  8.2% eff
+    LSTM           2.43 ms  9.3% eff
+    Transformer    1.30 ms  13.3% eff
+Benchmarking JAX…
+    FF DNN         0.08 ms  11.3% eff
+    CNN            1.89 ms  31.9% eff
+    RNN            1.00 ms  13.1% eff
+    LSTM           3.71 ms  15.3% eff
+    Transformer    2.41 ms  21.3% eff
+Benchmarking TensorFlow…
+    FF DNN         1.89 ms  0.3% eff
+    CNN            4.21 ms  6.6% eff
+    RNN            19.94 ms  0.3% eff
+    LSTM           34.28 ms  0.7% eff
+    Transformer    11.91 ms  1.0% eff
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  CNN   (3-ch input → Conv64 → Conv128 → GAP → Dense10, 32×32)
+  FF DNN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Framework         FLOPs     Params    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound
+Framework         FLOPs    Param B    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound   
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-PyTorch          668.5M    309,288      20.4   32.71     5.046   0.393     4.0% [█░░░░░░░░░░░░░░░░░]    132.48     4.05 memory
-JAX              662.2M    306,944      25.7   25.78     2.406   0.202    10.7% [██░░░░░░░░░░░░░░░░]    275.27    10.68 memory
-TensorFlow       670.1M    310,824      27.8   24.12     5.226   0.377     5.3% [█░░░░░░░░░░░░░░░░░]    128.23     5.32 memory
+PyTorch            3.8M    475,176       0.6    6.09     0.053   0.010    11.8% [██░░░░░░░░░░░░░░░░]     71.61    11.76 memory  
+JAX                3.8M    475,176       0.9    4.45     0.076   0.005    11.3% [██░░░░░░░░░░░░░░░░]     50.03    11.25 memory  
+TensorFlow         3.8M    475,176       0.6    6.42     1.894   0.101     0.3% [░░░░░░░░░░░░░░░░░░]      2.00     0.31 memory  
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Diagnostics (top layer bottleneck & fusion):
+    • PyTorch: Top Bottleneck: _0 (linear, memory-bound) (73.7%), Fused Eff: 10.5%, Resident in SLC
+    • JAX: Top Bottleneck: dot_1 (matmul, memory-bound) (53.7%), Fused Eff: 8.2%, Resident in SLC
+    • TensorFlow: Top Bottleneck: dense (linear, memory-bound) (77.8%), Fused Eff: 0.3%, Resident in SLC
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  AI = arithmetic intensity (FLOP/byte).  Ridge point = 36.0 FLOP/byte  (above → compute-bound, below → memory-bound)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  RNN   (2-layer Vanilla RNN, hidden=128, seq=32)
+  CNN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Framework         FLOPs     Params    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound
+Framework         FLOPs    Param B    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound   
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-PyTorch           67.1M    267,304       2.4   28.29     1.019   0.176     2.3% [░░░░░░░░░░░░░░░░░░]     65.89     2.33 memory
-JAX               33.7M    136,192       6.6    5.14     1.678   0.031     3.9% [█░░░░░░░░░░░░░░░░░]     20.10     3.91 memory
-TensorFlow       201.4M    797,736       5.0   40.32    71.243   6.103     0.1% [░░░░░░░░░░░░░░░░░░]      2.83     0.07 compute
+PyTorch          671.1M    309,288      40.4   16.63     4.829   0.094     8.4% [██░░░░░░░░░░░░░░░░]    138.97     8.36 memory  
+JAX              666.9M    309,288      60.3   11.06     1.890   0.017    31.9% [██████░░░░░░░░░░░░]    352.90    31.91 memory  
+TensorFlow       670.1M    309,288      27.8   24.12     4.207   0.108     6.6% [█░░░░░░░░░░░░░░░░░]    159.26     6.60 memory  
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Diagnostics (top layer bottleneck & fusion):
+    • PyTorch: Top Bottleneck: _4 (conv2d, compute-bound) (31.2%), Fused Eff: 3.9%
+    • JAX: Top Bottleneck: conv_10 (conv2d, compute-bound) (22.8%), Fused Eff: 9.8%
+    • TensorFlow: Top Bottleneck: conv2d_1 (conv2d, compute-bound) (40.8%), Fused Eff: 4.4%
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  AI = arithmetic intensity (FLOP/byte).  Ridge point = 36.0 FLOP/byte  (above → compute-bound, below → memory-bound)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  LSTM   (2-layer LSTM, hidden=128, seq=32)
+  RNN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Framework         FLOPs     Params    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound
+Framework         FLOPs    Param B    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound   
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-PyTorch          268.5M       1.1M       6.3   42.58     2.856   0.091     2.6% [░░░░░░░░░░░░░░░░░░]     94.00     2.21 compute
-JAX              135.5M    529,408      31.5    4.31     4.426   0.134     7.1% [█░░░░░░░░░░░░░░░░░]     30.61     7.11 memory
-TensorFlow       268.5M       1.1M       6.3   42.58    43.502   1.862     0.2% [░░░░░░░░░░░░░░░░░░]      6.17     0.14 compute
+PyTorch           67.1M    267,304       6.4   10.43     0.784   0.007     8.2% [█░░░░░░░░░░░░░░░░░]     85.63     8.21 memory  
+JAX               67.4M    267,304      13.1    5.14     1.003   0.013    13.1% [██░░░░░░░░░░░░░░░░]     67.22    13.09 memory  
+TensorFlow        67.1M    267,304       6.6   10.22    19.936   0.280     0.3% [░░░░░░░░░░░░░░░░░░]      3.37     0.33 memory  
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Diagnostics (top layer bottleneck & fusion):
+    • PyTorch: Top Bottleneck: rnn.layer0.hh (linear, memory-bound) (40.7%), Resident in SLC
+    • JAX: Top Bottleneck: dot_4 (matmul, memory-bound) (20.0%), Fused Eff: 13.0%
+    • TensorFlow: Top Bottleneck: simple_rnn.hh (linear, memory-bound) (39.9%), Resident in SLC
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  AI = arithmetic intensity (FLOP/byte).  Ridge point = 36.0 FLOP/byte  (above → compute-bound, below → memory-bound)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Transformer   (2-layer encoder, embed=128, heads=4, FFN×4, seq=32)
+  LSTM
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Framework         FLOPs     Params    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound
+Framework         FLOPs    Param B    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound   
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-PyTorch          421.4M       1.5M       9.5   44.59     1.551   0.211     7.5% [█░░░░░░░░░░░░░░░░░]    271.69     6.09 compute
-JAX              201.9M    791,552      10.3   19.57     1.206   0.032     8.6% [██░░░░░░░░░░░░░░░░]    167.38     8.55 memory
-TensorFlow       421.4M       1.6M       9.5   44.59    12.630   0.182     0.9% [░░░░░░░░░░░░░░░░░░]     33.37     0.75 compute
+PyTorch          268.5M       1.1M      22.6   11.90     2.432   0.007     9.3% [██░░░░░░░░░░░░░░░░]    110.38     9.27 memory  
+JAX              270.2M       1.1M      56.6    4.77     3.705   0.024    15.3% [███░░░░░░░░░░░░░░░]     72.92    15.29 memory  
+TensorFlow       268.5M       1.1M      23.1   11.63    34.282   0.362     0.7% [░░░░░░░░░░░░░░░░░░]      7.83     0.67 memory  
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Diagnostics (top layer bottleneck & fusion):
+    • PyTorch: Top Bottleneck: lstm.layer0.hh (linear, memory-bound) (41.9%)
+    • JAX: Top Bottleneck: dot_4 (matmul, memory-bound) (17.1%), Fused Eff: 15.2%
+    • TensorFlow: Top Bottleneck: lstm.hh (linear, memory-bound) (41.9%)
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  AI = arithmetic intensity (FLOP/byte).  Ridge point = 36.0 FLOP/byte  (above → compute-bound, below → memory-bound)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Transformer
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Framework         FLOPs    Param B    I/O MB      AI   ms(med)     ±ms   effic.       roofline         GFLOP/s     GB/s bound   
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+PyTorch          422.2M       1.6M      17.3   24.37     1.302   0.014    13.3% [██░░░░░░░░░░░░░░░░]    324.40    13.31 memory  
+JAX              423.6M       1.6M      51.4    8.24     2.407   0.021    21.3% [████░░░░░░░░░░░░░░]    175.95    21.34 memory  
+TensorFlow       421.4M       1.6M      10.0   42.19    11.910   0.054     1.0% [░░░░░░░░░░░░░░░░░░]     35.38     0.84 compute 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Diagnostics (top layer bottleneck & fusion):
+    • PyTorch: Top Bottleneck: attn1 (attention, compute-bound) (10.0%), Fused Eff: 9.0%
+    • JAX: Top Bottleneck: add_54 (elementwise, memory-bound) (4.0%), Fused Eff: 8.5%
+    • TensorFlow: Top Bottleneck: multi_head_attention (attention, compute-bound) (15.3%), Fused Eff: 1.0%
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  AI = arithmetic intensity (FLOP/byte).  Ridge point = 36.0 FLOP/byte  (above → compute-bound, below → memory-bound)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Per-Architecture × Per-Framework Summary
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Architecture    PyTorch                       JAX                           TensorFlow
+  Architecture    PyTorch                       JAX                           TensorFlow                  
   ────────────────────────────────────────────────────────────────────────────────────────────────────────
-  FF DNN           7.7% eff   0.08ms   3.8M FLOPs   10.0% eff   0.06ms   3.8M FLOPs    0.3% eff   1.98ms   3.8M FLOPs
-  CNN              3.9% eff   5.29ms 668.5M FLOPs   11.3% eff   2.28ms 662.2M FLOPs    5.1% eff   5.41ms 670.1M FLOPs
-  RNN              2.3% eff   1.02ms  67.1M FLOPs    3.9% eff   1.68ms  33.7M FLOPs    0.1% eff  71.24ms 201.4M FLOPs
-  LSTM             2.6% eff   2.86ms 268.5M FLOPs    7.1% eff   4.43ms 135.5M FLOPs    0.2% eff  43.50ms 268.5M FLOPs
-  Transformer      7.5% eff   1.55ms 421.4M FLOPs    8.6% eff   1.21ms 201.9M FLOPs    0.9% eff  12.63ms 421.4M FLOPs
+  FF DNN          11.8% eff  0.05ms  3.8M FLOPs  11.3% eff  0.08ms  3.8M FLOPs  0.3% eff  1.89ms  3.8M FLOPs
+  CNN             8.4% eff  4.83ms  671.1M FLOPs  31.9% eff  1.89ms  666.9M FLOPs  6.6% eff  4.21ms  670.1M FLOPs
+  RNN             8.2% eff  0.78ms  67.1M FLOPs  13.1% eff  1.00ms  67.4M FLOPs  0.3% eff  19.94ms  67.1M FLOPs
+  LSTM            9.3% eff  2.43ms  268.5M FLOPs  15.3% eff  3.71ms  270.2M FLOPs  0.7% eff  34.28ms  268.5M FLOPs
+  Transformer     13.3% eff  1.30ms  422.2M FLOPs  21.3% eff  2.41ms  423.6M FLOPs  1.0% eff  11.91ms  421.4M FLOPs
+
+  *Efficiency >100% means hardware spec is conservative; pass --peak-flops to calibrate.
+
+  Canonical cross-framework consistency (dense FLOPs, unique parameters)
+  FF DNN             3.8M dense FLOPs    118,794 params  identical
+  CNN              660.6M dense FLOPs     77,322 params  identical
+  RNN               67.1M dense FLOPs     66,826 params  identical
+  LSTM             268.5M dense FLOPs    263,434 params  identical
+  Transformer      419.5M dense FLOPs    397,834 params  identical
 ```
 
 > **Reading the table**
-> All architectures are memory-bound on this CPU (AI < ridge point of 36 FLOP/byte).
-> Low roofline efficiency across all frameworks reflects framework dispatch overhead
-> and small-batch latency — the expected regime for CPU inference.
-> JAX's eager XLA compilation delivers the most consistent efficiency across architectures.
-> TensorFlow's eager Python dispatch overhead dominates at small batch sizes,
-> especially for sequential (RNN/LSTM) workloads.
+> Every framework now reports identical dense FLOPs and parameters for each
+> architecture (last block); the small differences in the total FLOPs column are
+> auxiliary point-wise work that each adapter captures at different granularity.
+> All architectures are memory-bound on this device (AI < ridge point of 36 FLOP/byte).
+> JAX runs under `jax.jit` (one fused XLA program) and PyTorch in eager mode;
+> TensorFlow runs eagerly, so Python dispatch dominates at this batch size,
+> especially for sequential (RNN/LSTM) workloads. Use `attribute_gap` to see how
+> much of each gap is dispatch, unfused traffic, or kernel inefficiency.
 
 </details>
 
@@ -780,8 +976,12 @@ neural-cost distributed --parameters 7e9 --batch-size 32 --tp 2 --dp 4 --json
 The package profiles concrete-shape dense, matrix-multiply, convolution,
 embedding lookup, multi-head attention, and common elementwise inference graphs,
 alongside `softmax`, `layernorm`, `batchnorm`, and `pooling`.  Recurrent layers
-(RNN, GRU, LSTM) are modelled as their constituent input→hidden and
-hidden→hidden linear projections.  Static training storage includes gradients
+(RNN, GRU, LSTM) are modelled as one input→hidden GEMM over all timesteps plus
+T sequential hidden→hidden GEMMs.  The published validation covers single-device
+eager PyTorch (CPU, MPS) and jitted JAX on one Apple M3; CUDA results come from
+running `benchmarks/validate.py` on such a machine, and the analytical
+LLM-serving and distributed models (MoE, paged attention, continuous batching,
+3D parallelism) are not yet validated against measured systems.  Static training storage includes gradients
 and optimizer state but does not yet trace a full backward graph.  Activation
 checkpointing, distributed communication, dynamic shapes, fusion details,
 complete graph coverage, and non-PyTorch kernel-level traces remain deliberate

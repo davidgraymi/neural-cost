@@ -6,7 +6,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 from torch import nn
 
 from neural_cost.adapters import TorchAdapter, TorchFxAdapter

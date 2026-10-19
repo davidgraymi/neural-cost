@@ -52,6 +52,7 @@ def test_invalid_scale_rejected():
 
 
 def test_torch_convnext_standard_scale():
+    pytest.importorskip("torch")
     model, inputs = get_model("convnext", framework="torch", scale="standard", batch=1)
     x = inputs[0]
     assert x.shape == (1, 3, 224, 224)
@@ -65,6 +66,7 @@ def test_torch_convnext_standard_scale():
 
 
 def test_torch_vit_standard_scale():
+    pytest.importorskip("torch")
     model, inputs = get_model("vit", framework="torch", scale="standard", batch=1)
     x = inputs[0]
     assert x.shape == (1, 3, 224, 224)
@@ -78,6 +80,7 @@ def test_torch_vit_standard_scale():
 
 
 def test_torch_deep_dnn_standard_scale():
+    pytest.importorskip("torch")
     model, inputs = get_model("deep_dnn", framework="torch", scale="standard", batch=2)
     x = inputs[0]
     assert x.shape == (2, 1024)
@@ -87,6 +90,7 @@ def test_torch_deep_dnn_standard_scale():
 
 
 def test_torch_transformer_standard_scale():
+    pytest.importorskip("torch")
     model, inputs = get_model("transformer", framework="torch", scale="standard", batch=1)
     x = inputs[0]
     assert x.shape == (1, 512, 768)
@@ -132,6 +136,7 @@ def test_estimate_conv2d_channel_mismatch_raises():
 
 
 def test_generate_report_dynamic_batch(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
     import generate_report
 
     monkeypatch.setattr(generate_report, "FIG_DIR", tmp_path)
