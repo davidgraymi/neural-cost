@@ -95,16 +95,20 @@ class DetectionResult:
 # ---------------------------------------------------------------------------
 
 
-def _measure_bandwidth_gb_s(size_mb: int = 256, repeats: int = 5) -> float:
+def _measure_bandwidth_gb_s(size_mb: int = 256, repeats: int = 5) -> float | None:
     """Return effective memory bandwidth in GB/s via a NumPy array copy.
 
     Uses a *STREAM Triad*-style kernel (c = a + scalar * b) over a buffer
     large enough to exceed typical L3 caches, measured with
-    :func:`time.perf_counter_ns`.
+    :func:`time.perf_counter_ns`.  Returns ``None`` when NumPy (an optional
+    dependency) is not installed.
     """
     import time
 
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        return None
 
     n = (size_mb * 1024 * 1024) // 8  # float64 elements
     a = np.random.rand(n).astype(np.float64)

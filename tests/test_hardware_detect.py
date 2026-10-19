@@ -14,6 +14,11 @@ from neural_cost.hardware_detect import (
 class HardwareDetectTests(unittest.TestCase):
     def test_measure_bandwidth_gb_s(self):
         # Can run real since it's fast
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.assertIsNone(_measure_bandwidth_gb_s(size_mb=1, repeats=2))
+            return
         bw = _measure_bandwidth_gb_s(size_mb=1, repeats=2)
         self.assertGreater(bw, 0.0)
         self.assertIsInstance(bw, float)

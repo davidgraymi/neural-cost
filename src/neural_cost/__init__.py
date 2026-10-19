@@ -37,6 +37,19 @@ from .analysis import (
     analyze_ssm_gap,
 )
 from .api import estimate_model
+from .attribution import (
+    GapAttribution,
+    GapComponent,
+    HardwareCalibration,
+    attribute_gap,
+)
+from .canonical import (
+    ConsistencyReport,
+    FlopBreakdown,
+    FrameworkCount,
+    cross_check,
+    flop_breakdown,
+)
 from .checkpointing import (
     ActivationCheckpointingEstimate,
     ActivationCheckpointingGapAnalysis,
@@ -101,6 +114,16 @@ from .quantization import (
     get_precision_format,
     get_quantization_preset,
 )
+from .validation import (
+    CostModel,
+    ValidationCase,
+    ValidationReport,
+    Workload,
+    fit_cost_model,
+    run_validation_suite,
+    validate_lower_bound,
+    validate_predictor,
+)
 
 __all__ = [
     "INTERCONNECT_PRESETS",
@@ -111,15 +134,22 @@ __all__ = [
     "CacheSpec",
     "CheckpointingStrategy",
     "ClusterTopology",
+    "ConsistencyReport",
     "ContinuousBatchGapAnalysis",
     "ContinuousBatchIterationEstimate",
     "CostEstimate",
+    "CostModel",
     "DequantizationCostEstimate",
     "DetectionResult",
     "DistributedGapAnalysis",
+    "FlopBreakdown",
+    "FrameworkCount",
     "FusedCostEstimate",
     "GapAnalysis",
+    "GapAttribution",
+    "GapComponent",
     "HFModelConfig",
+    "HardwareCalibration",
     "HardwareSpec",
     "InterconnectSpec",
     "KernelLaunchAnalysis",
@@ -143,6 +173,9 @@ __all__ = [
     "SSMGapAnalysis",
     "SpeculativeCostEstimate",
     "SpeculativeDecodingAnalysis",
+    "ValidationCase",
+    "ValidationReport",
+    "Workload",
     "__version__",
     "analyze_activation_checkpointing",
     "analyze_continuous_batch_iteration",
@@ -157,8 +190,10 @@ __all__ = [
     "analyze_quantization_gap",
     "analyze_speculative_decoding",
     "analyze_ssm_gap",
+    "attribute_gap",
     "available_adapters",
     "benchmark",
+    "cross_check",
     "detect_hardware",
     "estimate_activation_checkpointing",
     "estimate_adamw_traffic",
@@ -176,6 +211,8 @@ __all__ = [
     "estimate_speculative_decoding",
     "estimate_ssm",
     "fetch_hf_config",
+    "fit_cost_model",
+    "flop_breakdown",
     "from_huggingface",
     "generate_roofline_svg",
     "get_adapter",
@@ -184,5 +221,8 @@ __all__ = [
     "get_quantization_preset",
     "parse_hf_config",
     "profile_model",
+    "run_validation_suite",
     "save_roofline_svg",
+    "validate_lower_bound",
+    "validate_predictor",
 ]

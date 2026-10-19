@@ -1,0 +1,1418 @@
+{
+  "hardware": "Apple M3",
+  "detection": "Apple Silicon table (Apple M3) [FP32] + NumPy STREAM triad",
+  "backends": {
+    "torch-cpu": {
+      "calibration": {
+        "achievable_flops": 1657610699201.2236,
+        "achievable_bandwidth": 92162380056.97183,
+        "dispatch_seconds": 9.19917e-07,
+        "call_overhead_seconds": 8.008299999999994e-08,
+        "flops_curve": [
+          [
+            65536.0,
+            392852345389.43335
+          ],
+          [
+            524288.0,
+            865960422455.0134
+          ],
+          [
+            4194304.0,
+            1238131856791.3125
+          ],
+          [
+            33554432.0,
+            1473489798891.0369
+          ],
+          [
+            268435456.0,
+            1657610699201.2236
+          ],
+          [
+            2147483648.0,
+            1528602178586.9624
+          ],
+          [
+            17179869184.0,
+            1541002049700.5498
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            349881334230.67255
+          ],
+          [
+            524288.0,
+            68715857254.02781
+          ],
+          [
+            2097152.0,
+            105082562223.38766
+          ],
+          [
+            8388608.0,
+            150333502546.38068
+          ],
+          [
+            33554432.0,
+            107454099710.37564
+          ],
+          [
+            134217728.0,
+            92301312815.57004
+          ],
+          [
+            536870912.0,
+            92162380056.97183
+          ]
+        ],
+        "source": "torch microbenchmarks (cpu, float32)"
+      },
+      "report": {
+        "title": "PyTorch eager (cpu)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 1.47495e-05,
+            "lower_bound_seconds": 2.167104e-06,
+            "tightness": 0.1469272856707007,
+            "predicted_seconds": 2.535431836312523e-05,
+            "relative_error": 0.7189951091986326,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 1.3875e-05,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 8.191815943416445e-06,
+            "zero_shot_error": -0.44460382091484835,
+            "replay_seconds": 8.750598267865178e-06,
+            "replay_error": -0.4067189892630138
+          },
+          {
+            "name": "mlp w=256 b=16",
+            "measured_seconds": 3.2583500000000004e-05,
+            "lower_bound_seconds": 2.476704e-06,
+            "tightness": 0.07601098715607592,
+            "predicted_seconds": 2.2275145327836868e-05,
+            "relative_error": -0.31636732309798316,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 3.0833e-05,
+              "working_set_bytes": 569384,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 9.459666270023777e-06,
+            "zero_shot_error": -0.7096792465504388,
+            "replay_seconds": 1.7903860995484545e-05,
+            "replay_error": -0.4505237007846136
+          },
+          {
+            "name": "mlp w=256 b=128",
+            "measured_seconds": 9.3667e-05,
+            "lower_bound_seconds": 9.906563555555556e-06,
+            "tightness": 0.10576364734170579,
+            "predicted_seconds": 7.556218684272289e-05,
+            "relative_error": -0.19328913232277228,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 9.0959e-05,
+              "working_set_bytes": 798760,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 3.2921422240321855e-05,
+            "zero_shot_error": -0.648526992000151,
+            "replay_seconds": 4.557923238135387e-05,
+            "replay_error": -0.5133907098406709
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 4.3917e-05,
+            "lower_bound_seconds": 1.1707733333333333e-06,
+            "tightness": 0.026658772988440316,
+            "predicted_seconds": 0.00012166862633899156,
+            "relative_error": 1.770422076621617,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 4.3625e-05,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 7.174207714646755e-05,
+            "zero_shot_error": 0.6335832854354247,
+            "replay_seconds": 3.559003660431542e-05,
+            "replay_error": -0.1896068355234779
+          },
+          {
+            "name": "mlp w=1024 b=16",
+            "measured_seconds": 0.000216333,
+            "lower_bound_seconds": 1.8732373333333333e-05,
+            "tightness": 0.08659045699608166,
+            "predicted_seconds": 0.00016406036832852417,
+            "relative_error": -0.2416304108549127,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.000215959,
+              "working_set_bytes": 8568872,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 7.421162183729601e-05,
+            "zero_shot_error": -0.656956535353848,
+            "replay_seconds": 0.00018077799432572863,
+            "replay_error": -0.1643531300091589
+          },
+          {
+            "name": "mlp w=1024 b=128",
+            "measured_seconds": 0.000590063,
+            "lower_bound_seconds": 0.00014985898666666666,
+            "tightness": 0.25397116353112575,
+            "predicted_seconds": 0.0010825109367957606,
+            "relative_error": 0.8345684050614265,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.000586542,
+              "working_set_bytes": 9486376,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0003613308135120232,
+            "zero_shot_error": -0.3876402799158341,
+            "replay_seconds": 0.0005072396658449295,
+            "replay_error": -0.14036354449452104
+          },
+          {
+            "name": "mlp w=4096 b=1",
+            "measured_seconds": 0.002015771,
+            "lower_bound_seconds": 0.0013449633599999999,
+            "tightness": 0.667220314212279,
+            "predicted_seconds": 0.0005784429296054763,
+            "relative_error": -0.7130413476503649,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.002011625,
+              "working_set_bytes": 134447144,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0013544154863910623,
+            "zero_shot_error": -0.32809059839085775,
+            "replay_seconds": 0.0019949429405062653,
+            "replay_error": -0.010332552404878665
+          },
+          {
+            "name": "mlp w=4096 b=16",
+            "measured_seconds": 0.005457104,
+            "lower_bound_seconds": 0.00135725736,
+            "tightness": 0.2487138526221967,
+            "predicted_seconds": 0.0023615167837374882,
+            "relative_error": -0.5672582410491923,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.005417833,
+              "working_set_bytes": 134938664,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0013845718124018487,
+            "zero_shot_error": -0.7462808455910224,
+            "replay_seconds": 0.005326647853977324,
+            "replay_error": -0.023905746715231352
+          },
+          {
+            "name": "mlp w=4096 b=128",
+            "measured_seconds": 0.0102597915,
+            "lower_bound_seconds": 0.0024087544622222222,
+            "tightness": 0.23477616111616129,
+            "predicted_seconds": 0.016238422375755183,
+            "relative_error": 0.5827244029038194,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.010224917,
+              "working_set_bytes": 138608680,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.005696916385549175,
+            "zero_shot_error": -0.44473370774160714,
+            "replay_seconds": 0.009854488611344839,
+            "replay_error": -0.0395040083080793
+          },
+          {
+            "name": "cnn 32px b=1",
+            "measured_seconds": 0.0001269165,
+            "lower_bound_seconds": 5.853504e-06,
+            "tightness": 0.04612090626514283,
+            "predicted_seconds": 5.281686820116927e-05,
+            "relative_error": -0.5838455346533409,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.00012375,
+              "working_set_bytes": 640296,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 2.570515263153231e-05,
+            "zero_shot_error": -0.7974640599801263,
+            "replay_seconds": 9.663362199881081e-05,
+            "replay_error": -0.23860473619418435
+          },
+          {
+            "name": "cnn 32px b=8",
+            "measured_seconds": 0.000521125,
+            "lower_bound_seconds": 4.65832e-05,
+            "tightness": 0.08938968577596546,
+            "predicted_seconds": 0.00030286540607250926,
+            "relative_error": -0.4188238789685598,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.000517625,
+              "working_set_bytes": 2475304,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.00016020181367704968,
+            "zero_shot_error": -0.6925846703246827,
+            "replay_seconds": 0.0004506885563429832,
+            "replay_error": -0.1351622809441435
+          },
+          {
+            "name": "cnn 32px b=32",
+            "measured_seconds": 0.009752104000000001,
+            "lower_bound_seconds": 0.00018352355555555555,
+            "tightness": 0.018818867759773227,
+            "predicted_seconds": 0.0011722674705933933,
+            "relative_error": -0.8797933788858904,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.009428458,
+              "working_set_bytes": 8766760,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0005325819077641094,
+            "zero_shot_error": -0.9453879995779261,
+            "replay_seconds": 0.009461344843054524,
+            "replay_error": -0.02981501806640672
+          },
+          {
+            "name": "cnn 64px b=1",
+            "measured_seconds": 0.000318708,
+            "lower_bound_seconds": 2.3302463999999997e-05,
+            "tightness": 0.07311540344139462,
+            "predicted_seconds": 0.00016022201574156513,
+            "relative_error": -0.497276454492623,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.000311834,
+              "working_set_bytes": 1426728,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 8.854457697732608e-05,
+            "zero_shot_error": -0.722176484502033,
+            "replay_seconds": 0.000249331250074539,
+            "replay_error": -0.2176812314892034
+          },
+          {
+            "name": "cnn 64px b=8",
+            "measured_seconds": 0.0019027915,
+            "lower_bound_seconds": 0.00018350648888888887,
+            "tightness": 0.0964406709242126,
+            "predicted_seconds": 0.0011576107419700324,
+            "relative_error": -0.3916250193623251,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.001875167,
+              "working_set_bytes": 8766760,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0005323424701890327,
+            "zero_shot_error": -0.7202307923968376,
+            "replay_seconds": 0.0014504642964705999,
+            "replay_error": -0.23771769189078265
+          },
+          {
+            "name": "cnn 64px b=32",
+            "measured_seconds": 0.022669979,
+            "lower_bound_seconds": 0.0008548535199999999,
+            "tightness": 0.03770861543365346,
+            "predicted_seconds": 0.004609848246776235,
+            "relative_error": -0.7966540574750318,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.022265625,
+              "working_set_bytes": 33932584,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.002234187408040104,
+            "zero_shot_error": -0.9014473102052674,
+            "replay_seconds": 0.022132535987598873,
+            "replay_error": -0.023707256738134928
+          },
+          {
+            "name": "lstm d=128 b=1",
+            "measured_seconds": 0.00053125,
+            "lower_bound_seconds": 7.1080256e-05,
+            "tightness": 0.13379812894117646,
+            "predicted_seconds": 0.0008509880705913575,
+            "relative_error": 0.6018598975837317,
+            "metadata": {
+              "family": "lstm",
+              "device": "cpu",
+              "min_seconds": 0.000528709,
+              "working_set_bytes": 1193000,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.00018686293415044823,
+            "zero_shot_error": -0.6482580063050386,
+            "replay_seconds": 0.00022246941215664935,
+            "replay_error": -0.5812340477051307
+          },
+          {
+            "name": "lstm d=128 b=16",
+            "measured_seconds": 0.002202104,
+            "lower_bound_seconds": 0.00011545758222222223,
+            "tightness": 0.052430576495125676,
+            "predicted_seconds": 0.0010102848746307521,
+            "relative_error": -0.5412183645137777,
+            "metadata": {
+              "family": "lstm",
+              "device": "cpu",
+              "min_seconds": 0.002191417,
+              "working_set_bytes": 3159080,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.000436371699615799,
+            "zero_shot_error": -0.801838741668968,
+            "replay_seconds": 0.0007214162343570866,
+            "replay_error": -0.6723968375893752
+          },
+          {
+            "name": "lstm d=256 b=1",
+            "measured_seconds": 0.000904479,
+            "lower_bound_seconds": 0.000280572224,
+            "tightness": 0.3102031379390787,
+            "predicted_seconds": 0.0009602667901886716,
+            "relative_error": 0.06167947535395694,
+            "metadata": {
+              "family": "lstm",
+              "device": "cpu",
+              "min_seconds": 0.000901792,
+              "working_set_bytes": 4483112,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0008937729048551404,
+            "zero_shot_error": -0.011836753694513228,
+            "replay_seconds": 0.0005210614769578753,
+            "replay_error": -0.4239098122146835
+          },
+          {
+            "name": "lstm d=256 b=16",
+            "measured_seconds": 0.0054626245,
+            "lower_bound_seconds": 0.00029828437333333333,
+            "tightness": 0.05460459040033474,
+            "predicted_seconds": 0.0026206289647106567,
+            "relative_error": -0.5202619245180303,
+            "metadata": {
+              "family": "lstm",
+              "device": "cpu",
+              "min_seconds": 0.005429583,
+              "working_set_bytes": 8415272,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0014871652660932762,
+            "zero_shot_error": -0.7277562706180378,
+            "replay_seconds": 0.0020858851046425425,
+            "replay_error": -0.61815330622807
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.000272771,
+            "lower_bound_seconds": 3.0237582222222225e-05,
+            "tightness": 0.11085336132588225,
+            "predicted_seconds": 0.0002098332588909488,
+            "relative_error": -0.23073472293261083,
+            "metadata": {
+              "family": "transformer",
+              "device": "cpu",
+              "min_seconds": 0.000267167,
+              "working_set_bytes": 3683328,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 9.283199234123552e-05,
+            "zero_shot_error": -0.6596705942301948,
+            "replay_seconds": 0.0002042210949668671,
+            "replay_error": -0.25130935852100444
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.0011914795,
+            "lower_bound_seconds": 0.00024178596977777778,
+            "tightness": 0.20292918995062675,
+            "predicted_seconds": 0.0015246402246394707,
+            "relative_error": 0.27961935110043495,
+            "metadata": {
+              "family": "transformer",
+              "device": "cpu",
+              "min_seconds": 0.001186,
+              "working_set_bytes": 7353344,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.000712442743581067,
+            "zero_shot_error": -0.40205203397870715,
+            "replay_seconds": 0.0009913739721980268,
+            "replay_error": -0.16794710089596443
+          },
+          {
+            "name": "transformer d=256 T=256 b=1",
+            "measured_seconds": 0.0008180419999999999,
+            "lower_bound_seconds": 0.00013542832355555555,
+            "tightness": 0.16555179753063481,
+            "predicted_seconds": 0.0008426002484699354,
+            "relative_error": 0.030020767234366242,
+            "metadata": {
+              "family": "transformer",
+              "device": "cpu",
+              "min_seconds": 0.000814833,
+              "working_set_bytes": 5256192,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0003726497280333579,
+            "zero_shot_error": -0.5444613748030567,
+            "replay_seconds": 0.0006635168472729173,
+            "replay_error": -0.18889635584368858
+          },
+          {
+            "name": "transformer d=256 T=256 b=8",
+            "measured_seconds": 0.0066701455,
+            "lower_bound_seconds": 0.0011336681244444446,
+            "tightness": 0.1699615284920613,
+            "predicted_seconds": 0.006480056219600947,
+            "relative_error": -0.028498520819231453,
+            "metadata": {
+              "family": "transformer",
+              "device": "cpu",
+              "min_seconds": 0.006638458,
+              "working_set_bytes": 19936256,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0030645042653560718,
+            "zero_shot_error": -0.5405641053323242,
+            "replay_seconds": 0.00455214334581564,
+            "replay_error": -0.31753462562163903
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.10576364734170579,
+        "tightness_min": 0.018818867759773227,
+        "tightness_max": 0.667220314212279,
+        "bound_rank_correlation": 0.9179841897233202,
+        "loo_mape": 0.5130525128980274,
+        "loo_median_ape": 0.5202619245180303,
+        "loo_bias": 0.7172290383783028,
+        "loo_within_25pct": 0.2608695652173913,
+        "loo_rank_correlation": 0.9377470355731226,
+        "roofline_only_mape": 0.8518017781604421,
+        "full_model": {
+          "call_overhead_seconds": 1.075869623579508e-05,
+          "dispatch_seconds": 6.425571570563842e-07,
+          "seconds_per_flop": 1.6671801270278955e-12,
+          "seconds_per_byte": 4.590828070748813e-12,
+          "fitted_cases": 23
+        },
+        "hardware": "Apple M3",
+        "zero_shot_mape": 0.6137315004135542,
+        "zero_shot_median_ape": 0.656956535353848,
+        "zero_shot_rank_correlation": 0.9515810276679841,
+        "calibration_source": "torch microbenchmarks (cpu, float32)",
+        "replay_mape": 0.2627290816211329,
+        "replay_median_ape": 0.2176812314892034,
+        "replay_rank_correlation": 0.9871541501976284
+      }
+    },
+    "torch-mps": {
+      "calibration": {
+        "achievable_flops": 2953767852770.951,
+        "achievable_bandwidth": 90871661493.60721,
+        "dispatch_seconds": 3.113354e-06,
+        "call_overhead_seconds": 0.000162970646,
+        "flops_curve": [
+          [
+            65536.0,
+            2502409515.145307
+          ],
+          [
+            524288.0,
+            20441761669.41241
+          ],
+          [
+            4194304.0,
+            140991132905.06223
+          ],
+          [
+            33554432.0,
+            641234773880.0619
+          ],
+          [
+            268435456.0,
+            1096536627410.6119
+          ],
+          [
+            2147483648.0,
+            2696502980050.874
+          ],
+          [
+            17179869184.0,
+            2918941694460.255
+          ],
+          [
+            137438953472.0,
+            2953767852770.951
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            32662500124.59755
+          ],
+          [
+            524288.0,
+            129937435990.88838
+          ],
+          [
+            2097152.0,
+            276480298672.889
+          ],
+          [
+            8388608.0,
+            171285458321.24832
+          ],
+          [
+            33554432.0,
+            85635375218.4307
+          ],
+          [
+            134217728.0,
+            90068687428.3136
+          ],
+          [
+            536870912.0,
+            90871661493.60721
+          ]
+        ],
+        "source": "torch microbenchmarks (mps, float32)"
+      },
+      "report": {
+        "title": "PyTorch eager (mps)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 0.0002768125,
+            "lower_bound_seconds": 2.167104e-06,
+            "tightness": 0.007828779408444345,
+            "predicted_seconds": 0.00033107383317980106,
+            "relative_error": 0.19602197581323488,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.000272209,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0002243256629413782,
+            "zero_shot_error": -0.18961151342017357,
+            "replay_seconds": 0.00025959360580995474,
+            "replay_error": -0.06220417860481463
+          },
+          {
+            "name": "mlp w=256 b=16",
+            "measured_seconds": 0.00029641650000000004,
+            "lower_bound_seconds": 2.476704e-06,
+            "tightness": 0.008355486283658297,
+            "predicted_seconds": 0.00032659169912833773,
+            "relative_error": 0.10179999807142211,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.000291792,
+              "working_set_bytes": 569384,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0002519551962458141,
+            "zero_shot_error": -0.14999604864839153,
+            "replay_seconds": 0.0002693900902146051,
+            "replay_error": -0.0911771435982644
+          },
+          {
+            "name": "mlp w=256 b=128",
+            "measured_seconds": 0.00031945849999999996,
+            "lower_bound_seconds": 9.906563555555556e-06,
+            "tightness": 0.03101048666902135,
+            "predicted_seconds": 0.0003421940438765338,
+            "relative_error": 0.07116900591636735,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.000314291,
+              "working_set_bytes": 798760,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0002837756106196105,
+            "zero_shot_error": -0.11169804334644243,
+            "replay_seconds": 0.00028814254759266665,
+            "replay_error": -0.09802823342416404
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 0.000366646,
+            "lower_bound_seconds": 8.45832e-05,
+            "tightness": 0.23069445732395827,
+            "predicted_seconds": 0.00041545789593637776,
+            "relative_error": 0.13313085629293045,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.000357625,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.00023400877602040526,
+            "zero_shot_error": -0.36175827359249724,
+            "replay_seconds": 0.0003437060484688323,
+            "replay_error": -0.06256703068127757
+          },
+          {
+            "name": "mlp w=1024 b=16",
+            "measured_seconds": 0.000396896,
+            "lower_bound_seconds": 8.76612e-05,
+            "tightness": 0.22086692735628477,
+            "predicted_seconds": 0.0004413098980918011,
+            "relative_error": 0.11190311338940455,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.000390083,
+              "working_set_bytes": 8568872,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0003014214109849726,
+            "zero_shot_error": -0.24055316509873473,
+            "replay_seconds": 0.00036958237191269836,
+            "replay_error": -0.06881809866388582
+          },
+          {
+            "name": "mlp w=1024 b=128",
+            "measured_seconds": 0.000603708,
+            "lower_bound_seconds": 0.0001548348888888889,
+            "tightness": 0.256473144117502,
+            "predicted_seconds": 0.0006467994986662334,
+            "relative_error": 0.07137804810642463,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.000597583,
+              "working_set_bytes": 9486376,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0006924090351675901,
+            "zero_shot_error": 0.14692704944706736,
+            "replay_seconds": 0.0005697481559614093,
+            "replay_error": -0.05625210207350361
+          },
+          {
+            "name": "mlp w=4096 b=1",
+            "measured_seconds": 0.0018101039999999999,
+            "lower_bound_seconds": 0.0013449633599999999,
+            "tightness": 0.743030986064889,
+            "predicted_seconds": 0.0018922440927227344,
+            "relative_error": 0.045378659305064524,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.001741708,
+              "working_set_bytes": 134447144,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0017246633405312802,
+            "zero_shot_error": -0.04720207207360442,
+            "replay_seconds": 0.0017232582226567165,
+            "replay_error": -0.04797833568860319
+          },
+          {
+            "name": "mlp w=4096 b=16",
+            "measured_seconds": 0.001953396,
+            "lower_bound_seconds": 0.00135725736,
+            "tightness": 0.694819360744058,
+            "predicted_seconds": 0.002360923586676531,
+            "relative_error": 0.2086251772177946,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.001885792,
+              "working_set_bytes": 134938664,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0017385401569786998,
+            "zero_shot_error": -0.10999093016536342,
+            "replay_seconds": 0.0018728409836869392,
+            "replay_error": -0.041238446435367365
+          },
+          {
+            "name": "mlp w=4096 b=128",
+            "measured_seconds": 0.0037685,
+            "lower_bound_seconds": 0.0024087544622222222,
+            "tightness": 0.6391812291952295,
+            "predicted_seconds": 0.006790139519450623,
+            "relative_error": 0.801814918256766,
+            "metadata": {
+              "family": "mlp",
+              "device": "mps",
+              "min_seconds": 0.003706167,
+              "working_set_bytes": 138608680,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0033421890525190782,
+            "zero_shot_error": -0.11312483680003234,
+            "replay_seconds": 0.003710766323861905,
+            "replay_error": -0.015320067968182322
+          },
+          {
+            "name": "cnn 32px b=1",
+            "measured_seconds": 0.000414417,
+            "lower_bound_seconds": 5.853504e-06,
+            "tightness": 0.014124671526505912,
+            "predicted_seconds": 0.0003739907774618212,
+            "relative_error": -0.09754962402164676,
+            "metadata": {
+              "family": "cnn",
+              "device": "mps",
+              "min_seconds": 0.000407708,
+              "working_set_bytes": 640296,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.00028247595097353464,
+            "zero_shot_error": -0.3183775014694507,
+            "replay_seconds": 0.0003585637066169169,
+            "replay_error": -0.1347755844549888
+          },
+          {
+            "name": "cnn 32px b=8",
+            "measured_seconds": 0.0005688335,
+            "lower_bound_seconds": 4.65832e-05,
+            "tightness": 0.08189250457295501,
+            "predicted_seconds": 0.00046263310627226453,
+            "relative_error": -0.186698557183667,
+            "metadata": {
+              "family": "cnn",
+              "device": "mps",
+              "min_seconds": 0.00056475,
+              "working_set_bytes": 2475304,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0004247453621340091,
+            "zero_shot_error": -0.2533045924088347,
+            "replay_seconds": 0.0004338862929905681,
+            "replay_error": -0.2372349852978629
+          },
+          {
+            "name": "cnn 32px b=32",
+            "measured_seconds": 0.0012050415,
+            "lower_bound_seconds": 0.00021391143999999998,
+            "tightness": 0.17751375367570327,
+            "predicted_seconds": 0.0007635672684654134,
+            "relative_error": -0.3663560396339766,
+            "metadata": {
+              "family": "cnn",
+              "device": "mps",
+              "min_seconds": 0.001153375,
+              "working_set_bytes": 8766760,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0008710953622146293,
+            "zero_shot_error": -0.27712418019244206,
+            "replay_seconds": 0.0007564002184603919,
+            "replay_error": -0.3723035941414533
+          },
+          {
+            "name": "cnn 64px b=1",
+            "measured_seconds": 0.00046339549999999997,
+            "lower_bound_seconds": 2.3302463999999997e-05,
+            "tightness": 0.050286340717594365,
+            "predicted_seconds": 0.00041277744817893604,
+            "relative_error": -0.10923293778438489,
+            "metadata": {
+              "family": "cnn",
+              "device": "mps",
+              "min_seconds": 0.000456958,
+              "working_set_bytes": 1426728,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0003321928584532164,
+            "zero_shot_error": -0.28313318007357335,
+            "replay_seconds": 0.00039146614522860446,
+            "replay_error": -0.15522238513622924
+          },
+          {
+            "name": "cnn 64px b=8",
+            "measured_seconds": 0.0010395629999999999,
+            "lower_bound_seconds": 0.00021377895999999998,
+            "tightness": 0.20564310195726473,
+            "predicted_seconds": 0.0007654882741762639,
+            "relative_error": -0.26364417146794955,
+            "metadata": {
+              "family": "cnn",
+              "device": "mps",
+              "min_seconds": 0.000982709,
+              "working_set_bytes": 8766760,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0008531195788764256,
+            "zero_shot_error": -0.17934788091108889,
+            "replay_seconds": 0.0007556523396469931,
+            "replay_error": -0.27310577651667745
+          },
+          {
+            "name": "cnn 64px b=32",
+            "measured_seconds": 0.002744583,
+            "lower_bound_seconds": 0.0008548535199999999,
+            "tightness": 0.31146936346978754,
+            "predicted_seconds": 0.0019397110130566844,
+            "relative_error": -0.2932583882299481,
+            "metadata": {
+              "family": "cnn",
+              "device": "mps",
+              "min_seconds": 0.002701917,
+              "working_set_bytes": 33932584,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.002152843332726669,
+            "zero_shot_error": -0.2156027590615154,
+            "replay_seconds": 0.0021469602999782803,
+            "replay_error": -0.2177462660162654
+          },
+          {
+            "name": "lstm d=128 b=1",
+            "measured_seconds": 0.0009689785000000001,
+            "lower_bound_seconds": 7.1080256e-05,
+            "tightness": 0.07335586496501212,
+            "predicted_seconds": 0.00048602337740547626,
+            "relative_error": -0.4984167580545118,
+            "metadata": {
+              "family": "lstm",
+              "device": "mps",
+              "min_seconds": 0.00092125,
+              "working_set_bytes": 1193000,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0018962866815087189,
+            "zero_shot_error": 0.9569956211708709,
+            "replay_seconds": 0.002230916905127513,
+            "replay_error": 1.3023389116760724
+          },
+          {
+            "name": "lstm d=128 b=16",
+            "measured_seconds": 0.0011951875,
+            "lower_bound_seconds": 0.00011545758222222223,
+            "tightness": 0.09660206638893247,
+            "predicted_seconds": 0.0006397608144664705,
+            "relative_error": -0.46471928926091477,
+            "metadata": {
+              "family": "lstm",
+              "device": "mps",
+              "min_seconds": 0.001146583,
+              "working_set_bytes": 3159080,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.002172674183521147,
+            "zero_shot_error": 0.8178521642178711,
+            "replay_seconds": 0.0024410048835412338,
+            "replay_error": 1.0423614567097075
+          },
+          {
+            "name": "lstm d=256 b=1",
+            "measured_seconds": 0.0010696875,
+            "lower_bound_seconds": 0.000280572224,
+            "tightness": 0.2622936362255332,
+            "predicted_seconds": 0.0011324233322707595,
+            "relative_error": 0.05864874766766898,
+            "metadata": {
+              "family": "lstm",
+              "device": "mps",
+              "min_seconds": 0.001046125,
+              "working_set_bytes": 4483112,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0019004732642059208,
+            "zero_shot_error": 0.7766621225413225,
+            "replay_seconds": 0.002361285158562095,
+            "replay_error": 1.2074532595380383
+          },
+          {
+            "name": "lstm d=256 b=16",
+            "measured_seconds": 0.0017832505,
+            "lower_bound_seconds": 0.0008755427288888889,
+            "tightness": 0.49098134495904466,
+            "predicted_seconds": 0.001590924580954599,
+            "relative_error": -0.1078513192876722,
+            "metadata": {
+              "family": "lstm",
+              "device": "mps",
+              "min_seconds": 0.001767625,
+              "working_set_bytes": 8415272,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0029832141386725367,
+            "zero_shot_error": 0.6729080623684315,
+            "replay_seconds": 0.0029172028388504056,
+            "replay_error": 0.635890660818772
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.0004457915,
+            "lower_bound_seconds": 3.0237582222222225e-05,
+            "tightness": 0.06782897884374696,
+            "predicted_seconds": 0.0006249784537429458,
+            "relative_error": 0.40195237850642224,
+            "metadata": {
+              "family": "transformer",
+              "device": "mps",
+              "min_seconds": 0.000437958,
+              "working_set_bytes": 3683328,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0004013077621837621,
+            "zero_shot_error": -0.09978597128082949,
+            "replay_seconds": 0.00037421595411671826,
+            "replay_error": -0.16055834596057073
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.000985792,
+            "lower_bound_seconds": 0.00024178596977777778,
+            "tightness": 0.24527077697706795,
+            "predicted_seconds": 0.0008830224259025784,
+            "relative_error": -0.10425076902371055,
+            "metadata": {
+              "family": "transformer",
+              "device": "mps",
+              "min_seconds": 0.000937334,
+              "working_set_bytes": 7353344,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0010237922769618126,
+            "zero_shot_error": 0.038547966469409854,
+            "replay_seconds": 0.0007825504488953932,
+            "replay_error": -0.2061708262033034
+          },
+          {
+            "name": "transformer d=256 T=256 b=1",
+            "measured_seconds": 0.0006580415,
+            "lower_bound_seconds": 0.00013542832355555555,
+            "tightness": 0.20580514079363618,
+            "predicted_seconds": 0.0007226536714897394,
+            "relative_error": 0.09818859675224044,
+            "metadata": {
+              "family": "transformer",
+              "device": "mps",
+              "min_seconds": 0.000644084,
+              "working_set_bytes": 5256192,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0007389223534628472,
+            "zero_shot_error": 0.12291147817097742,
+            "replay_seconds": 0.0005629737499703016,
+            "replay_error": -0.14447075150989475
+          },
+          {
+            "name": "transformer d=256 T=256 b=8",
+            "measured_seconds": 0.002732146,
+            "lower_bound_seconds": 0.0011336681244444446,
+            "tightness": 0.4149368754248289,
+            "predicted_seconds": 0.0022007879881363575,
+            "relative_error": -0.19448375447858293,
+            "metadata": {
+              "family": "transformer",
+              "device": "mps",
+              "min_seconds": 0.002694667,
+              "working_set_bytes": 19936256,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.002310477190729772,
+            "zero_shot_error": -0.1543361186665091,
+            "replay_seconds": 0.0023157849665615374,
+            "replay_error": -0.1523934055641472
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.20580514079363618,
+        "tightness_min": 0.007828779408444345,
+        "tightness_max": 0.743030986064889,
+        "bound_rank_correlation": 0.9169960474308301,
+        "loo_mape": 0.21680317755316114,
+        "loo_median_ape": 0.13313085629293045,
+        "loo_bias": 0.9436529096074813,
+        "loo_within_25pct": 0.6956521739130435,
+        "loo_rank_correlation": 0.9476284584980237,
+        "roofline_only_mape": 0.7595536835799714,
+        "full_model": {
+          "call_overhead_seconds": 0.00022801660442708382,
+          "dispatch_seconds": 1.6695814473068767e-05,
+          "seconds_per_flop": 3.7998525634761344e-13,
+          "seconds_per_byte": 1.134226212966274e-11,
+          "fitted_cases": 23
+        },
+        "hardware": "Apple M3",
+        "zero_shot_mape": 0.28859789267806235,
+        "zero_shot_median_ape": 0.18961151342017357,
+        "zero_shot_rank_correlation": 0.9288537549407114,
+        "calibration_source": "torch microbenchmarks (mps, float32)",
+        "replay_mape": 0.29502651507313243,
+        "replay_median_ape": 0.1523934055641472,
+        "replay_rank_correlation": 0.9071146245059288
+      }
+    },
+    "jax-cpu": {
+      "calibration": {
+        "achievable_flops": 565288382978.6227,
+        "achievable_bandwidth": 91872907677.52762,
+        "dispatch_seconds": 2.3765819999999998e-06,
+        "call_overhead_seconds": 2.894180000000002e-07,
+        "flops_curve": [
+          [
+            65536.0,
+            38347571679.34465
+          ],
+          [
+            524288.0,
+            37559137474.03109
+          ],
+          [
+            4194304.0,
+            83745387748.58238
+          ],
+          [
+            33554432.0,
+            307836001504.5733
+          ],
+          [
+            268435456.0,
+            526041815192.4482
+          ],
+          [
+            2147483648.0,
+            565288382978.6227
+          ],
+          [
+            17179869184.0,
+            548973338034.47266
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            57161796772.786736
+          ],
+          [
+            524288.0,
+            97541953488.37209
+          ],
+          [
+            2097152.0,
+            86181967617.32556
+          ],
+          [
+            8388608.0,
+            82173582539.86913
+          ],
+          [
+            33554432.0,
+            125966423401.50766
+          ],
+          [
+            134217728.0,
+            90412750421.01717
+          ],
+          [
+            536870912.0,
+            91872907677.52762
+          ]
+        ],
+        "source": "jax microbenchmarks (cpu, jit)"
+      },
+      "report": {
+        "title": "JAX jit (cpu)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 1.975e-05,
+            "lower_bound_seconds": 2.249152e-06,
+            "tightness": 0.11388111392405063,
+            "predicted_seconds": 4.735795333887327e-05,
+            "relative_error": 1.397871055132824,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 1.8833e-05,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 9.857436999893637e-06,
+            "zero_shot_error": -0.5008892658281703,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=256 b=16",
+            "measured_seconds": 7.602100000000001e-05,
+            "lower_bound_seconds": 3.787552e-06,
+            "tightness": 0.04982244379842411,
+            "predicted_seconds": 3.262355159945906e-05,
+            "relative_error": -0.5708613199055649,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 7.5791e-05,
+              "working_set_bytes": 569384,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 5.3437844643259784e-05,
+            "zero_shot_error": -0.2970646973433686,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=256 b=128",
+            "measured_seconds": 0.00024743750000000004,
+            "lower_bound_seconds": 1.5274272e-05,
+            "tightness": 0.061729818641070966,
+            "predicted_seconds": 0.00013225919590092907,
+            "relative_error": -0.4654844318224641,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.0002455,
+              "working_set_bytes": 798760,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0001146586076073488,
+            "zero_shot_error": -0.5366158823648445,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 7.98545e-05,
+            "lower_bound_seconds": 1.175896111111111e-06,
+            "tightness": 0.014725483361753075,
+            "predicted_seconds": 0.00016539850933817792,
+            "relative_error": 1.07124844984538,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 7.2542e-05,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.00010602339323229242,
+            "zero_shot_error": 0.3277071828424498,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=16",
+            "measured_seconds": 0.00031875,
+            "lower_bound_seconds": 1.8814337777777777e-05,
+            "tightness": 0.059025373420479296,
+            "predicted_seconds": 0.00027029127743881403,
+            "relative_error": -0.15202736489783839,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000304459,
+              "working_set_bytes": 8568872,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.00018626546521363722,
+            "zero_shot_error": -0.41563775619251075,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=128",
+            "measured_seconds": 0.0012245,
+            "lower_bound_seconds": 0.00015051470222222221,
+            "tightness": 0.12291931582051631,
+            "predicted_seconds": 0.0015901314866460436,
+            "relative_error": 0.29859655912294303,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.001183458,
+              "working_set_bytes": 9486376,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0010079892967753612,
+            "zero_shot_error": -0.17681560083678133,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=4096 b=1",
+            "measured_seconds": 0.0020755205,
+            "lower_bound_seconds": 0.00134824048,
+            "tightness": 0.6495915024688987,
+            "predicted_seconds": 0.0012249893858249292,
+            "relative_error": -0.40979171931815217,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.001918167,
+              "working_set_bytes": 134447144,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0014937944607554222,
+            "zero_shot_error": -0.28027959215270476,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=4096 b=16",
+            "measured_seconds": 0.0067755835,
+            "lower_bound_seconds": 0.00140968648,
+            "tightness": 0.20805388642911715,
+            "predicted_seconds": 0.0038178797843754805,
+            "relative_error": -0.4365238382236038,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.006723833,
+              "working_set_bytes": 134938664,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.0019525903528117092,
+            "zero_shot_error": -0.7118196015425521,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=4096 b=128",
+            "measured_seconds": 0.020390541499999998,
+            "lower_bound_seconds": 0.002391627448888889,
+            "tightness": 0.11729102186368563,
+            "predicted_seconds": 0.022770006342337272,
+            "relative_error": 0.11669453909977204,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.020226208,
+              "working_set_bytes": 138608680,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.015534378585478976,
+            "zero_shot_error": -0.2381576239415232,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.0006624585000000001,
+            "lower_bound_seconds": 3.1506528e-05,
+            "tightness": 0.04756000262657962,
+            "predicted_seconds": 0.00033321794211137136,
+            "relative_error": -0.49699801253758336,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.000652083,
+              "working_set_bytes": 3670016,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0002578685715732489,
+            "zero_shot_error": -0.6107400364351143,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.002026208,
+            "lower_bound_seconds": 0.00023454947555555557,
+            "tightness": 0.1157578469513276,
+            "predicted_seconds": 0.0025076323690412074,
+            "relative_error": 0.2375986912701991,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.001995292,
+              "working_set_bytes": 7340032,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.001545413293679034,
+            "zero_shot_error": -0.23728793209826723,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=256 b=1",
+            "measured_seconds": 0.001521,
+            "lower_bound_seconds": 0.0001316926577777778,
+            "tightness": 0.08658294396961064,
+            "predicted_seconds": 0.001402427053915335,
+            "relative_error": -0.0779572295099704,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.001486291,
+              "working_set_bytes": 7340032,
+              "bound_memory_level": "SLC"
+            },
+            "zero_shot_seconds": 0.0008863479235768263,
+            "zero_shot_error": -0.41725974781273745,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=256 b=8",
+            "measured_seconds": 0.009614521000000001,
+            "lower_bound_seconds": 0.0020486556,
+            "tightness": 0.21307932033223495,
+            "predicted_seconds": 0.011279243826948523,
+            "relative_error": 0.17314672534893025,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.009496875,
+              "working_set_bytes": 36700160,
+              "bound_memory_level": "DRAM"
+            },
+            "zero_shot_seconds": 0.006766033608090582,
+            "zero_shot_error": -0.29626929848189204,
+            "replay_seconds": null,
+            "replay_error": null
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.11388111392405063,
+        "tightness_min": 0.014725483361753075,
+        "tightness_max": 0.6495915024688987,
+        "bound_rank_correlation": 0.978021978021978,
+        "loo_mape": 0.45421537969501735,
+        "loo_median_ape": 0.40979171931815217,
+        "loo_bias": 0.9146866306427069,
+        "loo_within_25pct": 0.38461538461538464,
+        "loo_rank_correlation": 0.9505494505494505,
+        "roofline_only_mape": 0.8569215327994039,
+        "full_model": {
+          "call_overhead_seconds": 1.5869622525193368e-05,
+          "dispatch_seconds": 0.0,
+          "seconds_per_flop": 2.375768999313597e-12,
+          "seconds_per_byte": 9.616319363928749e-12,
+          "fitted_cases": 13
+        },
+        "hardware": "Apple M3",
+        "zero_shot_mape": 0.3881957090671474,
+        "zero_shot_median_ape": 0.3277071828424498,
+        "zero_shot_rank_correlation": 0.989010989010989,
+        "calibration_source": "jax microbenchmarks (cpu, jit)",
+        "replay_mape": null,
+        "replay_median_ape": null,
+        "replay_rank_correlation": null
+      }
+    }
+  }
+}

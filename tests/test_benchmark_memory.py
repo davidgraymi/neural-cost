@@ -129,6 +129,7 @@ class BenchmarkMemoryTelemetryTests(unittest.TestCase):
         self.assertGreater(len(mem_gap.findings), 0)
 
     def test_generate_report_rep_batch_and_memory_fig(self) -> None:
+        pytest.importorskip("matplotlib")
         from benchmarks.generate_report import fig_memory_utilization, rep_batch
 
         records = [

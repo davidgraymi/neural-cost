@@ -10,22 +10,26 @@ from neural_cost.adapters import (
 
 
 def test_get_adapter_torch():
+    pytest.importorskip("torch")
     adapter = get_adapter("torch")
     assert isinstance(adapter, TorchAdapter)
 
 
 def test_get_adapter_pytorch_alias():
+    pytest.importorskip("torch")
     adapter = get_adapter("pytorch")
     assert isinstance(adapter, TorchAdapter)
 
 
 def test_get_adapter_torch_fx():
+    pytest.importorskip("torch")
     adapter = get_adapter("torch-fx")
     assert isinstance(adapter, TorchAdapter)
     assert adapter.name == "pytorch-fx"
 
 
 def test_get_adapter_jax():
+    pytest.importorskip("jax")
     adapter = get_adapter("jax")
     assert isinstance(adapter, JaxAdapter)
 
