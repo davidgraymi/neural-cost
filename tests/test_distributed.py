@@ -244,3 +244,80 @@ def test_cli_distributed_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert data["parallelism"]["tp"] == 8
     assert data["parallelism"]["dp"] == 2
     assert "model_flops_utilization" in data["performance"]
+
+
+def _tp_pp_kwargs(**overrides):
+    kwargs = {
+        "total_parameters": 7_000_000_000,
+        "batch_size": 16,
+        "seq_len": 2048,
+        "embed_dim": 4096,
+        "num_layers": 32,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_tp_checkpointing_adds_recompute_forward_collectives() -> None:
+    plain = estimate_parallelism(**_tp_pp_kwargs(tp_degree=4, activation_checkpointing=False))
+    ckpt = estimate_parallelism(**_tp_pp_kwargs(tp_degree=4, activation_checkpointing=True))
+    assert plain.tp_recompute_bytes_per_step == 0
+    # Recompute re-runs the forward: fwd + bwd + fwd = 1.5x the uncheckpointed volume.
+    assert ckpt.tp_bytes_per_step == pytest.approx(1.5 * plain.tp_bytes_per_step, rel=1e-6)
+    assert ckpt.tp_recompute_bytes_per_step == pytest.approx(plain.tp_bytes_per_step / 2, rel=1e-6)
+
+
+def test_tp_recompute_absent_for_inference() -> None:
+    est = estimate_parallelism(
+        **_tp_pp_kwargs(tp_degree=4, activation_checkpointing=True, is_training=False)
+    )
+    assert est.tp_recompute_bytes_per_step == 0
+
+
+def test_training_flop_multiplier_counts_forward_and_recompute() -> None:
+    p, b, s = 7_000_000_000, 16, 2048
+    plain = estimate_parallelism(**_tp_pp_kwargs(activation_checkpointing=False))
+    ckpt = estimate_parallelism(**_tp_pp_kwargs(activation_checkpointing=True))
+    infer = estimate_parallelism(**_tp_pp_kwargs(is_training=False))
+    assert plain.total_step_flops == 6 * p * b * s
+    assert ckpt.total_step_flops == 8 * p * b * s
+    assert infer.total_step_flops == 2 * p * b * s
+
+
+def test_pp_counts_every_stage_boundary_cluster_wide() -> None:
+    est = estimate_parallelism(
+        **_tp_pp_kwargs(pp_degree=4, dp_degree=2, num_microbatches=8, sequence_parallel=False)
+    )
+    act = (16 // 2) * 2048 * 4096 * 2
+    assert est.pp_boundaries == 3
+    # Interior rank: one activation forward + one gradient backward.
+    assert est.pp_bytes_per_step == 2 * act
+    # Cluster: 3 boundaries x 2 directions x 2 DP replicas.
+    assert est.pp_total_bytes_per_step == 3 * 2 * act * 2
+
+
+def test_pp_total_grows_with_pipeline_depth() -> None:
+    shallow = estimate_parallelism(**_tp_pp_kwargs(pp_degree=2, num_microbatches=8))
+    deep = estimate_parallelism(**_tp_pp_kwargs(pp_degree=8, num_microbatches=8))
+    assert deep.pp_bytes_per_step == shallow.pp_bytes_per_step
+    assert deep.pp_total_bytes_per_step == 7 * shallow.pp_total_bytes_per_step
+
+
+def test_pp_sequence_parallel_scatters_boundary_tensor_across_tp() -> None:
+    no_sp = estimate_parallelism(**_tp_pp_kwargs(tp_degree=4, pp_degree=2, sequence_parallel=False))
+    sp = estimate_parallelism(**_tp_pp_kwargs(tp_degree=4, pp_degree=2, sequence_parallel=True))
+    assert sp.pp_bytes_per_step * 4 == no_sp.pp_bytes_per_step
+    assert sp.pp_total_bytes_per_step * 4 == no_sp.pp_total_bytes_per_step
+
+
+def test_pp_interleaved_schedule_trades_bubble_for_comm() -> None:
+    base = estimate_parallelism(**_tp_pp_kwargs(pp_degree=4, num_microbatches=8))
+    inter = estimate_parallelism(
+        **_tp_pp_kwargs(pp_degree=4, num_microbatches=8, pp_virtual_stages=2)
+    )
+    assert inter.pp_bubble_fraction == pytest.approx(3 / (2 * 8 + 3))
+    assert inter.pp_bubble_fraction < base.pp_bubble_fraction
+    assert inter.pp_bytes_per_step == 2 * base.pp_bytes_per_step
+    assert inter.pp_boundaries == 7
+    with pytest.raises(ValueError):
+        estimate_parallelism(**_tp_pp_kwargs(pp_degree=4, pp_virtual_stages=0))
