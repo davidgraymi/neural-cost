@@ -5,10 +5,10 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
-from jax import lax  # noqa: E402
+from jax import lax
 
-from neural_cost import flop_breakdown  # noqa: E402
-from neural_cost.adapters import JaxAdapter  # noqa: E402
+from neural_cost import flop_breakdown
+from neural_cost.adapters import JaxAdapter
 
 
 def test_scan_body_scaled_by_trip_count():
