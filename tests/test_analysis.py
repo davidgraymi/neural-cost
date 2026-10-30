@@ -175,8 +175,8 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(any("Top bottleneck layer:" in f for f in result.findings))
 
         rendered = result.render()
-        self.assertIn("top layer bottlenecks:", rendered)
-        self.assertIn("fc1 (linear):", rendered)
+        self.assertIn("top 2 of 2 operations by share of lower bound:", rendered)
+        self.assertRegex(rendered, r"fc1\s+linear")
 
     def test_analyze_model_gap(self):
         cost_est = CostEstimate(flops=1000, read_bytes=100, write_bytes=100, operations=1)

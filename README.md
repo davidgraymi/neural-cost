@@ -638,6 +638,26 @@ print(gap.render())
 traffic left out. The warning threshold defaults to 90%
 (`analyze_gap(..., coverage_threshold=0.8)`).
 
+### Per-operation breakdown
+
+When `analyze_gap` receives `operations=`, `render()` includes a table of
+the top operations. Choose how many rows (`top`) and the sort key
+(`"share"` of the lower bound, `"bytes"` or `"flops"`). `JaxAdapter` prefixes
+operation names with their name scope (`jax.named_scope`, Flax module
+names), and `group_by_scope=True` sums each scope, which shows whether
+normalization layers or convolutions drive the traffic:
+
+```python
+print(gap.render(top=5, group_by_scope=True))
+#   top 5 of 6 scopes by share of lower bound:
+#      #  operation                  kind         FLOPs        bytes   FLOP/B      bound   share  regime
+#      1  model/block_0/Conv_0       conv2d       604.0 MFLOP  4.3 MB  139.11   1.116 ms   36.1%  compute
+#      3  model/block_0/GroupNorm_0  elementwise  3.7 MFLOP   25.2 MB    0.15   0.369 ms   11.9%  memory
+```
+
+Group and layer norms lowered to reductions plus elementwise ops are traced in
+full. Reductions count one FLOP per input element.
+
 ## Pipeline profiling
 
 Real workloads are pipelines. One self-play search is tree bookkeeping plus

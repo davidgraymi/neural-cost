@@ -59,8 +59,17 @@ class GapAnalysis:
     coverage: Coverage | None = None
     coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD
 
-    def render(self) -> str:
-        """Return a compact, terminal-friendly performance-gap report."""
+    def render(self, top: int = 5, sort: str = "share", group_by_scope: bool = False) -> str:
+        """Return a compact, terminal-friendly performance-gap report.
+
+        With per-operation analyses (``analyze_gap(..., operations=ops)``) the
+        report includes a table of the ``top`` operations ordered by ``sort``:
+        ``"share"`` (of the serialized lower bound), ``"bytes"`` or
+        ``"flops"``.  ``group_by_scope=True`` sums operations that share a
+        name scope (e.g. ``ResNet/block_0/GroupNorm_0`` from Flax or
+        ``jax.named_scope``), which shows whether norms or convs dominate.
+        ``top=0`` omits the table.
+        """
         lines = ["Neural cost gap analysis"]
         if self.coverage is not None:
             lines.append(f"  {self.coverage.summary()}")
@@ -102,16 +111,12 @@ class GapAnalysis:
                 ),
             ]
         )
-        if self.layer_analyses:
-            lines.append("  top layer bottlenecks:")
-            sorted_layers = sorted(
-                self.layer_analyses, key=lambda layer: layer.time_share_ratio, reverse=True
-            )[:3]
-            for idx, layer in enumerate(sorted_layers, 1):
-                lines.append(
-                    f"    {idx}. {layer.name} ({layer.kind}): {layer.lower_bound_seconds * 1e3:.3f} ms "
-                    f"({layer.time_share_ratio:.1%} share, {layer.bottleneck}-bound, AI: {layer.arithmetic_intensity:.1f} FLOP/B)"
+        if self.layer_analyses and top > 0:
+            lines.extend(
+                render_layer_table(
+                    self.layer_analyses, top=top, sort=sort, group_by_scope=group_by_scope
                 )
+            )
         lines.extend(
             f"  next: {finding}"
             for finding in self.findings
@@ -138,6 +143,98 @@ class ModelGapAnalysis:
 
     performance: GapAnalysis
     memory: MemoryGapAnalysis
+
+
+_LAYER_SORT_KEYS = {
+    "share": lambda layer: layer.time_share_ratio,
+    "bytes": lambda layer: layer.total_bytes,
+    "flops": lambda layer: layer.flops,
+}
+
+
+def _si(value: float, unit: str) -> str:
+    for prefix in ("", "K", "M", "G", "T", "P"):
+        if abs(value) < 1000 or prefix == "P":
+            return f"{value:.0f} {unit}" if prefix == "" else f"{value:.1f} {prefix}{unit}"
+        value /= 1000
+    return f"{value:.1f} {unit}"  # pragma: no cover
+
+
+def group_layers_by_scope(
+    layers: Iterable[LayerGapAnalysis],
+) -> tuple[LayerGapAnalysis, ...]:
+    """Sum per-operation analyses that share a name scope (the name up to its last ``/``).
+
+    Operations without a scope keep their own row.  The grouped ``kind`` is
+    the common kind, or ``"mixed"``.
+    """
+    groups: dict[str, list[LayerGapAnalysis]] = {}
+    for layer in layers:
+        scope, sep, _ = layer.name.rpartition("/")
+        groups.setdefault(scope if sep else layer.name, []).append(layer)
+    grouped = []
+    for name, members in groups.items():
+        kinds = {member.kind for member in members}
+        flops = sum(member.flops for member in members)
+        read = sum(member.read_bytes for member in members)
+        write = sum(member.write_bytes for member in members)
+        compute = sum(member.compute_bound_seconds for member in members)
+        bandwidth = sum(member.bandwidth_bound_seconds for member in members)
+        bound = sum(member.lower_bound_seconds for member in members)
+        grouped.append(
+            LayerGapAnalysis(
+                name=name,
+                kind=kinds.pop() if len(kinds) == 1 else "mixed",
+                flops=flops,
+                read_bytes=read,
+                write_bytes=write,
+                total_bytes=read + write,
+                arithmetic_intensity=flops / (read + write) if read + write else 0.0,
+                compute_bound_seconds=compute,
+                bandwidth_bound_seconds=bandwidth,
+                lower_bound_seconds=bound,
+                bottleneck="compute" if compute >= bandwidth else "memory",
+                time_share_ratio=sum(member.time_share_ratio for member in members),
+            )
+        )
+    return tuple(grouped)
+
+
+def render_layer_table(
+    layers: Iterable[LayerGapAnalysis],
+    top: int = 5,
+    sort: str = "share",
+    group_by_scope: bool = False,
+) -> list[str]:
+    """Format the top ``top`` per-operation analyses as aligned report lines."""
+    if sort not in _LAYER_SORT_KEYS:
+        raise ValueError(f"sort must be one of {sorted(_LAYER_SORT_KEYS)}")
+    rows = group_layers_by_scope(layers) if group_by_scope else tuple(layers)
+    ranked = sorted(rows, key=_LAYER_SORT_KEYS[sort], reverse=True)[:top]
+    if not ranked:
+        return []
+    width = min(48, max(len("operation"), *(len(layer.name) for layer in ranked)))
+
+    def clip(name: str) -> str:
+        return name if len(name) <= width else "…" + name[-(width - 1) :]
+
+    label = "scopes" if group_by_scope else "operations"
+    order = {"share": "share of lower bound", "bytes": "bytes moved", "flops": "FLOPs"}[sort]
+    lines = [
+        f"  top {len(ranked)} of {len(rows)} {label} by {order}:",
+        (
+            f"    {'#':>2}  {'operation':<{width}}  {'kind':<11}  {'FLOPs':>11}  "
+            f"{'bytes':>9}  {'FLOP/B':>7}  {'bound':>10}  {'share':>6}  regime"
+        ),
+    ]
+    for rank, layer in enumerate(ranked, 1):
+        lines.append(
+            f"    {rank:>2}  {clip(layer.name):<{width}}  {layer.kind:<11}  "
+            f"{_si(layer.flops, 'FLOP'):>11}  {_si(layer.total_bytes, 'B'):>9}  "
+            f"{layer.arithmetic_intensity:>7.2f}  {layer.lower_bound_seconds * 1e3:>7.3f} ms  "
+            f"{layer.time_share_ratio:>6.1%}  {layer.bottleneck}"
+        )
+    return lines
 
 
 def analyze_layers_gap(
