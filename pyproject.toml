@@ -82,6 +82,10 @@ fallback-version = "0.0.0"
 [tool.hatch.build.targets.wheel]
 packages = ["src/neural_cost"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# The agent skill ships with the package so its version matches the API.
+"skills/neural-cost/SKILL.md" = "neural_cost/agent_skill/SKILL.md"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

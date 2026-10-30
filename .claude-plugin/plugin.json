@@ -1,0 +1,11 @@
+{
+  "name": "neural-cost",
+  "description": "Roofline and gap analysis for PyTorch, JAX/Flax and TensorFlow workloads: why is it slow, memory- or compute-bound, CPU vs GPU, pipeline time split.",
+  "author": {
+    "name": "Neural Cost contributors"
+  },
+  "homepage": "https://github.com/davidgraymi/neural-cost",
+  "repository": "https://github.com/davidgraymi/neural-cost",
+  "license": "MIT",
+  "keywords": ["performance", "roofline", "profiling", "jax", "pytorch", "tensorflow"]
+}
