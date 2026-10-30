@@ -200,6 +200,84 @@ def _as_jaxpr(value: Any) -> Any:
     return getattr(value, "jaxpr", value)
 
 
+def _import_jax() -> Any:
+    try:
+        import jax
+    except ImportError as error:  # pragma: no cover - optional package
+        raise ImportError("Install neural-cost[jax] to use JaxAdapter") from error
+    return jax
+
+
+# (platform, device string, quick) -> HardwareCalibration, filled by calibrate().
+_CALIBRATION_CACHE: dict[tuple[Any, str, bool], Any] = {}
+
+
+def _measure_calibration(jax: Any, device: Any, quick: bool) -> Any:
+    """Run the dispatch, matmul and streaming microbenchmarks on ``device``."""
+    import jax.numpy as jnp
+
+    from ..attribution import HardwareCalibration
+
+    def on_device(value: Any) -> Any:
+        return jax.device_put(value, device)
+
+    def best_time(fn: Any, *args: Any, trials: int = 7) -> float:
+        fn(*args).block_until_ready()
+        best = float("inf")
+        for _ in range(trials):
+            start = perf_counter_ns()
+            fn(*args).block_until_ready()
+            best = min(best, (perf_counter_ns() - start) / 1e9)
+        return best
+
+    tiny = on_device(jnp.zeros(1))
+    add_one = jax.jit(lambda x: x + 1)
+    n_calls = 500
+    add_one(tiny).block_until_ready()
+    best_loop = float("inf")
+    for _ in range(3):
+        start = perf_counter_ns()
+        value = tiny
+        for _ in range(n_calls):
+            value = add_one(value)
+        value.block_until_ready()
+        best_loop = min(best_loop, (perf_counter_ns() - start) / 1e9)
+    dispatch = best_loop / n_calls
+    sync_latency = max(0.0, best_time(add_one, tiny, trials=20) - dispatch)
+
+    def kernel_time(seconds: float) -> float:
+        # Each probe is one jitted call: remove the per-call cost the model adds.
+        return max(seconds - dispatch - sync_latency, 0.01 * seconds)
+
+    matmul = jax.jit(jnp.matmul)
+    flops_curve = []
+    for n in (64, 256, 1024) if quick else (32, 64, 128, 256, 512, 1024, 2048, 4096):
+        a = on_device(jnp.ones((n, n)))
+        flops_curve.append((2.0 * n**3, 2.0 * n**3 / kernel_time(best_time(matmul, a, a))))
+
+    bump = jax.jit(lambda x: x + 1.0)
+    mib = 1024 * 1024
+    bandwidth_curve = []
+    for size in (
+        (mib // 16, 4 * mib, 64 * mib)
+        if quick
+        else (mib // 16, mib // 4, mib, 4 * mib, 16 * mib, 64 * mib, 256 * mib)
+    ):
+        x = on_device(jnp.ones(size // 4))
+        bandwidth_curve.append((2.0 * size, 2.0 * size / kernel_time(best_time(bump, x))))
+
+    platform = getattr(device, "platform", "unknown")
+    return HardwareCalibration(
+        achievable_flops=max(rate for _, rate in flops_curve),
+        achievable_bandwidth=bandwidth_curve[-1][1],
+        dispatch_seconds=dispatch,
+        call_overhead_seconds=sync_latency,
+        source=f"jax microbenchmarks ({platform}, jit)",
+        flops_curve=tuple(flops_curve),
+        bandwidth_curve=tuple(bandwidth_curve),
+    )
+
+
 class JaxAdapter(FrameworkAdapter):
     """Trace a JAX function and translate common primitives to operations.
 
@@ -493,93 +571,67 @@ class JaxAdapter(FrameworkAdapter):
         self.while_trip_counts.append((count, source))
         return count
 
-    def hardware(self, device: Any = None, **kwargs: Any):
-        """Detect a :class:`~neural_cost.HardwareSpec` for the JAX device in use.
+    def hardware(
+        self, device: Any = None, *, measure: str = "auto", quick: bool = False, **kwargs: Any
+    ):
+        """Return a ``(HardwareSpec, detection)`` pair for the JAX device in use.
 
         ``device`` defaults to ``jax.devices()[0]``, i.e. the platform selected
         by ``JAX_PLATFORMS``, so a CPU run on a machine with a GPU is scored
         against the CPU rather than the GPU.  Extra keyword arguments are
-        forwarded to :func:`neural_cost.detect_hardware`.  Returns the
-        ``(spec, detection)`` pair.
+        forwarded to :func:`neural_cost.detect_hardware`.
+
+        ``measure`` chooses where the peaks come from:
+
+        * ``"auto"`` (default): published-spec tables, falling back to
+          on-device measurement (:meth:`calibrate`, a short sweep with
+          ``quick=True``) for devices without a table entry such as TPUs or
+          unknown GPUs.
+        * ``"always"``: measured achievable peaks on the device.  The
+          detection is ``None``.
+        * ``"never"``: tables only; raise ``ValueError`` when none applies.
         """
-        try:
-            import jax
-        except ImportError as error:  # pragma: no cover - optional package
-            raise ImportError("Install neural-cost[jax] to use JaxAdapter") from error
-        from ..hardware_detect import detect_hardware
+        if measure not in {"auto", "always", "never"}:
+            raise ValueError("measure must be 'auto', 'always' or 'never'")
+        jax = _import_jax()
+        from ..hardware_detect import detect_hardware, normalize_device_type
 
-        return detect_hardware(device=device if device is not None else jax.devices()[0], **kwargs)
+        device = device if device is not None else jax.devices()[0]
+        if measure != "always":
+            try:
+                return detect_hardware(device=device, **kwargs)
+            except ValueError:
+                if measure == "never":
+                    raise
+        calibration = self.calibrate(device=device, quick=quick)
+        name = f"{getattr(device, 'device_kind', None) or device} (measured)"
+        return calibration.to_hardware_spec(name, normalize_device_type(device)), None
 
-    def calibrate(self, *, quick: bool = False):
+    def calibrate(self, *, quick: bool = False, device: Any = None, refresh: bool = False):
         """Measure size-dependent FLOP/s, bandwidth and per-call dispatch for jitted JAX.
 
+        Runs a matmul sweep (FLOP/s) and an ``x + 1`` streaming sweep
+        (bandwidth: one read plus one write per element) through JAX itself
+        on ``device`` (default: ``jax.devices()[0]``).  This works for any
+        backend, including ones with no published-spec table, and shows how
+        far the achievable peak sits below the datasheet figure.
+
         Returns a :class:`neural_cost.attribution.HardwareCalibration` with
-        matmul and elementwise throughput curves.  Under ``jax.jit`` a whole
-        model is one dispatch, so pass ``kernel_count=1`` to
-        :func:`neural_cost.attribute_gap` for jitted functions.
+        matmul and elementwise throughput curves.  Results are cached per
+        device and mode for the process; pass ``refresh=True`` to re-measure.
+        Turn the result into a spec with ``calibration.to_hardware_spec()``.
+        Under ``jax.jit`` a whole model is one dispatch, so pass
+        ``kernel_count=1`` to :func:`neural_cost.attribute_gap` for jitted
+        functions.
         """
-        try:
-            import jax
-            import jax.numpy as jnp
-        except ImportError as error:  # pragma: no cover - optional package
-            raise ImportError("Install neural-cost[jax] to use JaxAdapter") from error
-        from ..attribution import HardwareCalibration
-
-        def best_time(fn: Any, *args: Any, trials: int = 7) -> float:
-            fn(*args).block_until_ready()
-            best = float("inf")
-            for _ in range(trials):
-                start = perf_counter_ns()
-                fn(*args).block_until_ready()
-                best = min(best, (perf_counter_ns() - start) / 1e9)
-            return best
-
-        tiny = jnp.zeros(1)
-        add_one = jax.jit(lambda x: x + 1)
-        n_calls = 500
-        add_one(tiny).block_until_ready()
-        best_loop = float("inf")
-        for _ in range(3):
-            start = perf_counter_ns()
-            value = tiny
-            for _ in range(n_calls):
-                value = add_one(value)
-            value.block_until_ready()
-            best_loop = min(best_loop, (perf_counter_ns() - start) / 1e9)
-        dispatch = best_loop / n_calls
-        sync_latency = max(0.0, best_time(add_one, tiny, trials=20) - dispatch)
-
-        def kernel_time(seconds: float) -> float:
-            # Each probe is one jitted call: remove the per-call cost the model adds.
-            return max(seconds - dispatch - sync_latency, 0.01 * seconds)
-
-        matmul = jax.jit(jnp.matmul)
-        flops_curve = []
-        for n in (64, 256, 1024) if quick else (32, 64, 128, 256, 512, 1024, 2048):
-            a = jnp.ones((n, n))
-            flops_curve.append((2.0 * n**3, 2.0 * n**3 / kernel_time(best_time(matmul, a, a))))
-
-        bump = jax.jit(lambda x: x + 1.0)
-        mib = 1024 * 1024
-        bandwidth_curve = []
-        for size in (
-            (mib // 16, 4 * mib, 64 * mib)
-            if quick
-            else (mib // 16, mib // 4, mib, 4 * mib, 16 * mib, 64 * mib, 256 * mib)
-        ):
-            x = jnp.ones(size // 4)
-            bandwidth_curve.append((2.0 * size, 2.0 * size / kernel_time(best_time(bump, x))))
-
-        platform = jax.devices()[0].platform
-        return HardwareCalibration(
-            achievable_flops=max(rate for _, rate in flops_curve),
-            achievable_bandwidth=bandwidth_curve[-1][1],
-            dispatch_seconds=dispatch,
-            call_overhead_seconds=sync_latency,
-            source=f"jax microbenchmarks ({platform}, jit)",
-            flops_curve=tuple(flops_curve),
-            bandwidth_curve=tuple(bandwidth_curve),
-        )
+        jax = _import_jax()
+        device = device if device is not None else jax.devices()[0]
+        key = (getattr(device, "platform", None), str(device), quick)
+        if not refresh and key in _CALIBRATION_CACHE:
+            return _CALIBRATION_CACHE[key]
+        result = _measure_calibration(jax, device, quick)
+        _CALIBRATION_CACHE[key] = result
+        return result
 
     def benchmark(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
