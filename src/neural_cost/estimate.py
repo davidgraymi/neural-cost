@@ -171,6 +171,8 @@ def estimate_operation(operation: Operation) -> CostEstimate:
         flops = numel(operation.output)  # 1 FLOP/element as a nominal indexing cost
     elif kind == "attention":
         flops = sum(attention_flop_parts(operation))
+    elif kind in {"gather", "scatter"}:
+        flops, read_bytes, write_bytes = _indexed_traffic(operation)
     elif kind == "pooling":
         kernel_size = operation.attrs.get("kernel_size")
         if not isinstance(kernel_size, tuple) or len(kernel_size) != 2:
@@ -332,6 +334,44 @@ def estimate_operation(operation: Operation) -> CostEstimate:
     if repeat < 1:
         raise ValueError("attrs['repeat'] must be a positive integer")
     return CostEstimate(flops * repeat, read_bytes * repeat, write_bytes * repeat, repeat)
+
+
+def _indexed_traffic(operation: Operation) -> tuple[int, int, int]:
+    """Return ``(flops, read_bytes, write_bytes)`` for a gather or scatter.
+
+    Only the touched elements count as compulsory traffic, never the whole
+    operand: a gather of 3 rows from a 1M-row table reads 3 rows.
+
+    ``gather``: ``inputs = (operand, indices)``; reads the gathered slices
+    (the output size) plus the indices, writes the output.  ``dynamic_slice``
+    and ``slice`` are gathers with scalar or no indices.
+
+    ``scatter``: ``inputs = (operand, indices, updates)``; XLA updates the
+    operand buffer in place, so it reads the updates and indices and writes
+    one update-sized region.  With ``attrs['combine']`` (scatter-add/mul/min/
+    max) the touched operand region is also read and one FLOP per update
+    element is counted.  ``dynamic_update_slice`` is a scatter without combine.
+
+    ``attrs['index_bytes']`` is the total size of the index operands in bytes
+    (default: the ``indices`` shape at 4 bytes per element).
+    """
+    dtype = operation.dtype_bytes
+    inputs = operation.inputs
+    if operation.kind == "gather":
+        if not inputs:
+            raise ValueError("gather requires at least the operand shape")
+        default_index = numel(inputs[1]) * 4 if len(inputs) > 1 else 0
+        index_bytes = int(operation.attrs.get("index_bytes", default_index))
+        moved = numel(operation.output) * dtype
+        return 0, moved + index_bytes, moved
+    if len(inputs) < 3:
+        raise ValueError("scatter requires (operand, indices, updates) shapes")
+    index_bytes = int(operation.attrs.get("index_bytes", numel(inputs[1]) * 4))
+    updated = numel(inputs[2]) * dtype
+    combine = bool(operation.attrs.get("combine", False))
+    flops = numel(inputs[2]) if combine else 0
+    read = updated + index_bytes + (updated if combine else 0)
+    return flops, read, updated
 
 
 def estimate_operations(operations: Iterable[Operation]) -> CostEstimate:

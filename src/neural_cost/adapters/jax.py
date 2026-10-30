@@ -1,6 +1,7 @@
-"""JAX adapter for common jaxpr dot and elementwise primitives."""
+"""JAX adapter: dense, conv, elementwise, indexing and control-flow jaxpr primitives."""
 
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 from statistics import median
 from time import perf_counter_ns
 from typing import Any
@@ -46,6 +47,61 @@ _ELEMENTWISE_PRIMITIVES = frozenset(
         "min",
         "pow",
         "square",
+        # Comparisons, selection and integer/bit ops common in RL environments.
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "and",
+        "or",
+        "not",
+        "xor",
+        "select_n",
+        "clamp",
+        "sign",
+        "floor",
+        "ceil",
+        "round",
+        "rem",
+        "exp2",
+        "log1p",
+        "expm1",
+        "is_finite",
+        "atan2",
+        "shift_left",
+        "shift_right_logical",
+        "shift_right_arithmetic",
+        "population_count",
+        "reduce_min",
+        "reduce_prod",
+        "reduce_and",
+        "reduce_or",
+        "argmax",
+        "argmin",
+        "cumsum",
+        "cumprod",
+        "cummax",
+        "cummin",
+        "iota",
+    }
+)
+
+# Pure data movement: read the inputs, write the output, no arithmetic.
+_DATA_MOVEMENT_PRIMITIVES = frozenset({"concatenate", "pad", "rev"})
+
+# In-place indexed updates whose ``update_jaxpr`` combines old and new values.
+_COMBINING_SCATTERS = frozenset(
+    {
+        "scatter-add",
+        "scatter_add",
+        "scatter-mul",
+        "scatter_mul",
+        "scatter-min",
+        "scatter_min",
+        "scatter-max",
+        "scatter_max",
     }
 )
 
@@ -79,6 +135,59 @@ def _sub_jaxprs(equation: Any) -> list[tuple[Any, int]]:
     return found
 
 
+def _is_literal(var: Any) -> bool:
+    return type(var).__name__ == "Literal" and hasattr(var, "val")
+
+
+def _literal_int(var: Any) -> int | None:
+    if not _is_literal(var):
+        return None
+    try:
+        return int(var.val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _infer_while_trip_count(equation: Any) -> int | None:
+    """Infer the trip count of ``while i < N: i += step`` with literal ``i0``, ``N``, ``step``.
+
+    Matches the pattern ``lax.while_loop`` produces for counted loops: the
+    condition is a single ``lt`` of a carry against a literal bound, the
+    carry starts from a literal, and the body adds a literal step to it.
+    Returns ``None`` for anything else (data-dependent loops).
+    """
+    params = equation.params
+    cond = _as_jaxpr(params["cond_jaxpr"])
+    body = _as_jaxpr(params["body_jaxpr"])
+    cond_nconsts = int(params.get("cond_nconsts", 0))
+    body_nconsts = int(params.get("body_nconsts", 0))
+    if len(cond.eqns) != 1 or cond.eqns[0].primitive.name != "lt":
+        return None
+    counter, bound_var = cond.eqns[0].invars
+    bound = _literal_int(bound_var)
+    carry = list(cond.invars)[cond_nconsts:]
+    if bound is None or counter not in carry:
+        return None
+    position = carry.index(counter)
+    init = list(equation.invars)[cond_nconsts + body_nconsts :]
+    start = _literal_int(init[position]) if position < len(init) else None
+    if start is None:
+        return None
+    body_counter = list(body.invars)[body_nconsts + position]
+    body_out = list(body.outvars)[position]
+    for body_eqn in body.eqns:
+        if body_eqn.outvars and body_eqn.outvars[0] is body_out:
+            if body_eqn.primitive.name != "add" or len(body_eqn.invars) != 2:
+                return None
+            left, right = body_eqn.invars
+            other = right if left is body_counter else left if right is body_counter else None
+            step = _literal_int(other) if other is not None else None
+            if step is None or step <= 0:
+                return None
+            return max(0, math.ceil((bound - start) / step))
+    return None
+
+
 def _aval_bytes(var: Any) -> int:
     aval = getattr(var, "aval", None)
     if aval is None or not hasattr(aval, "shape"):
@@ -96,9 +205,17 @@ class JaxAdapter(FrameworkAdapter):
     The tracer recurses into higher-order primitives (``jit``/``pjit``,
     ``scan``, ``while``, ``cond``, ``custom_jvp_call``, ``remat``) so models
     built from ``lax.scan`` or nested ``jax.jit`` calls are fully counted.
-    ``scan`` bodies are multiplied by their trip count; ``while`` bodies are
-    counted once because the trip count is data dependent; for ``cond`` the
-    most expensive branch is used as a conservative estimate.
+    ``scan`` bodies are multiplied by their static length.  ``while`` bodies
+    use, in order of precedence: ``trip_counts[k]`` for the ``k``-th while
+    loop in trace order (0-based), a trip count inferred from a counted
+    ``i < N`` loop with literal bounds, ``default_trip_count``, or 1 with a
+    warning.  The resolved counts are recorded in :attr:`while_trip_counts`.
+    For ``cond`` the most expensive branch is used as a conservative estimate.
+
+    Indexing primitives are modeled by the elements they touch: ``gather``,
+    ``dynamic_slice`` and ``slice`` become ``gather`` operations; ``scatter``
+    (``-add``/``-mul``/``-min``/``-max``) and ``dynamic_update_slice`` become
+    in-place ``scatter`` operations.
 
     ``parameter_argnums`` selects which positional arguments hold weights.
     By default every argument after the first is treated as a parameter,
@@ -107,9 +224,22 @@ class JaxAdapter(FrameworkAdapter):
 
     name = "jax"
 
-    def __init__(self, parameter_argnums: Sequence[int] | None = None) -> None:
+    def __init__(
+        self,
+        parameter_argnums: Sequence[int] | None = None,
+        *,
+        trip_counts: Mapping[int, int] | None = None,
+        default_trip_count: int | None = None,
+    ) -> None:
         self.parameter_argnums = tuple(parameter_argnums) if parameter_argnums is not None else None
+        self.trip_counts = dict(trip_counts or {})
+        if any(count < 0 for count in self.trip_counts.values()):
+            raise ValueError("trip_counts must be non-negative")
+        if default_trip_count is not None and default_trip_count < 0:
+            raise ValueError("default_trip_count must be non-negative")
+        self.default_trip_count = default_trip_count
         self.warnings: list[str] = []
+        self.while_trip_counts: list[tuple[int, str]] = []
 
     def operations(self, model: Any, example_inputs: Sequence[Any]) -> Sequence[Operation]:
         try:
@@ -119,6 +249,7 @@ class JaxAdapter(FrameworkAdapter):
         closed = jax.make_jaxpr(model)(*example_inputs)
         jaxpr = closed.jaxpr
         self.warnings = []
+        self.while_trip_counts = []
 
         # Flattened invars follow the pytree leaves of each positional argument.
         leaf_counts = [len(jax.tree.leaves(arg)) for arg in example_inputs]
@@ -164,10 +295,9 @@ class JaxAdapter(FrameworkAdapter):
                 if primitive == "scan":
                     inner_repeat = repeat * int(equation.params.get("length", 1))
                 elif primitive == "while":
-                    self.warnings.append(
-                        f"while_loop at equation {index}: trip count is data dependent; "
-                        "body counted once"
-                    )
+                    inner_repeat = repeat * self._while_trip_count(equation, index)
+                    if inner_repeat == 0:
+                        continue
                 branch_results: list[list[Operation]] = []
                 for sub, offset in subs:
                     inner = _as_jaxpr(sub)
@@ -186,9 +316,11 @@ class JaxAdapter(FrameworkAdapter):
                 if primitive == "cond" and branch_results:
                     from ..estimate import estimate_operations
 
-                    operations.extend(
-                        max(branch_results, key=lambda ops: estimate_operations(ops).flops)
-                    )
+                    def cost(ops: list[Operation]) -> tuple[int, int]:
+                        total = estimate_operations(ops)
+                        return total.flops, total.total_bytes
+
+                    operations.extend(max(branch_results, key=cost))
                 else:
                     for collected in branch_results:
                         operations.extend(collected)
@@ -248,6 +380,59 @@ class JaxAdapter(FrameworkAdapter):
                 operations.append(
                     Operation(f"conv_{index}", "conv2d", (lhs, rhs), out, dtype_bytes, attrs)
                 )
+            elif primitive in {"gather", "dynamic_slice", "slice"}:
+                operand = input_shapes[0] if input_shapes else output_shape
+                indices = input_shapes[1] if primitive == "gather" and len(input_shapes) > 1 else ()
+                attrs = dict(base_attrs)
+                attrs["index_bytes"] = sum(_aval_bytes(var) for var in equation.invars[1:])
+                operations.append(
+                    Operation(
+                        f"{primitive}_{index}",
+                        "gather",
+                        (operand, indices or (1,)),
+                        output_shape,
+                        dtype_bytes,
+                        attrs,
+                    )
+                )
+            elif primitive == "dynamic_update_slice" or primitive.startswith("scatter"):
+                if primitive == "dynamic_update_slice":
+                    if len(input_shapes) < 2:
+                        continue
+                    operand, updates = input_shapes[0], input_shapes[1] or (1,)
+                    index_vars = equation.invars[2:]
+                else:
+                    if len(input_shapes) < 3:
+                        continue
+                    operand, updates = input_shapes[0], input_shapes[2] or (1,)
+                    index_vars = equation.invars[1:2]
+                attrs = dict(base_attrs)
+                attrs["index_bytes"] = sum(_aval_bytes(var) for var in index_vars)
+                if primitive in _COMBINING_SCATTERS:
+                    attrs["combine"] = 1
+                operations.append(
+                    Operation(
+                        f"{primitive}_{index}",
+                        "scatter",
+                        (operand, (1,), updates),
+                        output_shape,
+                        dtype_bytes,
+                        attrs,
+                    )
+                )
+            elif primitive in _DATA_MOVEMENT_PRIMITIVES:
+                attrs = dict(base_attrs)
+                attrs["flops_per_element"] = 0
+                operations.append(
+                    Operation(
+                        f"{primitive}_{index}",
+                        "elementwise",
+                        input_shapes,
+                        output_shape,
+                        dtype_bytes,
+                        attrs,
+                    )
+                )
             elif primitive in _ELEMENTWISE_PRIMITIVES:
                 attrs = dict(base_attrs)
                 for var in equation.invars:  # e.g. a bias add or norm scale
@@ -265,6 +450,23 @@ class JaxAdapter(FrameworkAdapter):
                         attrs,
                     )
                 )
+
+    def _while_trip_count(self, equation: Any, index: int) -> int:
+        ordinal = len(self.while_trip_counts)
+        if ordinal in self.trip_counts:
+            count, source = int(self.trip_counts[ordinal]), "user"
+        elif (inferred := _infer_while_trip_count(equation)) is not None:
+            count, source = inferred, "inferred"
+        elif self.default_trip_count is not None:
+            count, source = int(self.default_trip_count), "default"
+        else:
+            count, source = 1, "assumed"
+            self.warnings.append(
+                f"while_loop #{ordinal} at equation {index}: trip count is data dependent; "
+                f"body counted once (pass trip_counts={{{ordinal}: n}} or default_trip_count)"
+            )
+        self.while_trip_counts.append((count, source))
+        return count
 
     def hardware(self, device: Any = None, **kwargs: Any):
         """Detect a :class:`~neural_cost.HardwareSpec` for the JAX device in use.

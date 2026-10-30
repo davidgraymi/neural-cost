@@ -48,12 +48,14 @@ def test_batched_dot_general_flops():
 def test_cond_takes_most_expensive_branch_and_while_warns():
     def model(x, w):
         y = lax.cond(x.sum() > 0, lambda v: v @ w @ w, lambda v: v, x)
-        return lax.while_loop(lambda c: c[1] < 3, lambda c: (c[0] @ w, c[1] + 1), (y, 0))[0]
+        # Data-dependent trip count: the body is counted once, with a warning.
+        return lax.while_loop(lambda c: c[0].sum() < 1e6, lambda c: (c[0] @ w,), (y,))[0]
 
     adapter = JaxAdapter()
     ops = adapter.operations(model, (jnp.ones((2, 4)), jnp.ones((4, 4))))
     assert flop_breakdown(ops).dense_flops == 3 * (2 * 2 * 4 * 4)  # 2 in cond + 1 while body
-    assert any("while_loop" in warning for warning in adapter.warnings)
+    assert any("while_loop #0" in warning for warning in adapter.warnings)
+    assert adapter.while_trip_counts == [(1, "assumed")]
 
 
 def test_parameter_argnums_selects_weights():
