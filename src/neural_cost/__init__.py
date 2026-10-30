@@ -99,6 +99,7 @@ from .hub import (
 from .memory import MemoryEstimate, estimate_memory
 from .model import ModelProfile, profile_model
 from .operations import Operation
+from .pipeline import Pipeline, PipelineReport, Stage, StageResult
 from .plot import (
     RooflinePoint,
     generate_roofline_svg,
@@ -169,6 +170,8 @@ __all__ = [
     "PagedAttentionCostEstimate",
     "PagedAttentionGapAnalysis",
     "ParallelismCostEstimate",
+    "Pipeline",
+    "PipelineReport",
     "PrecisionFormat",
     "QuantizationGapAnalysis",
     "QuantizationSpec",
@@ -177,6 +180,8 @@ __all__ = [
     "SSMGapAnalysis",
     "SpeculativeCostEstimate",
     "SpeculativeDecodingAnalysis",
+    "Stage",
+    "StageResult",
     "ValidationCase",
     "ValidationReport",
     "Workload",
