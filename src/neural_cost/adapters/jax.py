@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from statistics import median
 from time import perf_counter_ns
 from typing import Any
@@ -89,6 +90,19 @@ _ELEMENTWISE_PRIMITIVES = frozenset(
     }
 )
 
+_REDUCTION_PRIMITIVES = frozenset(
+    {
+        "reduce_sum",
+        "reduce_max",
+        "reduce_min",
+        "reduce_prod",
+        "reduce_and",
+        "reduce_or",
+        "argmax",
+        "argmin",
+    }
+)
+
 # Pure data movement: read the inputs, write the output, no arithmetic.
 _DATA_MOVEMENT_PRIMITIVES = frozenset({"concatenate", "pad", "rev"})
 
@@ -134,6 +148,11 @@ def _sub_jaxprs(equation: Any) -> list[tuple[Any, int]]:
             found.append((params[key], 0))
             break
     return found
+
+
+def _join_scope(prefix: str, name: str) -> str:
+    """Join name-scope paths, skipping empty parts (``jax.named_scope``, Flax module names)."""
+    return "/".join(part for part in (prefix, name) if part)
 
 
 def _is_literal(var: Any) -> bool:
@@ -369,11 +388,13 @@ class JaxAdapter(FrameworkAdapter):
         repeat: int,
         operations: list[Operation],
         counter: list[int],
+        scope: str = "",
     ) -> None:
         for equation in jaxpr.eqns:
             counter[0] += 1
             index = counter[0]
             primitive = equation.primitive.name
+            eqn_scope = _join_scope(scope, str(getattr(equation.source_info, "name_stack", "")))
             subs = _sub_jaxprs(equation)
             if subs:
                 inner_repeat = repeat
@@ -396,7 +417,10 @@ class JaxAdapter(FrameworkAdapter):
                         key = id(consts[position]) if position < len(consts) else id(const)
                         inner_params[id(const)] = (key, _aval_bytes(const))
                     collected: list[Operation] = []
-                    self._walk(inner, inner_params, inner_repeat, collected, counter)
+                    inner_scope = eqn_scope
+                    if primitive in {"pjit", "jit", "closed_call", "core_call"}:
+                        inner_scope = _join_scope(eqn_scope, str(equation.params.get("name", "")))
+                    self._walk(inner, inner_params, inner_repeat, collected, counter, inner_scope)
                     branch_results.append(collected)
                 if primitive == "cond" and branch_results:
                     from ..estimate import estimate_operations
@@ -416,6 +440,10 @@ class JaxAdapter(FrameworkAdapter):
                 self._free += 1
             elif len(operations) > before:
                 self._modeled += 1
+                if eqn_scope:
+                    operations[before:] = [
+                        replace(op, name=f"{eqn_scope}/{op.name}") for op in operations[before:]
+                    ]
             else:
                 self._unmodeled.append(primitive)
                 self._unmodeled_bytes += repeat * sum(_aval_bytes(v) for v in equation.outvars)
@@ -537,6 +565,9 @@ class JaxAdapter(FrameworkAdapter):
             )
         elif primitive in _ELEMENTWISE_PRIMITIVES:
             attrs = dict(base_attrs)
+            if primitive in _REDUCTION_PRIMITIVES and input_shapes:
+                # A reduction does one operation per *input* element.
+                attrs["flops_per_element"] = numel(input_shapes[0]) / numel(output_shape)
             for var in equation.invars:  # e.g. a bias add or norm scale
                 entry = param_vars.get(id(var))
                 if entry is not None:
