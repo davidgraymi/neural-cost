@@ -547,6 +547,35 @@ peak uses a NEON P/E-core table and the CPU shares the chip's unified memory
 bandwidth with the GPU.  The CLI accepts the same option:
 `neural-cost hardware --device cpu`.
 
+Apple variants are told apart by GPU core count (from `system_profiler`): the
+FP32 peak scales with cores, and binned chips get their narrower memory bus
+(M3 Max 30-core 300 GB/s vs 40-core 400 GB/s; M4 Max 32-core 410 GB/s vs
+40-core 546 GB/s).
+
+### Measuring the peak on the active device
+
+Spec sheets do not cover every backend (jax-mps, jax-metal, TPU, future
+plugins), and the achievable peak can sit well below the datasheet. JAX can
+measure both peaks on the device itself with a matmul sweep for FLOP/s and a
+streaming `x + 1` sweep for bandwidth. Results are cached per device for the
+process:
+
+```python
+adapter = JaxAdapter()
+calibration = adapter.calibrate(device=jax.devices()[0])     # HardwareCalibration
+spec = calibration.to_hardware_spec(device_type="gpu")       # score against achievable peaks
+calibration.fraction_of(adapter.hardware()[0])               # e.g. (0.81, 0.84) of spec sheet
+
+spec, _ = adapter.hardware()                  # tables, measured fallback if no table entry
+spec, _ = adapter.hardware(measure="always")  # always measure on the device
+```
+
+```bash
+neural-cost hardware --calibrate jax --quick
+#   Achievable Compute: 0.440 TFLOP/s (81% of spec)
+#   Achievable BW:      57.60 GB/s (84% of spec)
+```
+
 ## Framework adapters
 
 ```python

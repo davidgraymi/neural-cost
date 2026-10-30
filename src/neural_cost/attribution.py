@@ -148,6 +148,29 @@ class HardwareCalibration:
             exposed += max(0, kernel_count - captured) * self.dispatch_seconds
         return execution, exposed
 
+    def to_hardware_spec(
+        self, name: str | None = None, device_type: str | None = None
+    ) -> HardwareSpec:
+        """A :class:`HardwareSpec` whose peaks are the measured achievable rates.
+
+        Use it for devices with no published-spec table (TPU, jax-mps,
+        future plugins) or to score a workload against what the device can
+        actually reach rather than its datasheet.
+        """
+        return HardwareSpec(
+            name or f"measured ({self.source})",
+            self.achievable_flops,
+            self.achievable_bandwidth,
+            device_type=device_type,
+        )
+
+    def fraction_of(self, spec: HardwareSpec) -> tuple[float, float]:
+        """``(flops, bandwidth)`` achievable rates as fractions of ``spec``'s peaks."""
+        return (
+            self.achievable_flops / spec.peak_flops,
+            self.achievable_bandwidth / spec.memory_bandwidth,
+        )
+
 
 def _interpolate(curve: tuple[tuple[float, float], ...], size: float, default: float) -> float:
     """Log-log interpolation of ``rate(size)``; clamps outside the measured range."""

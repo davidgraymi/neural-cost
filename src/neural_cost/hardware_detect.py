@@ -48,10 +48,39 @@ _APPLE_CHIP_TABLE: dict[str, tuple[float, float, tuple[CacheSpec, ...]]] = {
     "M2 Ultra": (27.2, 800.0, (CacheSpec("SLC", 1800e9, 96 * 1024 * 1024),)),
     "M3": (3.6, 100.0, (CacheSpec("SLC", 250e9, 8 * 1024 * 1024),)),
     "M3 Pro": (7.4, 150.0, (CacheSpec("SLC", 400e9, 24 * 1024 * 1024),)),
-    "M3 Max": (14.2, 300.0, (CacheSpec("SLC", 800e9, 48 * 1024 * 1024),)),
+    "M3 Max": (14.2, 400.0, (CacheSpec("SLC", 800e9, 48 * 1024 * 1024),)),
+    "M3 Ultra": (28.4, 819.0, (CacheSpec("SLC", 1600e9, 96 * 1024 * 1024),)),
     "M4": (4.6, 120.0, (CacheSpec("SLC", 300e9, 8 * 1024 * 1024),)),
     "M4 Pro": (9.2, 273.0, (CacheSpec("SLC", 600e9, 24 * 1024 * 1024),)),
     "M4 Max": (18.4, 546.0, (CacheSpec("SLC", 1200e9, 48 * 1024 * 1024),)),
+}
+
+# GPU core count each table row describes (the full, unbinned configuration).
+# When system_profiler reports a different core count, the FP32 peak is scaled
+# linearly: every Apple GPU core has 128 FP32 ALUs at the generation's clock.
+_APPLE_GPU_CORES: dict[str, int] = {
+    "M1": 8,
+    "M1 Pro": 16,
+    "M1 Max": 32,
+    "M1 Ultra": 64,
+    "M2": 10,
+    "M2 Pro": 19,
+    "M2 Max": 38,
+    "M2 Ultra": 76,
+    "M3": 10,
+    "M3 Pro": 18,
+    "M3 Max": 40,
+    "M3 Ultra": 80,
+    "M4": 10,
+    "M4 Pro": 20,
+    "M4 Max": 40,
+}
+
+# Binned variants whose memory bus is narrower than the full chip
+# (GB/s by GPU core count).  Other variants share one bandwidth.
+_APPLE_BINNED_BANDWIDTH: dict[str, dict[int, float]] = {
+    "M3 Max": {30: 300.0, 40: 400.0},
+    "M4 Max": {32: 410.0, 40: 546.0},
 }
 
 # ---------------------------------------------------------------------------
@@ -185,7 +214,7 @@ def _probe_apple_silicon() -> tuple[str | None, float | None, float | None, tupl
         return None, None, None, ()
     try:
         out = subprocess.check_output(
-            ["system_profiler", "SPHardwareDataType"],
+            ["system_profiler", "SPHardwareDataType", "SPDisplaysDataType"],
             text=True,
             timeout=10,
         )
@@ -209,6 +238,18 @@ def _probe_apple_silicon() -> tuple[str | None, float | None, float | None, tupl
         return chip_raw, None, None, ()
 
     tflops, bw, caches = _APPLE_CHIP_TABLE[matched_key]
+    cores_match = re.search(r"Total Number of Cores:\s+(\d+)", out)
+    if cores_match:
+        gpu_cores = int(cores_match.group(1))
+        reference = _APPLE_GPU_CORES.get(matched_key)
+        if reference and gpu_cores != reference:
+            tflops *= gpu_cores / reference
+        binned = _APPLE_BINNED_BANDWIDTH.get(matched_key, {})
+        if binned:
+            # Nearest listed configuration at or below the reported core count.
+            fitting = [cores for cores in binned if cores <= gpu_cores]
+            bw = binned[max(fitting) if fitting else min(binned)]
+        chip_raw = f"{chip_raw} ({gpu_cores}-core GPU)"
     return chip_raw, tflops * 1e12, bw * 1e9, caches
 
 
@@ -500,7 +541,7 @@ def detect_hardware(
     if measured_bw is not None:
         source += " + NumPy STREAM triad"
 
-    cpu_name = f"{chip_name} (CPU)" if chip_name else "CPU"
+    cpu_name = f"{chip_name.split(' (')[0]} (CPU)" if chip_name else "CPU"
     return (
         HardwareSpec(cpu_name, peak_flops, memory_bandwidth, device_type="cpu"),
         DetectionResult(
