@@ -44,6 +44,7 @@ from .attribution import (
     HardwareCalibration,
     attribute_gap,
 )
+from .backends import BackendComparison, BackendResult, compare_backends
 from .canonical import (
     ConsistencyReport,
     FlopBreakdown,
@@ -135,6 +136,8 @@ __all__ = [
     "QUANTIZATION_PRESETS",
     "ActivationCheckpointingEstimate",
     "ActivationCheckpointingGapAnalysis",
+    "BackendComparison",
+    "BackendResult",
     "CacheSpec",
     "CheckpointingStrategy",
     "ClusterTopology",
@@ -203,6 +206,7 @@ __all__ = [
     "attribute_gap",
     "available_adapters",
     "benchmark",
+    "compare_backends",
     "cross_check",
     "detect_hardware",
     "device_mismatch",

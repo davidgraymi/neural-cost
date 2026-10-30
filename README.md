@@ -1110,6 +1110,33 @@ neural-cost compare
 neural-cost-compare --warmup 10 --repeats 30
 ```
 
+#### Comparing one JAX function across platforms
+
+JAX uses one platform per process (`JAX_PLATFORMS`). Point `compare` at a
+zero-argument factory that returns `(function, args)` and list the platforms.
+Each platform runs in its own subprocess with its own hardware spec:
+
+```python
+# bench.py
+def build():
+    import jax, jax.numpy as jnp
+    net = jax.jit(lambda x, w: jnp.tanh(x @ w))
+    return net, (jnp.ones((128, 512)), jnp.ones((512, 512)))
+```
+
+```bash
+neural-cost compare bench.py:build --platforms cpu,mps
+# Backend comparison (speedup vs cpu)
+#   platform  device  median    speedup  hardware spec                                  roofline               coverage
+#   cpu       cpu:0   0.251 ms  1.00x    Apple M3 (CPU) (0.84 TFLOP/s, 100 GB/s)        49.4% (compute-bound)  100%
+#   mps       mps:0   ...
+```
+
+From Python: `compare_backends("bench.py:build", ["cpu", "mps"]).render()`.
+A platform that fails (plugin missing, timeout) is listed with its error, and
+the other platforms still run. `--baseline` picks the speedup reference and
+`--json` emits machine-readable results.
+
 ### 7. Distributed Cluster & 3D Parallelism (`distributed`)
 
 Model cluster scaling efficiency, network communication volume, and MFU for frontier models:

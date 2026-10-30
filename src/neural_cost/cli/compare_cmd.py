@@ -252,14 +252,43 @@ def register_compare_parser(
 ) -> None:
     parser = subparsers.add_parser(
         "compare",
-        help="Compare PyTorch, JAX, and TensorFlow performance against roofline bounds.",
-        description="Execute head-to-head empirical benchmarks across available deep learning frameworks.",
+        help=(
+            "Compare PyTorch, JAX, and TensorFlow against roofline bounds, or one JAX "
+            "function across platforms (--platforms)."
+        ),
+        description=(
+            "Without arguments, run head-to-head benchmarks across installed frameworks. "
+            "With 'TARGET --platforms cpu,mps', run one JAX function on each platform in its "
+            "own subprocess and print one table with speedups and per-platform hardware specs."
+        ),
     )
     _add_compare_arguments(parser)
     parser.set_defaults(func=run_compare)
 
 
 def _add_compare_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help=(
+            "With --platforms: script.py:name (or module:name) of a zero-argument factory "
+            "returning (function, args) to run on each JAX platform."
+        ),
+    )
+    parser.add_argument(
+        "--platforms",
+        default=None,
+        help=(
+            "Comma-separated JAX_PLATFORMS values to compare, e.g. 'cpu,mps' or 'cpu,cuda'. "
+            "Each platform runs in its own subprocess."
+        ),
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help="Platform that speedups are relative to (default: the first platform).",
+    )
     parser.add_argument(
         "--peak-flops", type=float, default=None, help="Override peak FP32 FLOP/s (e.g. 3.6e12)"
     )
@@ -286,7 +315,33 @@ def _add_compare_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def run_backend_compare(args: argparse.Namespace) -> int:
+    from neural_cost.backends import compare_backends
+
+    if not args.target:
+        sys.stderr.write("--platforms needs a target: script.py:name\n")
+        return 2
+    platforms = [platform for platform in args.platforms.split(",") if platform.strip()]
+    comparison = compare_backends(
+        args.target,
+        platforms,
+        baseline=args.baseline,
+        warmup=args.warmup,
+        repeats=args.repeats,
+    )
+    if args.json:
+        print(json.dumps(comparison.to_dict(), indent=2))
+    else:
+        print(comparison.render())
+    return 0 if any(result.ok for result in comparison.results) else 1
+
+
 def run_compare(args: argparse.Namespace) -> int:
+    if getattr(args, "platforms", None):
+        return run_backend_compare(args)
+    if getattr(args, "target", None):
+        sys.stderr.write("a target requires --platforms (e.g. --platforms cpu,mps)\n")
+        return 2
     if not args.json:
         print("Detecting hardware and measuring memory bandwidth…", flush=True)
     hardware, detection = detect_hardware(bandwidth_benchmark_mb=args.bw_bench_mb)
