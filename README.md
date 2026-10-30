@@ -37,8 +37,8 @@ Framework adapters are optional extras, keeping `neural-cost` lightweight with z
 |---|---|---|
 | **PyTorch** | `pip install "neural-cost[torch]"` | PyTorch eager execution & FX graph tracer adapter |
 | **JAX** | `pip install "neural-cost[jax]"` | JAX primitives and jaxpr tracing |
-| **JAX on Apple Silicon (Metal)** | `pip install "neural-cost[jax-metal]"` | Official Apple Metal plugin for JAX GPU acceleration |
-| **JAX on Apple Silicon (MPS)** | `pip install "neural-cost[jax-mps]"` | Community MLX backend for Apple Silicon MPS |
+| **JAX on Apple Silicon (Metal)** | `pip install "neural-cost[jax-metal]"` | Apple's official Metal PJRT plugin (`JAX_PLATFORMS=METAL`) |
+| **JAX on Apple Silicon (MPS)** | `pip install "neural-cost[jax-mps]"` | Community PJRT plugin that runs JAX on the Apple GPU through MLX (`JAX_PLATFORMS=mps`); pins jax/jaxlib 0.11.x, Python ≥ 3.12 |
 | **TensorFlow** | `pip install "neural-cost[tensorflow]"` | TensorFlow / Keras layer adapter |
 | **All Frameworks** | `pip install "neural-cost[torch,jax,tensorflow]"` | All supported deep learning framework adapters |
 | **Development** | `pip install "neural-cost[dev]"` | Test suite (`pytest`) & code style tools (`ruff`) |
@@ -776,11 +776,48 @@ pip install "neural-cost[jax-metal]"
 # or directly:
 pip install jax-metal
 
-# Community MLX backend via package extra (set JAX_PLATFORMS=mps):
+# Community jax-mps plugin via package extra (set JAX_PLATFORMS=mps):
 pip install "neural-cost[jax-mps]"
 # or directly:
 pip install jax-mps && JAX_PLATFORMS=mps python benchmarks/collect_gpu_data.py
 ```
+
+**What the plugins are.** `jax-metal` is Apple's Metal PJRT plugin.
+[`jax-mps`](https://github.com/tillahoffmann/jax-mps) is a community PJRT plugin.
+It maps the StableHLO that JAX emits onto MLX operations, which run on the
+Apple GPU. Both are experimental. jax-mps has no float64 and no sub-byte or fp8
+dtypes, and it is single-device.
+
+**Version pins.** jax-mps is compiled against one jaxlib minor version's
+StableHLO bytecode. jax-mps 0.11.x requires `jax>=0.11,<0.12`,
+`jaxlib>=0.11,<0.12` and Python ≥ 3.12. With a mismatched jaxlib, JIT
+compilation fails with deserialization errors. The `neural-cost[jax-mps]`
+extra carries the same pin (`jax>=0.11,<0.12`), so installing it with
+`neural-cost[jax]` resolves to a compatible jax. The plain `jax` extra only
+requires `jax>=0.4`. If you upgrade jax yourself, upgrade jax-mps to the
+matching minor release. On Python 3.11 the jax-mps extra installs nothing.
+
+**Selecting a backend.** JAX uses one platform per process, chosen by
+`JAX_PLATFORMS` before `import jax`. Use `cpu`, `mps` (jax-mps) or `METAL`
+(jax-metal). Check with `jax.devices()[0].platform`. Score each run against
+its own device with `JaxAdapter().hardware()`, and compare platforms with
+`neural-cost compare bench.py:build --platforms cpu,mps`.
+
+**Worked example.** [`examples/jax_flax_apple_silicon.py`](examples/jax_flax_apple_silicon.py)
+profiles an AlphaZero-style Flax ResNet with GroupNorm (batch 128, 8×8×119)
+end to end. It shows the exact `JaxAdapter` call for a jitted Flax `apply`
+(weights as argument 0 with `parameter_argnums=(0,)`), device-aware specs,
+coverage, and the per-module breakdown:
+
+```bash
+pip install "neural-cost[jax]" flax
+JAX_PLATFORMS=cpu python examples/jax_flax_apple_silicon.py
+python examples/jax_flax_apple_silicon.py --compare cpu,mps
+```
+
+For a closure such as `jax.jit(lambda x: model.apply(variables, x))`, use
+`JaxAdapter().operations(fn, (obs,))`. Closed-over arrays are treated as
+parameters automatically.
 
 The benchmark now detects whether a plugin is installed and emits a clear diagnostic
 when JAX is running on CPU instead of the GPU.

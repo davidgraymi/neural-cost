@@ -687,12 +687,14 @@ class JaxAdapter(FrameworkAdapter):
             start = perf_counter_ns()
             wait(function(*args, **kwargs))
             samples.append((perf_counter_ns() - start) / 1_000_000_000)
-        device = str(args[0].device) if args and hasattr(args[0], "device") else None
+        # The first array leaf in the arguments (e.g. inside a Flax variables dict).
+        first = next((leaf for leaf in jax.tree.leaves(args) if hasattr(leaf, "device")), None)
+        device = str(first.device) if first is not None else None
         peak = None
         allocated = None
         reserved = None
-        if args and hasattr(args[0], "device"):
-            dev = args[0].device
+        if first is not None:
+            dev = first.device
             if hasattr(dev, "memory_stats") and callable(dev.memory_stats):
                 try:
                     stats = dev.memory_stats()

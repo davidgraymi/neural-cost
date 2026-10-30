@@ -95,3 +95,14 @@ def test_jax_adapter_hardware_uses_active_device():
 
     spec, _ = JaxAdapter().hardware(benchmark_memory=False)
     assert spec.device_type == normalize_device_type(jax.devices()[0])
+
+
+def test_jax_benchmark_records_device_from_nested_arguments():
+    jax = pytest.importorskip("jax")
+    from neural_cost.adapters import JaxAdapter
+
+    variables = {"params": {"w": jax.numpy.ones((4, 4))}}
+    measurement = JaxAdapter().benchmark(
+        lambda v, x: x @ v["params"]["w"], variables, jax.numpy.ones((2, 4)), warmup=0, repeats=1
+    )
+    assert normalize_device_type(measurement.device) == normalize_device_type(jax.devices()[0])

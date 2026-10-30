@@ -47,10 +47,18 @@ dependencies = []
 torch = ["torch>=2.0"]
 jax = ["jax>=0.4"]
 # Apple Silicon JAX GPU plugins — install one of these to run JAX on MPS/Metal.
-# jax-metal is the official Apple plugin; jax-mps is a community MLX-based backend.
-# Without one of these, JAX silently falls back to CPU on Apple Silicon.
+# jax-metal is Apple's official Metal PJRT plugin (JAX_PLATFORMS=METAL).
+# jax-mps is a community PJRT plugin that executes StableHLO through MLX on the
+# Apple GPU (JAX_PLATFORMS=mps). It is built against one jaxlib minor version
+# (jax-mps 0.11.x requires jax/jaxlib >=0.11,<0.12 and Python >=3.12), so the
+# extra pins jax to match instead of letting pip pick an incompatible jax.
+# Without a plugin, JAX silently falls back to CPU on Apple Silicon.
 jax-metal = ["jax>=0.4", "jax-metal"]
-jax-mps = ["jax>=0.4", "jax-mps"]
+jax-mps = [
+  "jax>=0.11,<0.12; python_version >= '3.12'",
+  "jaxlib>=0.11,<0.12; python_version >= '3.12'",
+  "jax-mps>=0.11,<0.12; python_version >= '3.12'",
+]
 tensorflow = ["tensorflow>=2.12"]
 dev = ["pytest>=7.4", "ruff>=0.4"]
 
