@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adapters.base import FrameworkAdapter
+from .coverage import Coverage
 from .estimate import (
     CostEstimate,
     FusedCostEstimate,
@@ -23,6 +24,7 @@ class ModelProfile:
     memory: MemoryEstimate
     fused_cost: FusedCostEstimate | None = None
     operations: tuple[Operation, ...] = ()
+    coverage: Coverage | None = None
 
 
 def profile_model(
@@ -44,4 +46,5 @@ def profile_model(
         ),
         fused_cost=estimate_fused_operations(operations),
         operations=operations,
+        coverage=getattr(adapter, "coverage", None),
     )

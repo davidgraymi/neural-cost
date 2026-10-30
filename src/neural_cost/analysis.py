@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from .coverage import DEFAULT_COVERAGE_THRESHOLD, Coverage
 from .estimate import (
     ContinuousBatchIterationEstimate,
     CostEstimate,
@@ -55,17 +56,22 @@ class GapAnalysis:
     fused_lower_bound_seconds: float | None = None
     fused_efficiency: float | None = None
     layer_analyses: tuple[LayerGapAnalysis, ...] = ()
+    coverage: Coverage | None = None
+    coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD
 
     def render(self) -> str:
         """Return a compact, terminal-friendly performance-gap report."""
-        lines = [
-            "Neural cost gap analysis",
-            (
-                f"  bound: {self.lower_bound_seconds * 1e3:.3f} ms "
-                f"(compute {self.compute_bound_seconds * 1e3:.3f} ms, "
-                f"memory {self.bandwidth_bound_seconds * 1e3:.3f} ms)"
-            ),
-        ]
+        lines = ["Neural cost gap analysis"]
+        if self.coverage is not None:
+            lines.append(f"  {self.coverage.summary()}")
+            warning = self.coverage.warning(self.coverage_threshold)
+            if warning is not None:
+                lines.append(f"  WARNING: {warning}")
+        lines.append(
+            f"  bound: {self.lower_bound_seconds * 1e3:.3f} ms "
+            f"(compute {self.compute_bound_seconds * 1e3:.3f} ms, "
+            f"memory {self.bandwidth_bound_seconds * 1e3:.3f} ms)"
+        )
         if self.fused_lower_bound_seconds is not None:
             lines.append(
                 f"  fused bound: {self.fused_lower_bound_seconds * 1e3:.3f} ms"
@@ -106,7 +112,11 @@ class GapAnalysis:
                     f"    {idx}. {layer.name} ({layer.kind}): {layer.lower_bound_seconds * 1e3:.3f} ms "
                     f"({layer.time_share_ratio:.1%} share, {layer.bottleneck}-bound, AI: {layer.arithmetic_intensity:.1f} FLOP/B)"
                 )
-        lines.extend(f"  next: {finding}" for finding in self.findings)
+        lines.extend(
+            f"  next: {finding}"
+            for finding in self.findings
+            if not finding.startswith("Low coverage")  # already shown as a WARNING
+        )
         return "\n".join(lines)
 
 
@@ -199,12 +209,18 @@ def analyze_gap(
     measurement: Measurement,
     hardware: HardwareSpec,
     operations: Iterable[Operation] | None = None,
+    coverage: Coverage | None = None,
+    coverage_threshold: float = DEFAULT_COVERAGE_THRESHOLD,
 ) -> GapAnalysis:
     """Analyze observed runtime against a roofline lower bound.
 
     Findings are hypotheses to investigate, not assertions about kernel-level
     behavior.  The compulsory-traffic model makes the achieved bandwidth an
     effective value, especially where intermediates are materialized.
+
+    Pass the adapter's ``coverage`` (set by ``adapter.operations(...)``) so
+    the report states how much of the traced function the bound describes;
+    below ``coverage_threshold`` a warning is added.
     """
     compute = estimate.flops / hardware.peak_flops
     bandwidth = estimate.total_bytes / hardware.memory_bandwidth
@@ -217,6 +233,8 @@ def analyze_gap(
     mismatch = device_mismatch(measurement, hardware)
     if mismatch is not None:
         findings.append(mismatch)
+    if coverage is not None and (warning := coverage.warning(coverage_threshold)) is not None:
+        findings.append(warning)
 
     layer_analyses = ()
     if operations is not None:
@@ -307,6 +325,8 @@ def analyze_gap(
         fused_lower_bound_seconds=fused_lower_bound_seconds,
         fused_efficiency=fused_efficiency,
         layer_analyses=layer_analyses,
+        coverage=coverage,
+        coverage_threshold=coverage_threshold,
     )
 
 
@@ -353,7 +373,13 @@ def analyze_model_gap(
     """Analyze compute roofline efficiency and memory allocation in one call."""
     cost_to_analyze = profile.fused_cost if profile.fused_cost is not None else profile.cost
     return ModelGapAnalysis(
-        analyze_gap(cost_to_analyze, measurement, hardware, operations=profile.operations),
+        analyze_gap(
+            cost_to_analyze,
+            measurement,
+            hardware,
+            operations=profile.operations,
+            coverage=profile.coverage,
+        ),
         analyze_memory_gap(profile.memory, measurement),
     )
 

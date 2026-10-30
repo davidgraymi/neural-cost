@@ -16,6 +16,9 @@ class FrameworkAdapter(ABC):
     """
 
     name: str = "custom"
+    #: Set by ``operations()`` in adapters that track it: how much of the
+    #: traced model was modeled (see :class:`neural_cost.coverage.Coverage`).
+    coverage: Any = None
 
     @abstractmethod
     def operations(self, model: Any, example_inputs: Sequence[Any]) -> Sequence[Operation]:

@@ -586,6 +586,29 @@ ops = adapter.operations(search_fn, (obs, params))
 adapter.while_trip_counts  # [(16, "user"), (8, "default"), ...] in trace order
 ```
 
+### Coverage: how much of the workload the roofline describes
+
+Bounds and efficiencies only describe the operations an adapter understood.
+After `operations()`, `JaxAdapter` (jaxpr equations) and `TorchAdapter`
+(executed leaf modules) record a `Coverage`. Pass it to `analyze_gap`, or use
+`profile_model` + `analyze_model_gap`, which pass it for you:
+
+```python
+adapter = JaxAdapter()
+ops = adapter.operations(fn, (obs, params))
+gap = analyze_gap(estimate_operations(ops), adapter.benchmark(fn, obs, params),
+                  hardware, operations=ops, coverage=adapter.coverage)
+print(gap.render())
+# Neural cost gap analysis
+#   coverage: 41.2% of 340 equations modeled (unmodeled: sort x12, threefry2x32 x8, ...)
+#   WARNING: Low coverage: only 41.2% of the traced equations were modeled; ...
+```
+
+`Coverage.unmodeled_primitives` lists skipped primitives by frequency, and
+`unmodeled_output_bytes` sums their output sizes as a rough measure of the
+traffic left out. The warning threshold defaults to 90%
+(`analyze_gap(..., coverage_threshold=0.8)`).
+
 ## E2E architecture comparison
 
 Run the architecture comparison script to benchmark five canonical neural

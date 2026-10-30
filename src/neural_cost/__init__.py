@@ -58,6 +58,7 @@ from .checkpointing import (
     analyze_activation_checkpointing,
     estimate_activation_checkpointing,
 )
+from .coverage import Coverage
 from .estimate import (
     ContinuousBatchIterationEstimate,
     CostEstimate,
@@ -141,6 +142,7 @@ __all__ = [
     "ContinuousBatchIterationEstimate",
     "CostEstimate",
     "CostModel",
+    "Coverage",
     "DequantizationCostEstimate",
     "DetectionResult",
     "DistributedGapAnalysis",
