@@ -266,6 +266,23 @@ class JaxAdapter(FrameworkAdapter):
                     )
                 )
 
+    def hardware(self, device: Any = None, **kwargs: Any):
+        """Detect a :class:`~neural_cost.HardwareSpec` for the JAX device in use.
+
+        ``device`` defaults to ``jax.devices()[0]``, i.e. the platform selected
+        by ``JAX_PLATFORMS``, so a CPU run on a machine with a GPU is scored
+        against the CPU rather than the GPU.  Extra keyword arguments are
+        forwarded to :func:`neural_cost.detect_hardware`.  Returns the
+        ``(spec, detection)`` pair.
+        """
+        try:
+            import jax
+        except ImportError as error:  # pragma: no cover - optional package
+            raise ImportError("Install neural-cost[jax] to use JaxAdapter") from error
+        from ..hardware_detect import detect_hardware
+
+        return detect_hardware(device=device if device is not None else jax.devices()[0], **kwargs)
+
     def calibrate(self, *, quick: bool = False):
         """Measure size-dependent FLOP/s, bandwidth and per-call dispatch for jitted JAX.
 

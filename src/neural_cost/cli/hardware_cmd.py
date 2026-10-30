@@ -30,6 +30,14 @@ def register_hardware_parser(
         help="Skip the live STREAM memory bandwidth benchmark.",
     )
     parser.add_argument(
+        "--device",
+        default=None,
+        help=(
+            "Device the workload runs on: 'cpu' or 'gpu' (also accepts 'cuda', 'mps', "
+            "'metal'). Default: the fastest detected accelerator."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output detected hardware metrics as JSON.",
@@ -46,10 +54,12 @@ def run_hardware(args: argparse.Namespace) -> int:
     hw, det = detect_hardware(
         bandwidth_benchmark_mb=args.bw_bench_mb,
         benchmark_memory=benchmark_memory,
+        device=args.device,
     )
 
     data = {
         "device_name": hw.device_name,
+        "device_type": hw.device_type,
         "detection_source": det.source,
         "peak_flops": hw.peak_flops,
         "memory_bandwidth_bytes_per_sec": hw.memory_bandwidth,
@@ -62,7 +72,7 @@ def run_hardware(args: argparse.Namespace) -> int:
         return 0
 
     print("┌─ Detected Hardware Specification ──────────────────────────────────────────")
-    print(f"│  Device:             {hw.device_name}")
+    print(f"│  Device:             {hw.device_name} [{hw.device_type or 'unknown'}]")
     print(f"│  Detection Source:   {det.source}")
     print(
         f"│  Peak FP32 Compute:  {format_flops(hw.peak_flops)}/s ({hw.peak_flops / 1e12:.2f} TFLOP/s)"

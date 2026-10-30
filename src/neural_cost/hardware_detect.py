@@ -10,6 +10,12 @@ populated with values derived from:
 3. ``nvidia-smi`` on systems with NVIDIA GPUs (CUDA peak FLOPs).
 4. Sensible CPU-level fallbacks (logical cores × clock × scalar FMA factor).
 
+Pass ``device=`` (a string such as ``"cpu"``/``"gpu"``, or a framework device
+object such as ``jax.devices()[0]`` or ``torch.device("mps")``) to describe the
+device the workload actually runs on.  Without it the fastest detected
+accelerator is assumed, which misreports efficiency for CPU runs on a machine
+that also has a GPU.
+
 All values are best-effort estimates for roofline purposes.  Pass explicit
 ``--peak-flops`` / ``--memory-bandwidth`` arguments to the comparison script
 to override them with manufacturer data for your exact SKU.
@@ -21,6 +27,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from typing import Any
 
 from .hardware import CacheSpec, HardwareSpec
 
@@ -88,6 +95,38 @@ class DetectionResult:
     peak_flops: float
     memory_bandwidth: float
     source: str  # human-readable description of where values came from
+
+
+_GPU_TOKENS = ("gpu", "cuda", "rocm", "mps", "metal", "xpu")
+
+
+def normalize_device_type(device: Any) -> str | None:
+    """Map a device description to ``"cpu"``, ``"gpu"``, ``"tpu"`` or ``None``.
+
+    Accepts strings (``"cpu"``, ``"cuda:0"``, ``"mps"``, ``"METAL"``,
+    ``"TFRT_CPU_0"``), JAX devices (``.platform``), torch devices (``.type``)
+    and arrays/tensors exposing a ``.device`` attribute.  Returns ``None`` when
+    the kind cannot be determined.
+    """
+    if device is None:
+        return None
+    if not isinstance(device, str):
+        for attribute in ("platform", "type"):
+            value = getattr(device, attribute, None)
+            if isinstance(value, str):
+                return normalize_device_type(value)
+        inner = getattr(device, "device", None)
+        if inner is not None and inner is not device and not callable(inner):
+            return normalize_device_type(inner)
+        device = str(device)
+    text = device.strip().lower()
+    if "tpu" in text:
+        return "tpu"
+    if "cpu" in text:
+        return "cpu"
+    if any(token in text for token in _GPU_TOKENS):
+        return "gpu"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +272,45 @@ def _probe_nvidia(
         return None, None, None, ()
 
 
+# Apple Silicon CPU clocks (P-core, E-core) per generation.  Each P-core issues
+# four 128-bit FP32 FMAs per cycle (32 FLOP/cycle) and each E-core two
+# (16 FLOP/cycle).  This is the NEON peak an XLA/Eigen CPU backend can reach;
+# Accelerate's AMX matmul units are not counted.
+_APPLE_CPU_CLOCKS: dict[str, tuple[float, float]] = {
+    "M1": (3.2e9, 2.06e9),
+    "M2": (3.5e9, 2.42e9),
+    "M3": (4.05e9, 2.75e9),
+    "M4": (4.4e9, 2.9e9),
+}
+
+
+def _sysctl_int(key: str) -> int | None:
+    if not shutil.which("sysctl"):
+        return None
+    try:
+        out = subprocess.check_output(
+            ["sysctl", "-n", key], text=True, timeout=5, stderr=subprocess.DEVNULL
+        )
+        return int(out.strip())
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _apple_cpu_peak_flops(chip_name: str | None) -> float | None:
+    """FP32 NEON peak of an Apple Silicon CPU complex, or ``None`` if unknown."""
+    if not chip_name:
+        return None
+    match = re.search(r"\b(M\d+)\b", chip_name)
+    if match is None or match.group(1) not in _APPLE_CPU_CLOCKS:
+        return None
+    p_cores = _sysctl_int("hw.perflevel0.physicalcpu")
+    e_cores = _sysctl_int("hw.perflevel1.physicalcpu") or 0
+    if not p_cores:
+        return None
+    p_clock, e_clock = _APPLE_CPU_CLOCKS[match.group(1)]
+    return p_cores * p_clock * 32.0 + e_cores * e_clock * 16.0
+
+
 def _probe_cpu_flops() -> tuple[int, float | None]:
     """Return (logical_core_count, clock_hz_or_None) from sysctl / /proc/cpuinfo."""
     import os
@@ -284,6 +362,7 @@ def detect_hardware(
     bandwidth_benchmark_mb: int = 256,
     precision: str = "fp32",
     benchmark_memory: bool = True,
+    device: Any = None,
 ) -> tuple[HardwareSpec, DetectionResult]:
     """Probe this machine and return a :class:`HardwareSpec` for roofline analysis.
 
@@ -297,6 +376,14 @@ def detect_hardware(
         higher peak compute for lower precisions.
     benchmark_memory:
         Whether to execute the live NumPy STREAM benchmark (default True).
+    device:
+        The device the workload runs on: ``"cpu"``, ``"gpu"`` or a framework
+        device object (``jax.devices()[0]``, ``torch.device("mps")``, an
+        array).  ``None`` (default) assumes the fastest detected accelerator.
+        With ``"cpu"`` the GPU tables are skipped even when a GPU is present.
+        TPUs and other devices without a spec table raise ``ValueError``;
+        measure them with :func:`neural_cost.adapters.JaxAdapter.calibrate`
+        or pass an explicit :class:`HardwareSpec`.
 
     Returns
     -------
@@ -305,6 +392,14 @@ def detect_hardware(
     result:
         :class:`DetectionResult` with all raw probed values for display.
     """
+    kind = normalize_device_type(device)
+    if device is not None and kind is None:
+        raise ValueError(f"cannot determine the device type of {device!r}; use 'cpu' or 'gpu'")
+    if kind == "tpu":
+        raise ValueError(
+            "no published-spec table for TPU devices; pass an explicit HardwareSpec "
+            "or measure the device with JaxAdapter().calibrate()"
+        )
     measured_bw = (
         _measure_bandwidth_gb_s(size_mb=bandwidth_benchmark_mb) if benchmark_memory else None
     )
@@ -312,7 +407,7 @@ def detect_hardware(
 
     # --- Apple Silicon ---
     chip_name, apple_peak_flops, apple_bw, apple_caches = _probe_apple_silicon()
-    if apple_peak_flops is not None:
+    if apple_peak_flops is not None and kind != "cpu":
         peak_flops = apple_peak_flops * mult
         # Prefer manufacturer bandwidth; measured value is a lower bound.
         memory_bandwidth = (
@@ -326,7 +421,11 @@ def detect_hardware(
         cores, clock_hz = _probe_cpu_flops()
         return (
             HardwareSpec(
-                chip_name or "Apple Silicon", peak_flops, memory_bandwidth, caches=apple_caches
+                chip_name or "Apple Silicon",
+                peak_flops,
+                memory_bandwidth,
+                caches=apple_caches,
+                device_type="gpu",
             ),
             DetectionResult(
                 chip_name,
@@ -340,7 +439,9 @@ def detect_hardware(
         )
 
     # --- NVIDIA GPU ---
-    gpu_name, nvidia_flops, nvidia_bw, nvidia_caches = _probe_nvidia(precision=precision)
+    gpu_name, nvidia_flops, nvidia_bw, nvidia_caches = (
+        _probe_nvidia(precision=precision) if kind != "cpu" else (None, None, None, ())
+    )
     if nvidia_flops is not None and nvidia_bw is not None:
         memory_bandwidth = (
             max(nvidia_bw, measured_bw * 1e9) if measured_bw is not None else nvidia_bw
@@ -351,7 +452,11 @@ def detect_hardware(
         cores, clock_hz = _probe_cpu_flops()
         return (
             HardwareSpec(
-                gpu_name or "NVIDIA GPU", nvidia_flops, memory_bandwidth, caches=nvidia_caches
+                gpu_name or "NVIDIA GPU",
+                nvidia_flops,
+                memory_bandwidth,
+                caches=nvidia_caches,
+                device_type="gpu",
             ),
             DetectionResult(
                 gpu_name,
@@ -364,26 +469,40 @@ def detect_hardware(
             ),
         )
 
+    if kind == "gpu":
+        raise ValueError(
+            "device is a GPU but no GPU could be identified (Apple Silicon or nvidia-smi); "
+            "pass an explicit HardwareSpec or measure the device with an adapter's calibrate()"
+        )
+
     # --- CPU fallback ---
     cores, clock_hz = _probe_cpu_flops()
-    if clock_hz:
+    apple_cpu_flops = _apple_cpu_peak_flops(chip_name)
+    if apple_cpu_flops is not None:
+        peak_flops = apple_cpu_flops * mult
+    elif clock_hz:
         # scalar FP32 FMA = 2 FLOP/cycle/core; use conservative 2× factor
         peak_flops = cores * clock_hz * 2.0 * mult
     else:
         # Very conservative: assume 2 GFLOP/s per core at unknown speed
         peak_flops = cores * 2e9 * mult
 
-    memory_bandwidth = (measured_bw * 1e9) if measured_bw is not None else 30e9
+    # Apple Silicon CPU and GPU share unified memory: without a live
+    # measurement the chip's published bandwidth is the best available bound.
+    fallback_bw = apple_bw if apple_bw else 30e9
+    memory_bandwidth = (measured_bw * 1e9) if measured_bw is not None else fallback_bw
     source = (
         f"CPU estimate ({cores} cores"
         + (f" @ {clock_hz / 1e9:.2f} GHz" if clock_hz else "")
+        + (", Apple NEON P/E-core table" if apple_cpu_flops is not None else "")
         + f" [{precision.upper()}])"
     )
     if measured_bw is not None:
         source += " + NumPy STREAM triad"
 
+    cpu_name = f"{chip_name} (CPU)" if chip_name else "CPU"
     return (
-        HardwareSpec("CPU", peak_flops, memory_bandwidth),
+        HardwareSpec(cpu_name, peak_flops, memory_bandwidth, device_type="cpu"),
         DetectionResult(
             chip_name,
             cores,

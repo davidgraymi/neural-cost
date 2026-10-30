@@ -525,6 +525,27 @@ print(f"Peak FLOP/s: {hardware.peak_flops / 1e12:.1f} TFLOP/s")
 print(f"Bandwidth: {hardware.memory_bandwidth / 1e9:.1f} GB/s")
 ```
 
+### Device-aware specs
+
+By default `detect_hardware()` describes the fastest detected accelerator.  If
+the workload runs on a different device (for example JAX with
+`JAX_PLATFORMS=cpu` on an Apple Silicon Mac), pass `device=` so the run is
+scored against the right peak:
+
+```python
+cpu_spec, _ = detect_hardware(device="cpu")             # skip GPU tables
+spec, _ = detect_hardware(device=jax.devices()[0])      # JAX device object
+spec, _ = detect_hardware(device=torch.device("mps"))   # torch device
+spec, _ = JaxAdapter().hardware()                       # active JAX device
+```
+
+Every detected `HardwareSpec` records a `device_type` (`"cpu"` or `"gpu"`).
+When an adapter benchmark records the device it ran on, `analyze_gap` adds a
+**Device mismatch** finding if the two disagree.  On Apple Silicon the CPU
+peak uses a NEON P/E-core table and the CPU shares the chip's unified memory
+bandwidth with the GPU.  The CLI accepts the same option:
+`neural-cost hardware --device cpu`.
+
 ## Framework adapters
 
 ```python
@@ -846,6 +867,9 @@ neural-cost hardware --no-bench
 
 # Machine-readable JSON output:
 neural-cost hardware --json
+
+# Describe the CPU even when a GPU is present:
+neural-cost hardware --device cpu
 ```
 
 ### 2. Static Architecture Profiling
