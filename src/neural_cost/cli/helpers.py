@@ -105,6 +105,7 @@ def resolve_hardware(
     device_name: str | None = None,
     bw_bench_mb: int = 256,
     benchmark_memory: bool = True,
+    device: str | None = None,
 ) -> tuple[HardwareSpec, DetectionResult | None]:
     """Resolve HardwareSpec from explicit overrides or dynamic hardware detection."""
     detection: DetectionResult | None = None
@@ -112,12 +113,16 @@ def resolve_hardware(
         hw, det = detect_hardware(
             bandwidth_benchmark_mb=bw_bench_mb,
             benchmark_memory=benchmark_memory,
+            device=device,
         )
         detection = det
         name = device_name or hw.device_name
         flops = peak_flops if peak_flops is not None else hw.peak_flops
         bw = memory_bandwidth if memory_bandwidth is not None else hw.memory_bandwidth
-        return HardwareSpec(name, peak_flops=flops, memory_bandwidth=bw), detection
+        return (
+            HardwareSpec(name, peak_flops=flops, memory_bandwidth=bw, device_type=hw.device_type),
+            detection,
+        )
 
     name = device_name or "Custom_Hardware"
     return HardwareSpec(name, peak_flops=peak_flops, memory_bandwidth=memory_bandwidth), None

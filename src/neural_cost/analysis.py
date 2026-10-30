@@ -13,6 +13,7 @@ from .estimate import (
     estimate_operation,
 )
 from .hardware import ClusterTopology, HardwareSpec
+from .hardware_detect import normalize_device_type
 from .memory import MemoryEstimate
 from .model import ModelProfile
 from .operations import Operation
@@ -171,6 +172,28 @@ def analyze_layers_gap(
     return tuple(results)
 
 
+def device_mismatch(measurement: Measurement, hardware: HardwareSpec) -> str | None:
+    """Return a warning when ``measurement`` ran on a different kind of device than ``hardware``.
+
+    Both sides must declare a device: ``Measurement.device`` (set by adapter
+    benchmarks) and ``HardwareSpec.device_type`` (set by
+    :func:`neural_cost.detect_hardware`).  Otherwise ``None`` is returned.
+    """
+    device = getattr(measurement, "device", None)
+    measured = normalize_device_type(device)
+    if (
+        measured is None
+        or getattr(hardware, "device_type", None) is None
+        or measured == hardware.device_type
+    ):
+        return None
+    return (
+        f"Device mismatch: the measurement ran on {measured} ({device}) but the "
+        f"hardware spec '{hardware.name}' describes a {hardware.device_type}; efficiency figures "
+        f"are not meaningful. Use detect_hardware(device=...) for the device in use."
+    )
+
+
 def analyze_gap(
     estimate: CostEstimate | FusedCostEstimate,
     measurement: Measurement,
@@ -190,6 +213,10 @@ def analyze_gap(
     efficiency = min(1.0, lower_bound / observed)
     bottleneck = "compute" if compute >= bandwidth else "memory"
     findings: list[str] = []
+
+    mismatch = device_mismatch(measurement, hardware)
+    if mismatch is not None:
+        findings.append(mismatch)
 
     layer_analyses = ()
     if operations is not None:

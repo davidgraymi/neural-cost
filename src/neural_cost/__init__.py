@@ -35,6 +35,7 @@ from .analysis import (
     analyze_paged_attention_gap,
     analyze_speculative_decoding,
     analyze_ssm_gap,
+    device_mismatch,
 )
 from .api import estimate_model
 from .attribution import (
@@ -87,7 +88,7 @@ from .hardware import (
     InterconnectSpec,
     get_interconnect_preset,
 )
-from .hardware_detect import DetectionResult, detect_hardware
+from .hardware_detect import DetectionResult, detect_hardware, normalize_device_type
 from .hub import (
     HFModelConfig,
     fetch_hf_config,
@@ -197,6 +198,7 @@ __all__ = [
     "benchmark",
     "cross_check",
     "detect_hardware",
+    "device_mismatch",
     "estimate_activation_checkpointing",
     "estimate_adamw_traffic",
     "estimate_continuous_batch_iteration",
@@ -221,6 +223,7 @@ __all__ = [
     "get_interconnect_preset",
     "get_precision_format",
     "get_quantization_preset",
+    "normalize_device_type",
     "parse_hf_config",
     "profile_model",
     "run_validation_suite",

@@ -78,6 +78,10 @@ class HardwareSpec:
     Values are expressed in SI units: FLOP/s, bytes/s, and bytes.  Use a
     precision-specific compute peak (for example, FP16 tensor-core peak) when
     analyzing a workload at that precision.
+
+    ``device_type`` (``"cpu"``, ``"gpu"`` or ``"tpu"``) records which kind of
+    device the limits describe.  When set, :func:`neural_cost.analyze_gap`
+    warns if a measurement was taken on a different kind of device.
     """
 
     name: str
@@ -85,6 +89,7 @@ class HardwareSpec:
     memory_bandwidth: float
     memory_capacity: int | None = None
     caches: tuple[CacheSpec, ...] = ()
+    device_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.peak_flops <= 0 or self.memory_bandwidth <= 0:
