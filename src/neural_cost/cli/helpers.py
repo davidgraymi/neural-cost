@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from neural_cost.hardware import HardwareSpec
 from neural_cost.hardware_detect import DetectionResult, detect_hardware
@@ -126,3 +127,29 @@ def resolve_hardware(
 
     name = device_name or "Custom_Hardware"
     return HardwareSpec(name, peak_flops=peak_flops, memory_bandwidth=memory_bandwidth), None
+
+
+def load_target(target: str) -> Any:
+    """Load ``path/to/script.py:name`` or ``package.module:name`` and return the object."""
+    import importlib
+    import importlib.util
+    from pathlib import Path
+
+    module_ref, sep, attribute = target.rpartition(":")
+    if not sep or not module_ref or not attribute:
+        raise ValueError(f"expected 'script.py:name' or 'module:name', got {target!r}")
+    if module_ref.endswith(".py") or Path(module_ref).exists():
+        path = Path(module_ref).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"no such script: {module_ref}")
+        spec = importlib.util.spec_from_file_location(f"_neural_cost_target_{path.stem}", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot import {module_ref}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    else:
+        module = importlib.import_module(module_ref)
+    try:
+        return getattr(module, attribute)
+    except AttributeError as error:
+        raise AttributeError(f"{module_ref} has no attribute {attribute!r}") from error
