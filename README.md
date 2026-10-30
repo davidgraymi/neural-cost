@@ -37,7 +37,7 @@ Framework adapters are optional extras, keeping `neural-cost` lightweight with z
 |---|---|---|
 | **PyTorch** | `pip install "neural-cost[torch]"` | PyTorch eager execution & FX graph tracer adapter |
 | **JAX** | `pip install "neural-cost[jax]"` | JAX primitives and jaxpr tracing |
-| **JAX on Apple Silicon (Metal)** | `pip install "neural-cost[jax-metal]"` | Apple's official Metal PJRT plugin (`JAX_PLATFORMS=METAL`) |
+| **JAX on Apple Silicon (Metal)** | `pip install "neural-cost[jax-metal]"` | Apple's official Metal PJRT plugin (`JAX_PLATFORMS=METAL`); pins jax/jaxlib 0.4.34, Python ≤ 3.13 |
 | **JAX on Apple Silicon (MPS)** | `pip install "neural-cost[jax-mps]"` | Community PJRT plugin that runs JAX on the Apple GPU through MLX (`JAX_PLATFORMS=mps`); pins jax/jaxlib 0.11.x, Python ≥ 3.12 |
 | **TensorFlow** | `pip install "neural-cost[tensorflow]"` | TensorFlow / Keras layer adapter |
 | **All Frameworks** | `pip install "neural-cost[torch,jax,tensorflow]"` | All supported deep learning framework adapters |
@@ -812,6 +812,13 @@ extra carries the same pin (`jax>=0.11,<0.12`), so installing it with
 `neural-cost[jax]` resolves to a compatible jax. The plain `jax` extra only
 requires `jax>=0.4`. If you upgrade jax yourself, upgrade jax-mps to the
 matching minor release. On Python 3.11 the jax-mps extra installs nothing.
+jax-metal 0.1.1, its latest release, only works with jax/jaxlib **0.4.34**.
+With newer jaxlib the `METAL` device is listed, but every computation fails
+with `unknown attribute code` (a StableHLO bytecode mismatch). The
+`neural-cost[jax-metal]` extra pins `jax==0.4.34`/`jaxlib==0.4.34`. jaxlib
+0.4.34 has no wheels for Python ≥ 3.14, where the extra installs nothing. The
+two plugin extras need different jax versions, so install one or the other,
+never both.
 
 **Selecting a backend.** JAX uses one platform per process, chosen by
 `JAX_PLATFORMS` before `import jax`. Use `cpu`, `mps` (jax-mps) or `METAL`

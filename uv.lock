@@ -18,6 +18,10 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
+conflicts = [[
+    { package = "neural-cost", extra = "jax-metal" },
+    { package = "neural-cost", extra = "jax-mps" },
+]]
 
 [[package]]
 name = "absl-py"
@@ -693,6 +697,35 @@ wheels = [
 
 [[package]]
 name = "jax"
+version = "0.4.34"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+dependencies = [
+    { name = "jaxlib", version = "0.4.34", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "ml-dtypes", marker = "(python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "opt-einsum", marker = "(python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/19/6a/cacfcdf77841a4562e555ef35e0dbc5f8ca79c9f1010aaa4cf3973e79c69/jax-0.4.34.tar.gz", hash = "sha256:44196854f40c5f9cea3142824b9f1051f85afc3fcf7593ec5479fc8db01c58db", size = 1848472, upload-time = "2024-10-04T14:37:12.698Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/f3/c499d358dd7f267a63d7d38ef54aadad82e28d2c28bafff15360c3091946/jax-0.4.34-py3-none-any.whl", hash = "sha256:b957ca1fc91f7343f91a186af9f19c7f342c946f95a8c11c7f1e5cdfe2e58d9e", size = 2144294, upload-time = "2024-10-04T14:37:10.265Z" },
+]
+
+[[package]]
+name = "jax"
 version = "0.10.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
@@ -701,11 +734,11 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "jaxlib", version = "0.10.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "ml-dtypes" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "opt-einsum" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "jaxlib", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "ml-dtypes", marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "opt-einsum", marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d2/73/eb91d98fcadfa2cbcfdd4e417ab116e47eb20882acc5ee678e47c35d6b57/jax-0.10.2.tar.gz", hash = "sha256:bf77428a8c2e6904c4f46d5ab12aa5cfc6cad2179f07f7e4c0fc75ac86ef0639", size = 2775110, upload-time = "2026-06-17T23:44:57.818Z" }
 wheels = [
@@ -731,11 +764,11 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "jaxlib", version = "0.11.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "ml-dtypes" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "opt-einsum" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "jaxlib", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "ml-dtypes", marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "opt-einsum", marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/96/c3/cbb70e5e0846891b45c9b02b0755235618043cd2a8edd1f5bfe24b077cf4/jax-0.11.2.tar.gz", hash = "sha256:540dc0bed96bd5a0d8acca15cf16198fea98ef2fc151d40bdf1ace49eb76efd9", size = 2904036, upload-time = "2026-09-17T23:43:35.896Z" }
 wheels = [
@@ -747,12 +780,10 @@ name = "jax-metal"
 version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "jaxlib", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "jaxlib", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "six" },
-    { name = "wheel" },
+    { name = "jax", version = "0.4.34", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "jaxlib", version = "0.4.34", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "six", marker = "python_full_version < '3.14'" },
+    { name = "wheel", marker = "python_full_version < '3.14'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/87/ec/9bb7f7f0ffd06c3fb89813126b2f698636ac7a4263ed7bdd1ff7d7c94f8f/jax_metal-0.1.1-py3-none-macosx_10_14_x86_64.whl", hash = "sha256:d918a78443cb808c9491a24a5c2a94cc4eabfd0461d5bcda29a8f332dfbe9b7e", size = 54662235, upload-time = "2024-10-08T16:57:30.128Z" },
@@ -764,11 +795,51 @@ name = "jax-mps"
 version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "jaxlib", version = "0.11.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "jaxlib", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/9b/a1ebc6fa6c58abb19b63ea70be60fdfdb252438a67c751f64dc912fb2fad/jax_mps-0.11.0-py3-none-macosx_14_0_arm64.whl", hash = "sha256:903c1317361347b945512f7ed81483f3c21075f76dc41736e1e34469ff5b8412", size = 44726795, upload-time = "2026-09-15T11:35:19.011Z" },
+]
+
+[[package]]
+name = "jaxlib"
+version = "0.4.34"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+dependencies = [
+    { name = "ml-dtypes", marker = "(python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bf/14/00a3385532d72ab51bd8e9f8c3e19a2e257667955565e9fc10236771dd06/jaxlib-0.4.34-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:8ee3f93836e53c86556ccd9449a4ea43516ee05184d031a71dd692e81259f7d9", size = 87420889, upload-time = "2024-10-04T14:37:56.047Z" },
+    { url = "https://files.pythonhosted.org/packages/66/78/d1535ee73fe505dc6c8831c19c4846afdce7df5acefb9f8ee885aa73d700/jaxlib-0.4.34-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:c9d3adcae43a33aad4332be9c2aedc5ef751d1e755f917a5afb30c7872eacaa8", size = 67635880, upload-time = "2024-10-04T14:38:01.513Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/06/3e09e794acf308e170905d732eca0d041449503c47505cc22e8ef78a989d/jaxlib-0.4.34-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:571ef03259835458111596a71a2f4a6fabf4ec34595df4cea555035362ac5bf0", size = 69421901, upload-time = "2024-10-04T14:38:06.674Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/d0/6bc81c0b1d507f403e6085ce76a429e6d7f94749d742199252e299dd1424/jaxlib-0.4.34-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:3bcfa639ca3cfaf86c8ceebd5fc0d47300fd98a078014a1d0cc03133e1523d5f", size = 86114491, upload-time = "2024-10-04T14:38:13.671Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/5d/7e71019af5f6fdebe6c10eab97d01f44b931d94609330da9e142cb155f8c/jaxlib-0.4.34-cp311-cp311-win_amd64.whl", hash = "sha256:133070d4fec5525ffea4dc72956398c1cf647a04dcb37f8a935ee82af78d9965", size = 55241262, upload-time = "2024-10-04T14:38:19.303Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/42/5038983664494dfb50f8669a662d965d7ea62f9250e40d8cd36dcf9ac3dd/jaxlib-0.4.34-cp312-cp312-macosx_10_14_x86_64.whl", hash = "sha256:c7b3e724a30426a856070aba0192b5d199e95b4411070e7ad96ad8b196877b10", size = 87473956, upload-time = "2024-10-04T14:38:24.126Z" },
+    { url = "https://files.pythonhosted.org/packages/87/2e/8a75d3107c019c370c50c01acc205da33f9d6fba830950401a772a8e9f6d/jaxlib-0.4.34-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:096f0ca309d41fa692a9d1f2f9baab1c5c8ca0749876ebb3f748e738a27c7ff4", size = 67650276, upload-time = "2024-10-04T14:38:29.587Z" },
+    { url = "https://files.pythonhosted.org/packages/af/09/cceae2d251a506b4297679d10ee9f5e905a6b992b0687d553c9470ffd1db/jaxlib-0.4.34-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:1a30771d85fa77f9ab8f18e63240f455ab3a3f87660ed7b8d5eea6ceecbe5c1e", size = 69431284, upload-time = "2024-10-04T14:38:34.902Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/0d/4faf839e3c8ce2a5b615df64427be3e870899c72c0ebfb5859348150aba1/jaxlib-0.4.34-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:48272e9034ff868d4328cf0055a07882fd2be93f59dfb6283af7de491f9d1290", size = 86151183, upload-time = "2024-10-04T14:38:40.416Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/bc/a38f99071fca6cc31ae949e508a23b0de5de559da594443bb625a1adb8f3/jaxlib-0.4.34-cp312-cp312-win_amd64.whl", hash = "sha256:901cb4040ed24eae40071d8114ea8d10dff436277fa74a1a5b9e7206f641151c", size = 55278745, upload-time = "2024-10-04T14:38:45.918Z" },
+    { url = "https://files.pythonhosted.org/packages/21/4e/fab0606683af7aa9284a32d2b188ff132cffb0ee3ea04d941a547eb776d1/jaxlib-0.4.34-cp313-cp313-macosx_10_14_x86_64.whl", hash = "sha256:72e22e99a5dc890a64443c3fc12f13f20091f578c405a76de077ba42b4c62cd7", size = 87474367, upload-time = "2024-10-04T14:38:51.901Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/1b/709be16d543a3db5b471ee5e7d089c57484c386b08499923e43bd8da5d0b/jaxlib-0.4.34-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:c303f5acaf6c56ce5ff133a923c9b6247bdebedde15bd2c893c24be4d8f71306", size = 67651281, upload-time = "2024-10-04T14:38:57.312Z" },
+    { url = "https://files.pythonhosted.org/packages/85/9e/f3801096cd4a2c764af7a1f6b683c769706602ea72b27ec35bacfcc4cd4f/jaxlib-0.4.34-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:7be673a876ebd1aef440fb7e3ebaf99a91abeb550c9728c644b7d7c7b5d7c108", size = 69432987, upload-time = "2024-10-04T14:39:02.636Z" },
+    { url = "https://files.pythonhosted.org/packages/e6/79/61301f55b24c3a898ef9bc4e13600b66e3f838623fc6f87648ac1ccbca01/jaxlib-0.4.34-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:87f25a477cd279840e53718403f97092eba0e8a945fcab47bcf435b6f9119dda", size = 86152550, upload-time = "2024-10-04T14:39:09.274Z" },
+    { url = "https://files.pythonhosted.org/packages/16/b0/e682d02126e0062b58dec0f0851048592396f74c24b4a4412dce4ddbbadb/jaxlib-0.4.34-cp313-cp313-win_amd64.whl", hash = "sha256:6b43a974c5d91a19912d138f2658dd8dbb7d30dcdff5c961d896c673e872b611", size = 55279410, upload-time = "2024-10-04T14:39:15.522Z" },
 ]
 
 [[package]]
@@ -781,9 +852,9 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "ml-dtypes" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "ml-dtypes", marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b2/2c/7038fc73154307389631b5b2dbe5ac529e1918eecc19a27e6644ad114bbf/jaxlib-0.10.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5a98873fc867623b81f2bee15d554b8edd6588a183d01fa50d21b1e3db96ff2b", size = 61429039, upload-time = "2026-06-17T23:43:44.858Z" },
@@ -829,9 +900,9 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "ml-dtypes" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "ml-dtypes", marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3f/af/56ca13ef7a98137b087ef0c24dd5ace3163895f0164670babaa7dfcb69e6/jaxlib-0.11.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:eca80e745b7623369a76b5f685676ec233a33a55d69f60fa7e57cbefcfd47adc", size = 64867740, upload-time = "2026-09-17T23:42:19.368Z" },
@@ -1317,13 +1388,14 @@ dev = [
     { name = "ruff" },
 ]
 jax = [
-    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "jax", version = "0.4.34", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14' and extra == 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
+    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14' or (python_full_version >= '3.12' and python_full_version < '3.14' and extra != 'extra-11-neural-cost-jax-metal') or (extra == 'extra-11-neural-cost-jax-metal' and extra == 'extra-11-neural-cost-jax-mps')" },
 ]
 jax-metal = [
-    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "jax-metal" },
+    { name = "jax", version = "0.4.34", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "jax-metal", marker = "python_full_version < '3.14'" },
+    { name = "jaxlib", version = "0.4.34", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
 ]
 jax-mps = [
     { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1346,11 +1418,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "jax", marker = "python_full_version >= '3.12' and extra == 'jax-mps'", specifier = ">=0.11,<0.12" },
+    { name = "jax", marker = "python_full_version < '3.14' and extra == 'jax-metal'", specifier = "==0.4.34" },
     { name = "jax", marker = "extra == 'jax'", specifier = ">=0.4" },
-    { name = "jax", marker = "extra == 'jax-metal'", specifier = ">=0.4" },
-    { name = "jax-metal", marker = "extra == 'jax-metal'" },
+    { name = "jax-metal", marker = "python_full_version < '3.14' and extra == 'jax-metal'", specifier = "==0.1.1" },
     { name = "jax-mps", marker = "python_full_version >= '3.12' and extra == 'jax-mps'", specifier = ">=0.11,<0.12" },
     { name = "jaxlib", marker = "python_full_version >= '3.12' and extra == 'jax-mps'", specifier = ">=0.11,<0.12" },
+    { name = "jaxlib", marker = "python_full_version < '3.14' and extra == 'jax-metal'", specifier = "==0.4.34" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "tensorflow", marker = "extra == 'tensorflow'", specifier = ">=2.12" },

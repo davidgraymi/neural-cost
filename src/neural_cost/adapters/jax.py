@@ -103,6 +103,10 @@ _REDUCTION_PRIMITIVES = frozenset(
     }
 )
 
+# Fused scaled-dot-product attention primitives that backends substitute for
+# jax.nn.dot_product_attention; inputs are (q, k, v, ...) in (B, H, T, D).
+_FUSED_ATTENTION_PRIMITIVES = frozenset({"mps.sdpa"})
+
 # Pure data movement: read the inputs, write the output, no arithmetic.
 _DATA_MOVEMENT_PRIMITIVES = frozenset({"concatenate", "pad", "rev"})
 
@@ -240,6 +244,14 @@ def _measure_calibration(jax: Any, device: Any, quick: bool) -> Any:
     def on_device(value: Any) -> Any:
         return jax.device_put(value, device)
 
+    key = jax.random.key(0)
+
+    def materialized(shape: tuple[int, ...]) -> Any:
+        # Random data, not jnp.ones: backends such as jax-mps (MLX) keep
+        # constant-filled arrays as broadcast scalars, so a streaming probe on
+        # them reads 4 bytes and reports roughly twice the real bandwidth.
+        return on_device(jax.random.uniform(key, shape, dtype=jnp.float32))
+
     def best_time(fn: Any, *args: Any, trials: int = 7) -> float:
         fn(*args).block_until_ready()
         best = float("inf")
@@ -271,7 +283,7 @@ def _measure_calibration(jax: Any, device: Any, quick: bool) -> Any:
     matmul = jax.jit(jnp.matmul)
     flops_curve = []
     for n in (64, 256, 1024) if quick else (32, 64, 128, 256, 512, 1024, 2048, 4096):
-        a = on_device(jnp.ones((n, n)))
+        a = materialized((n, n))
         flops_curve.append((2.0 * n**3, 2.0 * n**3 / kernel_time(best_time(matmul, a, a))))
 
     bump = jax.jit(lambda x: x + 1.0)
@@ -282,7 +294,7 @@ def _measure_calibration(jax: Any, device: Any, quick: bool) -> Any:
         if quick
         else (mib // 16, mib // 4, mib, 4 * mib, 16 * mib, 64 * mib, 256 * mib)
     ):
-        x = on_device(jnp.ones(size // 4))
+        x = materialized((size // 4,))
         bandwidth_curve.append((2.0 * size, 2.0 * size / kernel_time(best_time(bump, x))))
 
     platform = getattr(device, "platform", "unknown")
@@ -550,6 +562,30 @@ class JaxAdapter(FrameworkAdapter):
                     attrs,
                 )
             )
+        elif primitive in _FUSED_ATTENTION_PRIMITIVES and len(input_shapes) >= 3:
+            # Backend-substituted fused attention, e.g. jax-mps replaces
+            # jax.nn.dot_product_attention with ``mps.sdpa`` on (B, H, T, D).
+            q, k = input_shapes[0], input_shapes[1]
+            if len(q) != 4 or len(k) != 4:
+                return None
+            batch, heads, q_len, head_dim = q
+            kv_len = k[2]
+            attrs = dict(base_attrs)
+            name = f"{primitive}_{index}"
+            if q_len == kv_len:
+                attrs.update(
+                    num_heads=heads, seq_len=q_len, head_dim=head_dim, include_projections=0
+                )
+                operations.append(
+                    Operation(name, "attention", input_shapes[:3], output_shape, dtype_bytes, attrs)
+                )
+            else:
+                # QKᵀ and AV (2 FLOP per MAC each) plus a 5-FLOP softmax per score.
+                scores = batch * heads * q_len * kv_len
+                attrs["flops"] = 4 * scores * head_dim + 5 * scores
+                operations.append(
+                    Operation(name, "custom", input_shapes[:3], output_shape, dtype_bytes, attrs)
+                )
         elif primitive in _DATA_MOVEMENT_PRIMITIVES:
             attrs = dict(base_attrs)
             attrs["flops_per_element"] = 0

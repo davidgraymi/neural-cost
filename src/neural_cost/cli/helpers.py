@@ -133,6 +133,7 @@ def load_target(target: str) -> Any:
     """Load ``path/to/script.py:name`` or ``package.module:name`` and return the object."""
     import importlib
     import importlib.util
+    import sys
     from pathlib import Path
 
     module_ref, sep, attribute = target.rpartition(":")
@@ -146,7 +147,14 @@ def load_target(target: str) -> Any:
         if spec is None or spec.loader is None:
             raise ImportError(f"cannot import {module_ref}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Register before executing: dataclasses (and Flax modules) look up
+        # sys.modules[cls.__module__] while the class body is being created.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(spec.name, None)
+            raise
     else:
         module = importlib.import_module(module_ref)
     try:
