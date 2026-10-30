@@ -1,0 +1,13 @@
+{
+  "name": "neural-cost",
+  "owner": {
+    "name": "Neural Cost contributors"
+  },
+  "plugins": [
+    {
+      "name": "neural-cost",
+      "source": "./",
+      "description": "Agent skill for profiling neural networks with neural-cost."
+    }
+  ]
+}
