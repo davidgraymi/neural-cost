@@ -126,3 +126,13 @@ def test_cli_pipeline_json(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["stages"][0]["name"] == "a" and payload["stages"][0]["calls"] == 4
     assert payload["measured_total_seconds"] > 0
+
+
+def test_load_target_supports_dataclasses(tmp_path):
+    from neural_cost.cli.helpers import load_target
+
+    script = tmp_path / "with_dataclass.py"
+    script.write_text(
+        "from dataclasses import dataclass\n\n@dataclass\nclass Config:\n    width: int = 3\n"
+    )
+    assert load_target(f"{script}:Config")().width == 3

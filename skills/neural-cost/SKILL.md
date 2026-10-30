@@ -19,7 +19,7 @@ size", or "CPU vs GPU".
 | JAX / Flax functions | `pip install "neural-cost[jax]"` |
 | TensorFlow / Keras | `pip install "neural-cost[tensorflow]"` |
 | JAX on the Apple GPU via jax-mps | `pip install "neural-cost[jax,jax-mps]"`. jax-mps 0.11.x needs jax/jaxlib 0.11.x and Python ≥ 3.12, and the extra pins jax to match. Run with `JAX_PLATFORMS=mps`. |
-| JAX on the Apple GPU via jax-metal | `pip install "neural-cost[jax-metal]"`, run with `JAX_PLATFORMS=METAL` |
+| JAX on the Apple GPU via jax-metal | `pip install "neural-cost[jax-metal]"`. It pins jax/jaxlib 0.4.34, the only versions jax-metal 0.1.1 works with, so use Python ≤ 3.13. Run with `JAX_PLATFORMS=METAL`. Never install both plugin extras. |
 
 The core package has no dependencies. Without a GPU plugin, JAX on a Mac
 silently runs on the CPU, so check `jax.devices()[0].platform`.

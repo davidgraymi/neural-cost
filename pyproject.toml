@@ -47,13 +47,21 @@ dependencies = []
 torch = ["torch>=2.0"]
 jax = ["jax>=0.4"]
 # Apple Silicon JAX GPU plugins — install one of these to run JAX on MPS/Metal.
-# jax-metal is Apple's official Metal PJRT plugin (JAX_PLATFORMS=METAL).
+# jax-metal is Apple's official Metal PJRT plugin (JAX_PLATFORMS=METAL); see the pin below.
 # jax-mps is a community PJRT plugin that executes StableHLO through MLX on the
 # Apple GPU (JAX_PLATFORMS=mps). It is built against one jaxlib minor version
 # (jax-mps 0.11.x requires jax/jaxlib >=0.11,<0.12 and Python >=3.12), so the
 # extra pins jax to match instead of letting pip pick an incompatible jax.
 # Without a plugin, JAX silently falls back to CPU on Apple Silicon.
-jax-metal = ["jax>=0.4", "jax-metal"]
+# jax-metal 0.1.1 (its latest release) only works with jax/jaxlib 0.4.34: with
+# newer jaxlib the device is listed but every computation fails with a
+# StableHLO bytecode error, so the extra pins the matching versions.
+# jaxlib 0.4.34 has no wheels for Python >= 3.14, where the extra installs nothing.
+jax-metal = [
+  "jax==0.4.34; python_version < '3.14'",
+  "jaxlib==0.4.34; python_version < '3.14'",
+  "jax-metal==0.1.1; python_version < '3.14'",
+]
 jax-mps = [
   "jax>=0.11,<0.12; python_version >= '3.12'",
   "jaxlib>=0.11,<0.12; python_version >= '3.12'",
@@ -108,3 +116,7 @@ dev = [
     "matplotlib>=3.10.9",
     "seaborn>=0.13.2",
 ]
+
+[tool.uv]
+# The two Apple GPU plugins pin different jax minor versions.
+conflicts = [[{ extra = "jax-metal" }, { extra = "jax-mps" }]]

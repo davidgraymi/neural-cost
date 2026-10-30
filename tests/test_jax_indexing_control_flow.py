@@ -125,3 +125,33 @@ def test_portable_gather_scatter_validation():
         estimate_operation(Operation("s", "scatter", ((4, 4), (2,)), (4, 4)))
     default = estimate_operation(Operation("g", "gather", ((100, 8), (5,)), (5, 8)))
     assert default.read_bytes == 5 * 8 * 4 + 5 * 4  # default 4-byte indices
+
+
+def _fake_sdpa():
+    """A stand-in for jax-mps's fused ``mps.sdpa`` primitive (q, k, v in B, H, T, D)."""
+    from jax.extend.core import Primitive
+
+    prim = Primitive("mps.sdpa")
+    prim.def_abstract_eval(lambda q, k, v: q)
+    prim.def_impl(lambda q, k, v: q)
+    return prim
+
+
+def test_backend_fused_attention_primitive_is_modeled():
+    from neural_cost import flop_breakdown
+
+    sdpa = _fake_sdpa()
+    q = jnp.ones((2, 4, 8, 16))  # B, H, T, D
+    adapter = JaxAdapter()
+    ops = adapter.operations(lambda q, k, v: sdpa.bind(q, k, v), (q, q, q))
+    assert adapter.coverage.unmodeled == 0
+    (op,) = ops
+    assert op.kind == "attention"
+    # QKᵀ + AV: 2 × (2 × B·T × T × H·D), the same count torch's SDPA capture uses.
+    assert flop_breakdown(ops).dense_flops == 4 * 2 * 8 * 8 * 4 * 16
+
+    # Cross attention (different key length) gets explicit FLOPs.
+    kv = jnp.ones((2, 4, 32, 16))
+    (cross,) = JaxAdapter().operations(lambda q, k, v: sdpa.bind(q, k, v), (q, kv, kv))
+    scores = 2 * 4 * 8 * 32
+    assert estimate_operation(cross).flops == 4 * scores * 16 + 5 * scores
