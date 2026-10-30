@@ -88,6 +88,7 @@ flowchart LR
 | `swiglu` | Gated linear unit with Swish activation |
 | `pooling` | Max / average / global-average pooling |
 | `moe` | Mixture-of-Experts sparse routing and expert FFN execution |
+| `gather` / `scatter` | Indexed reads and in-place indexed updates; only touched elements count as traffic |
 | `custom` | Caller-supplied explicit FLOP count |
 
 Adapters automatically emit the right kind for each layer type:
@@ -96,7 +97,7 @@ Adapters automatically emit the right kind for each layer type:
 |---|---|
 | **PyTorch** | `Linear`, `Conv2d`, `Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, `BatchNorm1d/2d` |
 | **TensorFlow** | `Dense`, `Conv2D`, `Embedding`, `GRU`, `LSTM`, `MultiHeadAttention`, `BatchNormalization`, `LayerNormalization`, pooling layers |
-| **JAX** | `dot_general` (matmul), `conv_general_dilated` (conv2d), common elementwise jaxpr primitives |
+| **JAX** | `dot_general` (matmul), `conv_general_dilated` (conv2d), elementwise/comparison/reduction primitives, `gather`/`scatter`/`dynamic_slice`/`dynamic_update_slice`, and `scan`/`while`/`cond` bodies |
 
 ## Analyze portable operations
 
@@ -564,13 +565,25 @@ measurement = TorchAdapter().benchmark(model, *inputs)
 synchronizes CUDA benchmarks.  Its `trace` method uses `torch.profiler` and
 returns aggregate profiler-event and CUDA allocator statistics.
 `TensorFlowAdapter` captures the equivalent Keras layers and returns supported
-TensorFlow GPU allocator statistics.  `JaxAdapter` traces conventional
-`dot_general`, `conv_general_dilated`, and common elementwise jaxpr primitives
-and waits for asynchronous device work during benchmarks.  All adapters are
-optional imports:
+TensorFlow GPU allocator statistics.  `JaxAdapter` traces `dot_general`,
+`conv_general_dilated`, elementwise, comparison and reduction primitives, and
+indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
+`dynamic_update_slice`), and waits for asynchronous device work during
+benchmarks.  All adapters are optional imports:
 
 ```python
 from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchAdapter
+```
+
+`JaxAdapter` recurses into `scan` (scaled by its static length), `cond` (most
+expensive branch) and `while_loop`.  A counted `while i < N` loop with literal
+bounds is inferred; for data-dependent loops (tree search, environment
+rollouts) supply the trip count:
+
+```python
+adapter = JaxAdapter(trip_counts={0: 16}, default_trip_count=8)
+ops = adapter.operations(search_fn, (obs, params))
+adapter.while_trip_counts  # [(16, "user"), (8, "default"), ...] in trace order
 ```
 
 ## E2E architecture comparison

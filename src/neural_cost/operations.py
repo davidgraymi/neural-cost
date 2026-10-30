@@ -24,6 +24,8 @@ OperationKind = Literal[
     "moe",
     "paged_attention",
     "state_space_model",
+    "gather",
+    "scatter",
 ]
 
 
