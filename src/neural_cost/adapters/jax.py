@@ -6,6 +6,7 @@ from statistics import median
 from time import perf_counter_ns
 from typing import Any
 
+from ..coverage import Coverage
 from ..operations import Operation, numel
 from ..profiler import Measurement
 from .base import FrameworkAdapter
@@ -240,6 +241,7 @@ class JaxAdapter(FrameworkAdapter):
         self.default_trip_count = default_trip_count
         self.warnings: list[str] = []
         self.while_trip_counts: list[tuple[int, str]] = []
+        self.coverage: Coverage | None = None
 
     def operations(self, model: Any, example_inputs: Sequence[Any]) -> Sequence[Operation]:
         try:
@@ -250,6 +252,8 @@ class JaxAdapter(FrameworkAdapter):
         jaxpr = closed.jaxpr
         self.warnings = []
         self.while_trip_counts = []
+        self._modeled = self._free = self._unmodeled_bytes = 0
+        self._unmodeled: list[str] = []
 
         # Flattened invars follow the pytree leaves of each positional argument.
         leaf_counts = [len(jax.tree.leaves(arg)) for arg in example_inputs]
@@ -275,6 +279,9 @@ class JaxAdapter(FrameworkAdapter):
         operations: list[Operation] = []
         counter = [0]
         self._walk(jaxpr, param_vars, 1, operations, counter)
+        self.coverage = Coverage.from_counts(
+            self._modeled, self._free, self._unmodeled, self._unmodeled_bytes
+        )
         return operations
 
     def _walk(
@@ -326,130 +333,148 @@ class JaxAdapter(FrameworkAdapter):
                         operations.extend(collected)
                 continue
 
-            if primitive in _PASSTHROUGH_PRIMITIVES and equation.invars:
-                source = equation.invars[0]
-                if id(source) in param_vars:
-                    for out in equation.outvars:
-                        param_vars[id(out)] = param_vars[id(source)]
-                continue
+            before = len(operations)
+            if self._translate(equation, index, param_vars, repeat, operations) == "free":
+                self._free += 1
+            elif len(operations) > before:
+                self._modeled += 1
+            else:
+                self._unmodeled.append(primitive)
+                self._unmodeled_bytes += repeat * sum(_aval_bytes(v) for v in equation.outvars)
 
-            in_avals = [value.aval for value in equation.invars if hasattr(value, "aval")]
-            out_avals = [value.aval for value in equation.outvars if hasattr(value, "aval")]
-            if not out_avals or not hasattr(out_avals[0], "shape"):
-                continue
-            input_shapes = tuple(
-                tuple(int(d) for d in aval.shape) for aval in in_avals if hasattr(aval, "shape")
+    def _translate(
+        self,
+        equation: Any,
+        index: int,
+        param_vars: dict[int, tuple[int, int]],
+        repeat: int,
+        operations: list[Operation],
+    ) -> str | None:
+        """Append operations for one leaf equation; return ``"free"`` for zero-cost ones."""
+        primitive = equation.primitive.name
+        if primitive in _PASSTHROUGH_PRIMITIVES and equation.invars:
+            source = equation.invars[0]
+            if id(source) in param_vars:
+                for out in equation.outvars:
+                    param_vars[id(out)] = param_vars[id(source)]
+            return "free"
+
+        in_avals = [value.aval for value in equation.invars if hasattr(value, "aval")]
+        out_avals = [value.aval for value in equation.outvars if hasattr(value, "aval")]
+        if not out_avals or not hasattr(out_avals[0], "shape"):
+            return "free"
+        input_shapes = tuple(
+            tuple(int(d) for d in aval.shape) for aval in in_avals if hasattr(aval, "shape")
+        )
+        output_shape = tuple(int(d) for d in out_avals[0].shape)
+        if any(d <= 0 for shape in (*input_shapes, output_shape) for d in shape):
+            return "free"
+        dtype_bytes = int(out_avals[0].dtype.itemsize)
+        base_attrs: dict[str, Any] = {"repeat": repeat} if repeat > 1 else {}
+
+        if primitive == "dot_general" and len(input_shapes) == 2:
+            attrs = dict(base_attrs)
+            attrs["flops"] = _dot_general_flops(
+                input_shapes[0], input_shapes[1], equation.params["dimension_numbers"]
             )
-            output_shape = tuple(int(d) for d in out_avals[0].shape)
-            if any(d <= 0 for shape in (*input_shapes, output_shape) for d in shape):
-                continue
-            dtype_bytes = int(out_avals[0].dtype.itemsize)
-            base_attrs: dict[str, Any] = {"repeat": repeat} if repeat > 1 else {}
-
-            if primitive == "dot_general" and len(input_shapes) == 2:
-                attrs = dict(base_attrs)
-                attrs["flops"] = _dot_general_flops(
-                    input_shapes[0], input_shapes[1], equation.params["dimension_numbers"]
-                )
-                for position in (1, 0):
-                    entry = param_vars.get(id(equation.invars[position]))
-                    if entry is not None:
-                        attrs["parameter_id"], attrs["parameter_bytes"] = entry
-                        break
-                operations.append(
-                    Operation(
-                        f"dot_{index}", "matmul", input_shapes, output_shape, dtype_bytes, attrs
-                    )
-                )
-            elif primitive == "conv_general_dilated" and len(input_shapes) == 2:
-                lhs, rhs = input_shapes
-                if len(lhs) != 4 or len(rhs) != 4 or len(output_shape) != 4:
-                    continue
-                numbers = equation.params.get("dimension_numbers")
-                if numbers is not None and hasattr(numbers, "lhs_spec"):
-                    lhs = tuple(lhs[i] for i in numbers.lhs_spec)
-                    rhs = tuple(rhs[i] for i in numbers.rhs_spec)
-                    out = tuple(output_shape[i] for i in numbers.out_spec)
-                else:
-                    out = output_shape
-                attrs = dict(base_attrs)
-                attrs["groups"] = int(equation.params.get("feature_group_count", 1))
-                entry = param_vars.get(id(equation.invars[1]))
+            for position in (1, 0):
+                entry = param_vars.get(id(equation.invars[position]))
                 if entry is not None:
                     attrs["parameter_id"], attrs["parameter_bytes"] = entry
-                operations.append(
-                    Operation(f"conv_{index}", "conv2d", (lhs, rhs), out, dtype_bytes, attrs)
+                    break
+            operations.append(
+                Operation(f"dot_{index}", "matmul", input_shapes, output_shape, dtype_bytes, attrs)
+            )
+        elif primitive == "conv_general_dilated" and len(input_shapes) == 2:
+            lhs, rhs = input_shapes
+            if len(lhs) != 4 or len(rhs) != 4 or len(output_shape) != 4:
+                return None
+            numbers = equation.params.get("dimension_numbers")
+            if numbers is not None and hasattr(numbers, "lhs_spec"):
+                lhs = tuple(lhs[i] for i in numbers.lhs_spec)
+                rhs = tuple(rhs[i] for i in numbers.rhs_spec)
+                out = tuple(output_shape[i] for i in numbers.out_spec)
+            else:
+                out = output_shape
+            attrs = dict(base_attrs)
+            attrs["groups"] = int(equation.params.get("feature_group_count", 1))
+            entry = param_vars.get(id(equation.invars[1]))
+            if entry is not None:
+                attrs["parameter_id"], attrs["parameter_bytes"] = entry
+            operations.append(
+                Operation(f"conv_{index}", "conv2d", (lhs, rhs), out, dtype_bytes, attrs)
+            )
+        elif primitive in {"gather", "dynamic_slice", "slice"}:
+            operand = input_shapes[0] if input_shapes else output_shape
+            indices = input_shapes[1] if primitive == "gather" and len(input_shapes) > 1 else ()
+            attrs = dict(base_attrs)
+            attrs["index_bytes"] = sum(_aval_bytes(var) for var in equation.invars[1:])
+            operations.append(
+                Operation(
+                    f"{primitive}_{index}",
+                    "gather",
+                    (operand, indices or (1,)),
+                    output_shape,
+                    dtype_bytes,
+                    attrs,
                 )
-            elif primitive in {"gather", "dynamic_slice", "slice"}:
-                operand = input_shapes[0] if input_shapes else output_shape
-                indices = input_shapes[1] if primitive == "gather" and len(input_shapes) > 1 else ()
-                attrs = dict(base_attrs)
-                attrs["index_bytes"] = sum(_aval_bytes(var) for var in equation.invars[1:])
-                operations.append(
-                    Operation(
-                        f"{primitive}_{index}",
-                        "gather",
-                        (operand, indices or (1,)),
-                        output_shape,
-                        dtype_bytes,
-                        attrs,
-                    )
+            )
+        elif primitive == "dynamic_update_slice" or primitive.startswith("scatter"):
+            if primitive == "dynamic_update_slice":
+                if len(input_shapes) < 2:
+                    return None
+                operand, updates = input_shapes[0], input_shapes[1] or (1,)
+                index_vars = equation.invars[2:]
+            else:
+                if len(input_shapes) < 3:
+                    return None
+                operand, updates = input_shapes[0], input_shapes[2] or (1,)
+                index_vars = equation.invars[1:2]
+            attrs = dict(base_attrs)
+            attrs["index_bytes"] = sum(_aval_bytes(var) for var in index_vars)
+            if primitive in _COMBINING_SCATTERS:
+                attrs["combine"] = 1
+            operations.append(
+                Operation(
+                    f"{primitive}_{index}",
+                    "scatter",
+                    (operand, (1,), updates),
+                    output_shape,
+                    dtype_bytes,
+                    attrs,
                 )
-            elif primitive == "dynamic_update_slice" or primitive.startswith("scatter"):
-                if primitive == "dynamic_update_slice":
-                    if len(input_shapes) < 2:
-                        continue
-                    operand, updates = input_shapes[0], input_shapes[1] or (1,)
-                    index_vars = equation.invars[2:]
-                else:
-                    if len(input_shapes) < 3:
-                        continue
-                    operand, updates = input_shapes[0], input_shapes[2] or (1,)
-                    index_vars = equation.invars[1:2]
-                attrs = dict(base_attrs)
-                attrs["index_bytes"] = sum(_aval_bytes(var) for var in index_vars)
-                if primitive in _COMBINING_SCATTERS:
-                    attrs["combine"] = 1
-                operations.append(
-                    Operation(
-                        f"{primitive}_{index}",
-                        "scatter",
-                        (operand, (1,), updates),
-                        output_shape,
-                        dtype_bytes,
-                        attrs,
-                    )
+            )
+        elif primitive in _DATA_MOVEMENT_PRIMITIVES:
+            attrs = dict(base_attrs)
+            attrs["flops_per_element"] = 0
+            operations.append(
+                Operation(
+                    f"{primitive}_{index}",
+                    "elementwise",
+                    input_shapes,
+                    output_shape,
+                    dtype_bytes,
+                    attrs,
                 )
-            elif primitive in _DATA_MOVEMENT_PRIMITIVES:
-                attrs = dict(base_attrs)
-                attrs["flops_per_element"] = 0
-                operations.append(
-                    Operation(
-                        f"{primitive}_{index}",
-                        "elementwise",
-                        input_shapes,
-                        output_shape,
-                        dtype_bytes,
-                        attrs,
-                    )
+            )
+        elif primitive in _ELEMENTWISE_PRIMITIVES:
+            attrs = dict(base_attrs)
+            for var in equation.invars:  # e.g. a bias add or norm scale
+                entry = param_vars.get(id(var))
+                if entry is not None:
+                    attrs["parameter_id"], attrs["parameter_bytes"] = entry
+                    break
+            operations.append(
+                Operation(
+                    f"{primitive}_{index}",
+                    "elementwise",
+                    input_shapes,
+                    output_shape,
+                    dtype_bytes,
+                    attrs,
                 )
-            elif primitive in _ELEMENTWISE_PRIMITIVES:
-                attrs = dict(base_attrs)
-                for var in equation.invars:  # e.g. a bias add or norm scale
-                    entry = param_vars.get(id(var))
-                    if entry is not None:
-                        attrs["parameter_id"], attrs["parameter_bytes"] = entry
-                        break
-                operations.append(
-                    Operation(
-                        f"{primitive}_{index}",
-                        "elementwise",
-                        input_shapes,
-                        output_shape,
-                        dtype_bytes,
-                        attrs,
-                    )
-                )
+            )
+        return None
 
     def _while_trip_count(self, equation: Any, index: int) -> int:
         ordinal = len(self.while_trip_counts)

@@ -6,9 +6,25 @@ from statistics import median
 from time import perf_counter_ns
 from typing import Any
 
+from ..coverage import Coverage
 from ..operations import Operation
 from ..profiler import Measurement
 from .base import FrameworkAdapter
+
+# Leaf modules with no compulsory cost in inference (eval-mode dropout is identity).
+_FREE_MODULES = frozenset(
+    {
+        "Identity",
+        "Flatten",
+        "Unflatten",
+        "Dropout",
+        "Dropout1d",
+        "Dropout2d",
+        "Dropout3d",
+        "AlphaDropout",
+        "FeatureAlphaDropout",
+    }
+)
 
 # ATen kernels that correspond to operations the hook adapter captures
 # (contractions, normalization, attention, embedding, pooling, RNN cells).
@@ -68,6 +84,7 @@ class TorchAdapter(FrameworkAdapter):
 
     def __init__(self, use_profiler: bool = True) -> None:
         self.use_profiler = use_profiler
+        self.coverage: Coverage | None = None
 
     def operations(self, model: Any, example_inputs: Sequence[Any]) -> Sequence[Operation]:
         try:
@@ -289,6 +306,21 @@ class TorchAdapter(FrameworkAdapter):
         def exit_mha(*_args: Any) -> None:
             mha_depth[0] -= 1
 
+        # Coverage: every tracked module, plus leaf modules outside tracked
+        # subtrees, is a unit; record which ones actually execute.
+        units: dict[int, tuple[str, bool]] = {}
+        called: set[int] = set()
+        tracked_prefixes: list[str] = []
+        for name, module in model.named_modules():
+            tracked = isinstance(module, _TRACKED) or module.__class__.__name__ == "RMSNorm"
+            if any(name.startswith(prefix + ".") for prefix in tracked_prefixes):
+                continue
+            if tracked:
+                tracked_prefixes.append(name)
+            if tracked or not any(True for _ in module.children()):
+                units[id(module)] = (module.__class__.__name__, tracked)
+                hooks.append(module.register_forward_hook(lambda mod, *_: called.add(id(mod))))
+
         for name, module in model.named_modules():
             if isinstance(module, _TRACKED) or module.__class__.__name__ == "RMSNorm":
                 if isinstance(module, torch.nn.MultiheadAttention):
@@ -350,6 +382,18 @@ class TorchAdapter(FrameworkAdapter):
             for registered_hook in hooks:
                 registered_hook.remove()
             model.train(was_training)
+        modeled = free = 0
+        unmodeled: list[str] = []
+        for key, (class_name, tracked) in units.items():
+            if key not in called:
+                continue
+            if tracked:
+                modeled += 1
+            elif class_name in _FREE_MODULES:
+                free += 1
+            else:
+                unmodeled.append(class_name)
+        self.coverage = Coverage.from_counts(modeled, free, unmodeled, unit="modules")
         return captured
 
     def count_kernels(self, model: Any, example_inputs: Sequence[Any]) -> int:
