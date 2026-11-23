@@ -177,6 +177,10 @@ When you report results, always state:
   interquartile range over the median). If `measurement.noise_warning()` is
   not `None` (spread above 10 %), say the timing is noisy and rerun with more
   warmup and repeats before drawing conclusions,
+- for sub-millisecond workloads, whether samples were single calls or batched
+  (`measurement.calls_per_sample`). If `measurement.sync_overhead_warning()`
+  is not `None`, the median is mostly device-sync latency: rerun with
+  `min_sample_seconds=1e-3` before quoting a roofline efficiency,
 - **the coverage**. Never quote a roofline efficiency without saying how much
   of the workload it covers, e.g. "59% roofline efficiency over 100% of 257
   traced equations".

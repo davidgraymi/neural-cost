@@ -397,6 +397,10 @@ def attribute_gap(
             "no calibration supplied: peak_derate and dispatch are 0 and fold into residual; "
             "pass adapter.calibrate() or fit_cost_model() for a full attribution."
         )
+    calls = getattr(measurement, "calls_per_sample", 1) or 1
+    if calibration is not None and calls > 1:
+        # Batched samples sync once per ``calls`` invocations, not once per call.
+        dispatch = max(0.0, dispatch - calibration.call_overhead_seconds * (1 - 1 / calls))
     level4 = level3 + dispatch
 
     level5 = level4

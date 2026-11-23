@@ -700,7 +700,13 @@ class TorchAdapter(FrameworkAdapter):
         )
 
     def benchmark(
-        self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
+        self,
+        function: Any,
+        *args: Any,
+        warmup: int = 3,
+        repeats: int = 10,
+        min_sample_seconds: float | None = None,
+        **kwargs: Any,
     ) -> Measurement:
         """Time ``function`` and collect device memory and profiler telemetry.
 
@@ -709,11 +715,19 @@ class TorchAdapter(FrameworkAdapter):
         that would otherwise inflate the latency.  With ``use_profiler=True``
         a second, separate profiled pass of ``repeats`` iterations fills in
         ``trace_event_count``, ``trace_device_time_seconds`` and, on CPU, the
-        peak memory.
+        peak memory.  ``min_sample_seconds`` batches short calls into longer
+        samples (see :func:`neural_cost.profiler.timed_samples`).
         """
         from dataclasses import replace
 
-        timed = self._time(function, *args, warmup=warmup, repeats=repeats, **kwargs)
+        timed = self._time(
+            function,
+            *args,
+            warmup=warmup,
+            repeats=repeats,
+            min_sample_seconds=min_sample_seconds,
+            **kwargs,
+        )
         if not getattr(self, "use_profiler", True):
             return timed
         traced = self.trace(function, *args, warmup=0, repeats=repeats, **kwargs)
@@ -731,15 +745,23 @@ class TorchAdapter(FrameworkAdapter):
         )
 
     def _time(
-        self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
+        self,
+        function: Any,
+        *args: Any,
+        warmup: int = 3,
+        repeats: int = 10,
+        min_sample_seconds: float | None = None,
+        **kwargs: Any,
     ) -> Measurement:
         """Synchronized wall-clock timing with no profiler attached.
 
-        CUDA reports allocator counters reset before the run.  MPS reports
-        the GPU time of each iteration from ``torch.mps.Event`` pairs; it has
-        no peak counter, so only current and driver memory are reported.
+        CUDA reports allocator counters reset after warmup.  MPS reports the
+        GPU time of each sample from ``torch.mps.Event`` pairs; it has no peak
+        counter, so only current and driver memory are reported.
         """
         import torch
+
+        from ..profiler import timed_samples
 
         if warmup < 0 or repeats < 1:
             raise ValueError("warmup must be non-negative and repeats must be at least one")
@@ -752,20 +774,15 @@ class TorchAdapter(FrameworkAdapter):
         sync()
         if kind == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
-        samples: list[float] = []
-        device_seconds = 0.0
         timer = _MpsTimer(torch) if kind == "mps" else None
-        for _ in range(repeats):
-            if timer is not None:
-                timer.start()
-            start = perf_counter_ns()
-            function(*args, **kwargs)
-            if timer is not None:
-                timer.stop()
-            sync()
-            samples.append((perf_counter_ns() - start) / 1_000_000_000)
-            if timer is not None:
-                device_seconds += timer.seconds()
+        samples, calls, overhead = timed_samples(
+            lambda: function(*args, **kwargs),
+            lambda output: sync(),
+            warmup=0,
+            repeats=repeats,
+            min_sample_seconds=min_sample_seconds,
+            hooks=timer,
+        )
         peak = allocated = reserved = None
         if kind == "cuda":
             peak = torch.cuda.max_memory_allocated(device)
@@ -781,7 +798,10 @@ class TorchAdapter(FrameworkAdapter):
             str(device or "cpu"),
             allocated,
             reserved,
-            trace_device_time_seconds=device_seconds if timer is not None else None,
+            # GPU time for ``repeats`` calls, like the profiler's figure.
+            trace_device_time_seconds=timer.total / calls if timer is not None else None,
+            calls_per_sample=calls,
+            sync_overhead_seconds=overhead,
         )
 
     def trace(
@@ -882,11 +902,17 @@ def _synchronizer(torch: Any, device: Any) -> Any:
 
 
 class _MpsTimer:
-    """GPU time of one iteration from a pair of ``torch.mps.Event`` markers."""
+    """GPU time of each sample from a pair of ``torch.mps.Event`` markers.
+
+    Used as :func:`neural_cost.profiler.timed_samples` hooks: the events
+    bracket the calls of one sample, and ``done`` reads the elapsed GPU time
+    once the sample's work has finished.
+    """
 
     def __init__(self, torch: Any) -> None:
         self._begin = torch.mps.Event(enable_timing=True)
         self._end = torch.mps.Event(enable_timing=True)
+        self.total = 0.0
 
     def start(self) -> None:
         self._begin.record()
@@ -894,9 +920,9 @@ class _MpsTimer:
     def stop(self) -> None:
         self._end.record()
 
-    def seconds(self) -> float:
+    def done(self) -> None:
         self._end.synchronize()
-        return self._begin.elapsed_time(self._end) / 1_000
+        self.total += self._begin.elapsed_time(self._end) / 1_000
 
 
 def _cpu_allocation_high_water(trace: Any) -> int | None:

@@ -655,6 +655,17 @@ exceeds 10 %, `measurement.noise_warning()` returns a message and
 `analyze_gap` adds it to the findings, because a noisy median makes any
 efficiency figure unreliable.
 
+Each sample normally times one call plus a wait for the device: the latency
+of a single invocation.  For short kernels that wait dominates (about 280 µs
+per call on Apple MPS for a 6 µs kernel), so every adapter also measures
+`sync_overhead_seconds` (one synchronised call minus the per-call time of
+back-to-back calls).  When it exceeds 10 % of the median,
+`sync_overhead_warning()` fires and joins the `analyze_gap` findings.  Pass
+`min_sample_seconds=1e-3` to `benchmark()` (or `--min-sample-ms 1` to
+`neural-cost benchmark`) to time back-to-back calls until each sample lasts
+at least that long; samples are divided by `calls_per_sample`, which
+`attribute_gap` uses to amortize the per-call sync in its dispatch term.
+
 All adapters are optional imports:
 
 ```python
