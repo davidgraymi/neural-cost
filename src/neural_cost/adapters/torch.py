@@ -786,13 +786,12 @@ class TorchAdapter(FrameworkAdapter):
             peak = torch.cuda.max_memory_allocated(device)
             allocated = torch.cuda.memory_allocated(device)
             reserved = torch.cuda.max_memory_reserved(device)
-            device_time = sum(event.cuda_time_total for event in events) / 1_000_000
-            event_count = sum(event.cuda_time_total > 0 for event in events)
+            device_time, event_count = _trace_device_totals(events)
         elif is_mps:
             peak = torch.mps.current_allocated_memory()
             allocated = peak
             reserved = torch.mps.driver_allocated_memory()
-            device_time = sum(event.cpu_time_total for event in events) / 1_000_000
+            device_time = _trace_cpu_seconds(events)
             event_count = len(events)
         else:
             cpu_allocs = [e.cpu_memory_usage for e in events if e.cpu_memory_usage > 0]
@@ -802,7 +801,7 @@ class TorchAdapter(FrameworkAdapter):
             peak = (param_bytes + sum(cpu_allocs)) if cpu_allocs else None
             allocated = peak
             reserved = peak
-            device_time = sum(event.cpu_time_total for event in events) / 1_000_000
+            device_time = _trace_cpu_seconds(events)
             event_count = len(events)
         return Measurement(
             median(samples),
@@ -814,6 +813,39 @@ class TorchAdapter(FrameworkAdapter):
             event_count,
             device_time,
         )
+
+
+def _trace_cpu_seconds(events: Any) -> float:
+    """Total CPU time in a profiler trace, counting each op once.
+
+    ``cpu_time_total`` is inclusive: ``aten::linear`` already contains its
+    ``aten::addmm`` child, so summing it over every event counts nested time
+    repeatedly.  Self time partitions the trace without overlap.
+    """
+    return sum(event.self_cpu_time_total for event in events) / 1_000_000
+
+
+def _trace_device_totals(events: Any) -> tuple[float, int]:
+    """Device seconds and kernel-launching ops in a CUDA profiler trace.
+
+    A CPU op's ``device_time_total`` includes the kernels of all its children,
+    and the kernels may also appear as events of their own.  Summing the self
+    device time of CPU-side ops attributes each kernel to exactly one op.
+    """
+    import torch
+
+    cpu = torch.autograd.DeviceType.CPU
+    seconds = 0.0
+    launching_ops = 0
+    for event in events:
+        if getattr(event, "device_type", cpu) != cpu:
+            continue  # the kernel itself; already counted under the op that launched it
+        own = getattr(event, "self_device_time_total", None)
+        if own is None:  # torch < 2.4
+            own = event.self_cuda_time_total
+        seconds += own
+        launching_ops += own > 0
+    return seconds / 1_000_000, launching_ops
 
 
 class TorchFxAdapter(TorchAdapter):
