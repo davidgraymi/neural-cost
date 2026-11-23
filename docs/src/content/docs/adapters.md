@@ -26,7 +26,12 @@ CUDA reports allocator peak, current and reserved bytes; MPS reports GPU time
 from `torch.mps.Event` pairs and current/driver memory (it has no peak counter).
 `TensorFlowAdapter` captures the equivalent Keras layers, waits for every
 device after each benchmark call (`tf.test.experimental.sync_devices`), and
-returns peak and current allocator bytes for the GPU holding the inputs.  `JaxAdapter` traces `dot_general`,
+returns peak and current allocator bytes for the GPU holding the inputs.
+On accelerators, `JaxAdapter` and `TensorFlowAdapter` then run a separate pass
+under `jax.profiler` / `tf.profiler` and report `trace_device_time_seconds`:
+the time each device had a kernel running, with overlapping streams merged
+and idle gaps excluded (`trace_device_time=False` skips the pass).  CPU runs
+have no device timeline, so the field stays `None` there.  `JaxAdapter` traces `dot_general`,
 `conv_general_dilated`, elementwise, comparison and reduction primitives, and
 indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
 `dynamic_update_slice`), and waits for asynchronous device work during

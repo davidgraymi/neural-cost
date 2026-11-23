@@ -163,9 +163,17 @@ def _keras_conv_operations(
 
 
 class TensorFlowAdapter(FrameworkAdapter):
-    """Capture Keras layer calls (dense, convolution, pooling, ...) through temporary hooks."""
+    """Capture Keras layer calls (dense, convolution, pooling, ...) through temporary hooks.
+
+    On a GPU :meth:`benchmark` runs a second, separate pass under
+    ``tf.profiler`` to report device busy time; ``trace_device_time=False``
+    skips it.
+    """
 
     name = "tensorflow"
+
+    def __init__(self, trace_device_time: bool = True) -> None:
+        self.trace_device_time = trace_device_time
 
     def operations(self, model: Any, example_inputs: Sequence[Any]) -> Sequence[Operation]:
         try:
@@ -513,12 +521,17 @@ class TensorFlowAdapter(FrameworkAdapter):
                 info = tf.config.experimental.get_memory_info(memory_device)
             except (RuntimeError, ValueError):
                 pass
+        traced = None
+        if memory_device is not None and getattr(self, "trace_device_time", True):
+            traced = _profile_device_time(tf, function, args, kwargs, repeats, sync)
         return Measurement(
             median(samples),
             tuple(samples),
             info.get("peak"),
             memory_device or "cpu",
             info.get("current"),
+            trace_event_count=traced.event_count if traced else None,
+            trace_device_time_seconds=traced.total_seconds if traced else None,
         )
 
 
@@ -550,3 +563,34 @@ def _input_gpu(tf: Any, args: Sequence[Any], kwargs: dict[str, Any]) -> str | No
         if "CPU:" in name.upper():
             return None
     return "GPU:0"
+
+
+def _profile_device_time(
+    tf: Any,
+    function: Any,
+    args: Sequence[Any],
+    kwargs: dict[str, Any],
+    repeats: int,
+    sync: Any,
+) -> Any:
+    """GPU busy time over ``repeats`` calls, from a ``tf.profiler`` trace.
+
+    Runs after the timed loop so profiler overhead never reaches the samples.
+    Returns ``None`` when profiling fails (for example a session is already
+    running) or the trace has no GPU timeline.
+    """
+    import tempfile
+
+    from ..xspace import read_trace_dir
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        try:
+            tf.profiler.experimental.start(log_dir)
+        except (RuntimeError, ValueError, tf.errors.OpError):
+            return None
+        try:
+            for _ in range(repeats):
+                sync(function(*args, **kwargs))
+        finally:
+            tf.profiler.experimental.stop()
+        return read_trace_dir(log_dir, parser="tensorflow")

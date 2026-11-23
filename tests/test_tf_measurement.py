@@ -67,6 +67,8 @@ def test_peak_reset_after_warmup(monkeypatch, tf):
         events.append("call")
         return a
 
-    meas = TensorFlowAdapter().benchmark(run, tf.ones(2), warmup=2, repeats=2)
+    meas = TensorFlowAdapter(trace_device_time=False).benchmark(
+        run, tf.ones(2), warmup=2, repeats=2
+    )
     assert events == ["call", "call", "reset", "call", "call", "read"]
     assert (meas.peak_memory_bytes, meas.allocated_memory_bytes, meas.device) == (10, 4, "GPU:0")
