@@ -63,6 +63,7 @@ def test_cpu_device_skips_apple_gpu_table(_apple, _nvidia, _cpu, _sysctl):
     assert cpu.peak_flops > 4 * 4.05e9 * 32 + 4 * 2.75e9 * 16
     # Unified memory: the chip's bandwidth bounds the CPU too.
     assert cpu.memory_bandwidth == 100e9
+    assert "CPU estimate" in detection.source
 
 
 @patch("neural_cost.hardware_detect._sysctl_int", side_effect={"hw.perflevel0.physicalcpu": 4}.get)
@@ -76,7 +77,6 @@ def test_apple_cpu_bandwidth_is_not_the_single_threaded_triad(_bw, _apple, _nvid
     cpu, detection = detect_hardware(device="cpu")
     assert cpu.memory_bandwidth == 100e9
     assert detection.measured_bandwidth_gb_s == 41.0
-    assert "CPU estimate" in detection.source
 
 
 @patch("neural_cost.hardware_detect._probe_apple_silicon", return_value=APPLE_M3)
