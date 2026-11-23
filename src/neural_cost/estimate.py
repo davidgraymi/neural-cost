@@ -76,12 +76,72 @@ def estimate_conv2d(
     return 2 * numel(output_shape) * kernel_shape[1] * kernel_shape[2] * kernel_shape[3]
 
 
+def _keys_at_or_before(start: int, stop: int, kv_len: int) -> int:
+    """Sum of ``clamp(p + 1, 0, kv_len)`` for absolute positions ``start <= p < stop``.
+
+    ``clamp(p + 1, 0, kv_len)`` counts the keys at positions ``0..p``.
+    """
+    total = 0
+    # Positions 0 <= p < kv_len contribute p + 1.
+    lo, hi = max(start, 0), min(stop, kv_len)
+    if hi > lo:
+        total += (lo + 1 + hi) * (hi - lo) // 2
+    # Positions p >= kv_len see every key.
+    lo = max(start, kv_len)
+    if stop > lo:
+        total += (stop - lo) * kv_len
+    return total
+
+
+def attention_visible_pairs(
+    q_len: int,
+    kv_len: int,
+    *,
+    causal: bool = False,
+    window: int | None = None,
+    q_offset: int | None = None,
+) -> int:
+    """Number of (query, key) pairs one head actually scores.
+
+    Dense attention scores ``q_len × kv_len`` pairs.  With ``causal=True`` the
+    query at absolute position ``p`` sees keys ``0..p``; with a sliding
+    ``window`` of ``w`` it sees only keys ``p-w+1..p``.  ``q_offset`` is the
+    absolute position of the first query.  The default, ``kv_len - q_len``,
+    aligns queries to the end of the keys (FlashAttention, KV-cache decode);
+    ``0`` is PyTorch ``scaled_dot_product_attention(is_causal=True)``'s
+    top-left alignment.  The two agree when ``q_len == kv_len``.
+    """
+    if q_len < 0 or kv_len < 0:
+        raise ValueError("q_len and kv_len must be non-negative")
+    if window is not None and window <= 0:
+        raise ValueError("window must be a positive integer")
+    if window is not None and not causal:
+        raise ValueError("window requires causal=True")
+    if not causal:
+        return q_len * kv_len
+    offset = kv_len - q_len if q_offset is None else q_offset
+    start, stop = offset, offset + q_len
+    visible = _keys_at_or_before(start, stop, kv_len)
+    if window is not None:
+        visible -= _keys_at_or_before(start - window, stop - window, kv_len)
+    return visible
+
+
 def attention_flop_parts(operation: Operation) -> tuple[int, int, int]:
     """Split multi-head attention FLOPs into (projections, QKᵀ + AV, softmax).
 
-    Projections: 4 linear maps (Q, K, V, output) = 4 × 2 × B·T × D × proj_dim.
-    Scores and weighted sum: 2 × (2 × B·T × T × H·head_dim).
-    Softmax: 5 × B·T × H × T.
+    With ``L`` queries, ``S`` keys and ``P`` scored pairs per head
+    (``L × S`` unless masked, see :func:`attention_visible_pairs`):
+
+    Projections: Q and output over B·L tokens, K and V over B·S tokens,
+    each 2 × D × proj_dim per token.
+    Scores and weighted sum: 2 × (2 × B·H·P × head_dim).
+    Softmax: 5 × B·H·P.
+
+    Optional attrs: ``kv_len`` (default ``seq_len``), ``causal``, ``window``
+    (sliding-window size, requires ``causal``) and ``q_offset``.  Masked pairs
+    are not useful work, so they are excluded; fused kernels such as
+    FlashAttention skip them too.
     """
     if len(operation.output) >= 4:
         b = operation.output[0]
@@ -109,9 +169,22 @@ def attention_flop_parts(operation: Operation) -> tuple[int, int, int]:
     # ``proj_dim`` is the projected width (num_heads × key_dim); it differs from the
     # model width when, e.g., Keras MultiHeadAttention uses key_dim != D / num_heads.
     proj_dim = int(operation.attrs.get("proj_dim", d))
-    proj_flops = 4 * 2 * b_t * d * proj_dim if include_projections else 0
-    attn_flops = 4 * b_t * num_heads * seq_len * head_dim
-    softmax_flops = 5 * b_t * num_heads * seq_len
+    attrs = operation.attrs
+    kv_len = int(attrs.get("kv_len", seq_len))
+    window = attrs.get("window")
+    q_offset = attrs.get("q_offset")
+    batch = b_t // seq_len if seq_len else 0
+    pairs = batch * attention_visible_pairs(
+        seq_len,
+        kv_len,
+        causal=bool(attrs.get("causal", False)),
+        window=None if window is None else int(window),
+        q_offset=None if q_offset is None else int(q_offset),
+    )
+    kv_tokens = batch * kv_len
+    proj_flops = 2 * 2 * (b_t + kv_tokens) * d * proj_dim if include_projections else 0
+    attn_flops = 4 * num_heads * pairs * head_dim
+    softmax_flops = 5 * num_heads * pairs
     return proj_flops, attn_flops, softmax_flops
 
 

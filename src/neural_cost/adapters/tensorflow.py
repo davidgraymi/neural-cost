@@ -300,6 +300,23 @@ class TensorFlowAdapter(FrameworkAdapter):
                     embed_dim = q[-1] if len(q) >= 1 else key_dim * num_heads
                     seq_len = q[-2] if len(q) >= 2 else 1
                     batch = q[0] if len(q) >= 3 else 1
+                    # call(query, value, key=None, query_mask, value_mask, key_mask,
+                    #      attention_mask, return_attention_scores, training, use_causal_mask)
+                    value = args[0] if args else kwargs.get("value")
+                    key = args[1] if len(args) > 1 else kwargs.get("key")
+                    source_kv = key if key is not None else value
+                    try:
+                        kv = shape(source_kv) if source_kv is not None else q
+                    except (ValueError, AttributeError):
+                        kv = q
+                    kv_len = kv[-2] if len(kv) >= 2 else seq_len
+                    use_causal = args[8] if len(args) > 8 else kwargs.get("use_causal_mask", False)
+                    mha_attrs: dict[str, Any] = {}
+                    if kv_len != seq_len:
+                        mha_attrs["kv_len"] = kv_len
+                    if use_causal is True:
+                        # Keras builds a top-left aligned lower-triangular mask.
+                        mha_attrs.update(causal=True, q_offset=0)
                     captured.append(
                         Operation(
                             _layer.name,
@@ -314,6 +331,7 @@ class TensorFlowAdapter(FrameworkAdapter):
                                 "proj_dim": num_heads * key_dim,
                                 "parameter_bytes": _parameter_count(_layer) * query.dtype.size,
                                 "parameter_id": id(_layer),
+                                **mha_attrs,
                             },
                         )
                     )
