@@ -380,18 +380,51 @@ def _probe_cpu_flops() -> tuple[int, float | None]:
             except (subprocess.SubprocessError, OSError, ValueError):
                 continue
 
-    # Linux /proc/cpuinfo fallback
     if clock_hz is None:
-        try:
-            with open("/proc/cpuinfo") as fh:
-                for line in fh:
-                    if "cpu MHz" in line:
-                        clock_hz = float(line.split(":")[1].strip()) * 1e6
-                        break
-        except OSError:
-            pass
+        clock_hz = _linux_max_clock_hz()
 
     return cores, clock_hz
+
+
+def _linux_max_clock_hz() -> float | None:
+    """Return the CPU's maximum clock on Linux, or None.
+
+    ``cpu MHz`` in /proc/cpuinfo is the *current* frequency, which frequency
+    scaling moves between calls (e.g. 0.8 GHz idle vs 3.1 GHz busy), so a peak
+    derived from it is not reproducible. Prefer the cpufreq maximum, then the
+    nominal clock in the model name, then the highest current per-core value.
+    """
+    import re
+
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq") as fh:
+            khz = float(fh.read().strip())
+        if khz > 0:
+            return khz * 1e3
+    except (OSError, ValueError):
+        pass
+
+    nominal_hz: float | None = None
+    current_hz: list[float] = []
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                key, _, value = line.partition(":")
+                key = key.strip()
+                if key == "model name" and nominal_hz is None:
+                    m = re.search(r"@\s*([\d.]+)\s*GHz", value)
+                    if m:
+                        nominal_hz = float(m.group(1)) * 1e9
+                elif key == "cpu MHz":
+                    try:
+                        current_hz.append(float(value.strip()) * 1e6)
+                    except ValueError:
+                        continue
+    except OSError:
+        return None
+
+    candidates = [hz for hz in (nominal_hz, max(current_hz, default=None)) if hz]
+    return max(candidates) if candidates else None
 
 
 # ---------------------------------------------------------------------------

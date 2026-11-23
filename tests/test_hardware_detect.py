@@ -4,6 +4,7 @@ from unittest.mock import patch
 from neural_cost.hardware import HardwareSpec
 from neural_cost.hardware_detect import (
     DetectionResult,
+    _linux_max_clock_hz,
     _measure_bandwidth_gb_s,
     _probe_apple_silicon,
     _probe_cpu_flops,
@@ -76,6 +77,41 @@ class HardwareDetectTests(unittest.TestCase):
         cores, clock_hz = _probe_cpu_flops()
         self.assertEqual(cores, 4)
         self.assertEqual(clock_hz, 2400000000.0)
+
+    def _fake_open(self, files):
+        import io
+
+        def opener(path, *args, **kwargs):
+            if path in files:
+                return io.StringIO(files[path])
+            raise FileNotFoundError(path)
+
+        return opener
+
+    def test_linux_clock_prefers_cpufreq_max(self):
+        files = {
+            "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq": "3500000\n",
+            "/proc/cpuinfo": "model name\t: Intel(R) Xeon(R) CPU @ 2.40GHz\ncpu MHz\t\t: 800.000\n",
+        }
+        with patch("builtins.open", self._fake_open(files)):
+            self.assertEqual(_linux_max_clock_hz(), 3.5e9)
+
+    def test_linux_clock_ignores_idle_current_frequency(self):
+        # Without cpufreq, the idle "cpu MHz" of core 0 must not lower the peak:
+        # the nominal model-name clock or the busiest core wins.
+        cpuinfo = (
+            "model name\t: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\n"
+            "cpu MHz\t\t: 800.000\n"
+            "model name\t: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\n"
+            "cpu MHz\t\t: 3099.505\n"
+        )
+        with patch("builtins.open", self._fake_open({"/proc/cpuinfo": cpuinfo})):
+            self.assertAlmostEqual(_linux_max_clock_hz(), 3099.505e6)
+        idle_only = "model name\t: AMD EPYC 7763 64-Core Processor\ncpu MHz\t\t: 2445.430\n"
+        with patch("builtins.open", self._fake_open({"/proc/cpuinfo": idle_only})):
+            self.assertAlmostEqual(_linux_max_clock_hz(), 2445.43e6)
+        with patch("builtins.open", self._fake_open({})):
+            self.assertIsNone(_linux_max_clock_hz())
 
     @patch("neural_cost.hardware_detect._measure_bandwidth_gb_s")
     @patch("neural_cost.hardware_detect._probe_apple_silicon")
