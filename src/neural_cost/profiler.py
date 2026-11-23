@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from statistics import median
+from statistics import median, quantiles
 from time import perf_counter_ns
 from typing import Any
 
@@ -32,6 +32,34 @@ class Measurement:
         ):
             if value is not None and value < 0:
                 raise ValueError(f"{name} must be non-negative")
+
+    @property
+    def min_seconds(self) -> float:
+        """Fastest sample: the run least disturbed by other work."""
+        return min(self.samples_seconds, default=self.median_seconds)
+
+    @property
+    def relative_spread(self) -> float | None:
+        """Interquartile range of the samples divided by their median.
+
+        ``None`` with fewer than three samples, where a spread means little.
+        """
+        if len(self.samples_seconds) < 3:
+            return None
+        q1, _, q3 = quantiles(self.samples_seconds, n=4, method="inclusive")
+        return (q3 - q1) / self.median_seconds
+
+    def noise_warning(self, threshold: float = 0.10) -> str | None:
+        """A warning when the samples vary too much to trust the median."""
+        spread = self.relative_spread
+        if spread is None or spread <= threshold:
+            return None
+        return (
+            f"Noisy timing: the middle half of {len(self.samples_seconds)} samples spans "
+            f"{spread:.0%} of the median (fastest {self.min_seconds * 1e3:.3f} ms, "
+            f"median {self.median_seconds * 1e3:.3f} ms). Increase warmup and repeats, "
+            f"close other work on the device, or fix GPU clocks before comparing."
+        )
 
 
 def benchmark(

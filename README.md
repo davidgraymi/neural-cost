@@ -642,7 +642,15 @@ indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
 `dynamic_update_slice`), and waits for asynchronous device work during
 benchmarks.  Its peak memory is the allocator peak when the timed run raised
 it, otherwise (and on CPU) the peak of XLA's compiled memory plan for jitted
-functions; reserved memory is the allocator pool, never its capacity limit.  All adapters are optional imports:
+functions; reserved memory is the allocator pool, never its capacity limit.
+
+Every `Measurement` also reports `min_seconds` and `relative_spread` (the
+interquartile range of the samples divided by the median).  When the spread
+exceeds 10 %, `measurement.noise_warning()` returns a message and
+`analyze_gap` adds it to the findings, because a noisy median makes any
+efficiency figure unreliable.
+
+All adapters are optional imports:
 
 ```python
 from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchAdapter

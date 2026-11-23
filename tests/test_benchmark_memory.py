@@ -243,3 +243,28 @@ def test_torch_mps_reports_gpu_time_and_no_fake_peak() -> None:
     assert meas.peak_memory_bytes is None  # MPS has no peak counter
     assert meas.allocated_memory_bytes is not None
     assert 0 < meas.trace_device_time_seconds <= sum(meas.samples_seconds)
+
+
+def test_measurement_spread_and_noise_warning() -> None:
+    steady = Measurement(1.0, (0.99, 1.0, 1.0, 1.01, 1.0))
+    assert steady.min_seconds == 0.99
+    assert steady.relative_spread is not None and steady.relative_spread < 0.05
+    assert steady.noise_warning() is None
+
+    noisy = Measurement(1.0, (0.7, 1.0, 1.4, 0.8, 1.3))
+    assert noisy.relative_spread > 0.10
+    warning = noisy.noise_warning()
+    assert warning is not None and "Noisy timing" in warning
+
+    assert Measurement(1.0, (1.0, 2.0)).relative_spread is None  # too few samples
+
+
+def test_analyze_gap_reports_noisy_timing() -> None:
+    from neural_cost import CostEstimate, HardwareSpec, analyze_gap
+
+    hardware = HardwareSpec("test", peak_flops=1e12, memory_bandwidth=1e11)
+    estimate = CostEstimate(flops=10**9, read_bytes=10**6, write_bytes=10**6, operations=1)
+    noisy = Measurement(1e-3, (0.7e-3, 1e-3, 1.4e-3, 0.8e-3, 1.3e-3))
+    assert any("Noisy timing" in f for f in analyze_gap(estimate, noisy, hardware).findings)
+    steady = Measurement(1e-3, (1e-3,) * 5)
+    assert not any("Noisy timing" in f for f in analyze_gap(estimate, steady, hardware).findings)
