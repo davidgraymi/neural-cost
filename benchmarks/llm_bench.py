@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from benchmarks.run_info import results_dir, run_metadata
 from neural_cost import (
     HardwareSpec,
     detect_hardware,
@@ -31,6 +31,20 @@ from neural_cost import (
     estimate_paged_attention,
     estimate_speculative_decoding,
 )
+
+
+def _median_ms(fn: Any, warmup: int, repeats: int) -> float:
+    """Median latency of ``fn()`` in ms, timed exactly as users time models.
+
+    ``TorchAdapter.benchmark`` (no profiler pass) handles warmup, device sync,
+    and batches calls too short for one clock read into longer samples.
+    """
+    from neural_cost.adapters import TorchAdapter
+
+    measurement = TorchAdapter(use_profiler=False).benchmark(
+        fn, warmup=warmup, repeats=max(3, repeats), min_sample_seconds=1e-3
+    )
+    return measurement.median_seconds * 1e3
 
 
 @dataclass
@@ -101,16 +115,9 @@ def benchmark_llm_prefill(
     k = torch.randn(batch_size, num_heads, prompt_len, head_dim)
     v = torch.randn(batch_size, num_heads, prompt_len, head_dim)
 
-    # Warmup
-    for _ in range(warmup):
-        _ = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-
-    # Timing
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        _ = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-    elapsed_ns = time.perf_counter_ns() - t0
-    latency_ms = (elapsed_ns / repeats) / 1e6
+    latency_ms = _median_ms(
+        lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v), warmup, repeats
+    )
 
     # FLOPs: 4 * B * L^2 * D + projections for each layer
     attn_flops = 4 * batch_size * (prompt_len**2) * embed_dim * num_layers
@@ -155,22 +162,14 @@ def benchmark_llm_decode(
     k_cache = torch.randn(batch_size, num_heads, prompt_len, head_dim)
     v_cache = torch.randn(batch_size, num_heads, prompt_len, head_dim)
 
-    for _ in range(warmup):
-        _ = torch.nn.functional.scaled_dot_product_attention(q, k_cache, v_cache)
-
-    total_tokens_timed = 0
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        curr_len = prompt_len
+    def generate() -> Any:
+        out = None
         for _ in range(gen_tokens):
-            _ = torch.nn.functional.scaled_dot_product_attention(q, k_cache, v_cache)
-            curr_len += 1
-            total_tokens_timed += 1
-    elapsed_ns = time.perf_counter_ns() - t0
-    total_time_s = elapsed_ns / 1e9
-    latency_ms = (total_time_s / (repeats * gen_tokens)) * 1e3
+            out = torch.nn.functional.scaled_dot_product_attention(q, k_cache, v_cache)
+        return out
 
-    tokens_per_sec = total_tokens_timed / total_time_s if total_time_s > 0 else 0.0
+    latency_ms = _median_ms(generate, warmup, repeats) / gen_tokens
+    tokens_per_sec = batch_size * 1e3 / latency_ms if latency_ms > 0 else 0.0
 
     # KV cache bytes at starting prompt length
     kv_cache_bytes = 2 * batch_size * prompt_len * embed_dim * 2 * num_layers
@@ -262,14 +261,8 @@ def benchmark_moe_decode(
     model = SyntheticMoE(embed_dim, expert_hidden_dim, num_experts, top_k)
     x = torch.randn(batch_size, 1, embed_dim)
 
-    for _ in range(warmup):
-        _ = model(x)
-
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        _ = model(x)
-    elapsed_ns = time.perf_counter_ns() - t0
-    latency_ms = (elapsed_ns / repeats) / 1e6
+    with torch.no_grad():
+        latency_ms = _median_ms(lambda: model(x), warmup, repeats)
 
     tokens_per_sec = (batch_size / (latency_ms / 1e3)) if latency_ms > 0 else 0.0
 
@@ -353,27 +346,17 @@ def benchmark_speculative_decoding(
     k_target = torch.randn(batch_size, 8, prompt_len, target_head_dim)
     v_target = torch.randn(batch_size, 8, prompt_len, target_head_dim)
 
-    for _ in range(warmup):
+    sdpa = torch.nn.functional.scaled_dot_product_attention
+
+    def draft() -> Any:
+        out = None
         for _ in range(gamma):
-            _ = torch.nn.functional.scaled_dot_product_attention(q_draft, k_draft, v_draft)
-        _ = torch.nn.functional.scaled_dot_product_attention(q_verify, k_verify, v_verify)
-        _ = torch.nn.functional.scaled_dot_product_attention(q_target, k_target, v_target)
+            out = sdpa(q_draft, k_draft, v_draft)
+        return out
 
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        for _ in range(gamma):
-            _ = torch.nn.functional.scaled_dot_product_attention(q_draft, k_draft, v_draft)
-    draft_ms = ((time.perf_counter_ns() - t0) / repeats) / 1e6
-
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        _ = torch.nn.functional.scaled_dot_product_attention(q_verify, k_verify, v_verify)
-    verify_ms = ((time.perf_counter_ns() - t0) / repeats) / 1e6
-
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        _ = torch.nn.functional.scaled_dot_product_attention(q_target, k_target, v_target)
-    baseline_ms = ((time.perf_counter_ns() - t0) / repeats) / 1e6
+    draft_ms = _median_ms(draft, warmup, repeats)
+    verify_ms = _median_ms(lambda: sdpa(q_verify, k_verify, v_verify), warmup, repeats)
+    baseline_ms = _median_ms(lambda: sdpa(q_target, k_target, v_target), warmup, repeats)
 
     spec_step_ms = draft_ms + verify_ms
 
@@ -439,19 +422,13 @@ def benchmark_paged_attention(
     k_cache = torch.randn(batch_size, kv_heads, context_len, head_dim)
     v_cache = torch.randn(batch_size, kv_heads, context_len, head_dim)
 
-    # Warmup
-    for _ in range(warmup):
-        _ = torch.nn.functional.scaled_dot_product_attention(
+    latency_ms = _median_ms(
+        lambda: torch.nn.functional.scaled_dot_product_attention(
             q, k_cache, v_cache, enable_gqa=(kv_heads != num_heads)
-        )
-
-    t0 = time.perf_counter_ns()
-    for _ in range(repeats):
-        _ = torch.nn.functional.scaled_dot_product_attention(
-            q, k_cache, v_cache, enable_gqa=(kv_heads != num_heads)
-        )
-    elapsed_ns = time.perf_counter_ns() - t0
-    latency_ms = (elapsed_ns / repeats) / 1e6
+        ),
+        warmup,
+        repeats,
+    )
 
     paged_est = estimate_paged_attention(
         batch_size=batch_size,
@@ -506,8 +483,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / "benchmarks" / "results" / "llm_benchmark_data.json",
-        help="Path to save JSON results (default: benchmarks/results/llm_benchmark_data.json)",
+        default=None,
+        help="Path to save JSON results (default: benchmarks/results/<device>/llm_benchmark_data.json)",
     )
     return parser
 
@@ -536,9 +513,11 @@ def main() -> None:
         decodes.append(d_met)
         print(f"{'Decode':<10} {d_met.prompt_len:<8} {d_met.batch_size:<6} {d_met.latency_ms:8.2f} ms  {d_met.tokens_per_sec:8.1f} tok/s      {d_met.achieved_gbw:6.1f} GB/s ({d_met.memory_bw_util:.1%})")
 
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
+    output = args.output or results_dir(hardware.name) / "llm_benchmark_data.json"
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "run": run_metadata(hardware.name, script="llm_bench.py"),
             "hardware": {
                 "name": hardware.name,
                 "peak_flops": hardware.peak_flops,
@@ -547,8 +526,8 @@ def main() -> None:
             "prefill": [asdict(p) for p in prefills],
             "decode": [asdict(d) for d in decodes],
         }
-        args.output.write_text(json.dumps(payload, indent=2))
-        print(f"\nSaved {len(prefills) + len(decodes)} LLM records → {args.output}")
+        output.write_text(json.dumps(payload, indent=2))
+        print(f"\nSaved {len(prefills) + len(decodes)} LLM records → {output}")
 
 
 if __name__ == "__main__":

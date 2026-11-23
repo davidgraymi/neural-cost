@@ -249,7 +249,7 @@ dispatch.
 
 `benchmarks/validate.py` runs a grid of MLP, CNN, LSTM and Transformer
 workloads on every installed backend and writes
-[`VALIDATION_REPORT.md`](VALIDATION_REPORT.md). It scores three predictors,
+[`VALIDATION_REPORT.md`](benchmarks/results/apple-m3/VALIDATION_REPORT.md). It scores three predictors,
 and none of them is ever fit to the workload it predicts:
 
 * **Zero-shot**: microbenchmark calibration only. It never sees a model runtime.
@@ -806,12 +806,18 @@ python benchmarks/collect_gpu_data.py \
   --peak-flops 312e12 --memory-bandwidth 2.0e12
 ```
 
-Results are written to `benchmarks/results/benchmark_gpu_data.json`.
+No CUDA machine? [`benchmarks/cloud_gpu_benchmark.ipynb`](benchmarks/cloud_gpu_benchmark.ipynb)
+runs the suite on a free Colab or Kaggle GPU at a chosen commit and packages the
+results for `benchmarks/results/<device>/`.
+
+Results are written to `benchmarks/results/<device>/benchmark_gpu_data.json`
+(for example `nvidia-tesla-t4/` or `apple-m3/`), stamped with the neural-cost
+version, git commit and framework versions.
 Generate figures and the full markdown report:
 
 ```bash
 python benchmarks/generate_gpu_report.py
-# → GPU_BENCHMARK_REPORT.md + benchmarks/results/figures/gpu_fig*.png
+# → benchmarks/results/<device>/GPU_BENCHMARK_REPORT.md + figures/gpu_fig*.png
 ```
 
 ### GPU-vs-CPU crossover analysis

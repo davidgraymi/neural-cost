@@ -1,16 +1,17 @@
 """Generate figures and a markdown benchmark report from benchmark_data.json.
 
 Usage:
-    python benchmarks/generate_report.py
+    python benchmarks/generate_report.py [--results-dir benchmarks/results/<device>]
 
-Reads:   benchmarks/results/benchmark_data.json
-Writes:  benchmarks/results/figures/*.png
-         BENCHMARK_REPORT.md  (repo root)
+Reads:   <results-dir>/benchmark_data.json  (default: the most recently written one)
+Writes:  <results-dir>/figures/*.png
+         <results-dir>/BENCHMARK_REPORT.md
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 import math
 from pathlib import Path
 
@@ -26,10 +27,37 @@ from matplotlib import ticker
 # Paths
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).parent.parent
+# Set by configure() from --results-dir: benchmarks/results/<device>/.  Until
+# then (when imported, e.g. by tests) figures go to a scratch directory.
 DATA_FILE = REPO_ROOT / "benchmarks" / "results" / "benchmark_data.json"
-FIG_DIR = REPO_ROOT / "benchmarks" / "results" / "figures"
-REPORT_FILE = REPO_ROOT / "BENCHMARK_REPORT.md"
+FIG_DIR = Path(tempfile.gettempdir()) / "neural-cost-figures"
+REPORT_FILE = FIG_DIR / "BENCHMARK_REPORT.md"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def configure(results_dir: Path | None) -> None:
+    """Point every input and output at one per-device results directory."""
+    import sys
+
+    global DATA_FILE, FIG_DIR, REPORT_FILE
+    sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks.run_info import latest_results_dir
+
+    root = results_dir if results_dir is not None else latest_results_dir("benchmark_data.json")
+    DATA_FILE = root / "benchmark_data.json"
+    FIG_DIR = root / "figures"
+    REPORT_FILE = root / "BENCHMARK_REPORT.md"
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def provenance(path: Path) -> str:
+    """Report line naming the version, commit and device that produced ``path``."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks.run_info import describe_run
+
+    return f"> **Run:** {describe_run(json.loads(path.read_text()).get('run'))}\n"
 
 # ---------------------------------------------------------------------------
 # Style
@@ -623,7 +651,7 @@ def fig_memory_utilization(hw: dict, records: list[dict], batch: int | None = No
 
 def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> str:
     def rel(p: Path) -> str:
-        return str(p.relative_to(REPO_ROOT))
+        return str(p.relative_to(REPORT_FILE.parent))
 
     batches = sorted({r["batch"] for r in records})
     batch32 = 32 if 32 in batches else batches[len(batches) // 2]
@@ -892,7 +920,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path]) -> s
         )
 
     def llm_section() -> str:
-        llm_data_path = REPO_ROOT / "benchmarks" / "results" / "llm_benchmark_data.json"
+        llm_data_path = DATA_FILE.parent / "llm_benchmark_data.json"
         if not llm_data_path.exists():
             return ""
         try:
@@ -1181,6 +1209,16 @@ real model weights.
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="benchmarks/results/<device>/ to read and write (default: most recent)",
+    )
+    configure(parser.parse_args().results_dir)
     print(f"Loading data from {DATA_FILE}…")
     hw, records = load(DATA_FILE)
     print(f"  {len(records)} records  ·  {hw['name']}")
@@ -1204,7 +1242,8 @@ def main() -> None:
 
     print("Building report…")
     report = build_report(hw, records, fig_paths)
-    REPORT_FILE.write_text(report)
+    title, _, body = report.partition("\n")
+    REPORT_FILE.write_text(f"{title}\n\n{provenance(DATA_FILE)}{body}")
     print(f"  Report written → {REPORT_FILE}")
 
 

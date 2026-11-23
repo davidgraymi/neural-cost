@@ -74,12 +74,15 @@ class BenchmarkMemoryTelemetryTests(unittest.TestCase):
         ).eval()
         x = torch.randn(8, 64)
 
-        samples, peak_alloc, peak_res = _torch_block(model, (x,), warmup=2, repeats=5)
-        self.assertEqual(len(samples), 5)
-        self.assertIsNotNone(peak_alloc)
-        self.assertIsNotNone(peak_res)
-        self.assertGreater(peak_alloc, 0)
-        self.assertGreaterEqual(peak_res, peak_alloc)
+        # The benchmark scripts time through the adapter, like users do.
+        meas = _torch_block(model, (x,), warmup=2, repeats=5)
+        self.assertIsInstance(meas, Measurement)
+        self.assertEqual(len(meas.samples_seconds), 5)
+        self.assertIsNotNone(meas.sync_overhead_seconds)
+        self.assertIsNotNone(meas.peak_memory_bytes)
+        self.assertGreater(meas.peak_memory_bytes, 0)
+        if meas.reserved_memory_bytes is not None:
+            self.assertGreaterEqual(meas.reserved_memory_bytes, meas.peak_memory_bytes)
 
     def test_torch_adapter_trace_collects_allocator_telemetry(self) -> None:
         pytest.importorskip("torch")
@@ -130,17 +133,10 @@ class BenchmarkMemoryTelemetryTests(unittest.TestCase):
         self.assertGreater(mem.parameter_bytes, 0)
         self.assertGreater(mem.inference_minimum_bytes, 0)
 
-        _samples, peak_alloc, peak_res = _torch_block(model, (x,), warmup=1, repeats=2)
-        meas = Measurement(
-            median_seconds=0.001,
-            samples_seconds=(0.001, 0.001),
-            peak_memory_bytes=peak_alloc,
-            allocated_memory_bytes=peak_alloc,
-            reserved_memory_bytes=peak_res,
-        )
+        meas = _torch_block(model, (x,), warmup=1, repeats=2)
         mem_gap = analyze_memory_gap(mem, meas)
-        self.assertEqual(mem_gap.observed_peak_bytes, peak_alloc)
-        self.assertEqual(mem_gap.observed_reserved_bytes, peak_res)
+        self.assertEqual(mem_gap.observed_peak_bytes, meas.peak_memory_bytes)
+        self.assertEqual(mem_gap.observed_reserved_bytes, meas.reserved_memory_bytes)
         self.assertIsNotNone(mem_gap.overhead_ratio)
         self.assertGreater(len(mem_gap.findings), 0)
 

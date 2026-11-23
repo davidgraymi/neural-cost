@@ -43,7 +43,7 @@
 Each point represents one architecture × framework combination (optimised variant).  
 The roofline ceiling shows the theoretical maximum given the hardware's compute and bandwidth limits.
 
-![Roofline](benchmarks/results/figures/fig1_roofline.png)
+![Roofline](figures/fig1_roofline.png)
 
 **Key observations:**
 - All workloads fall well below the roofline ceiling on this CPU (typical for small-batch inference)
@@ -57,7 +57,7 @@ The roofline ceiling shows the theoretical maximum given the hardware's compute 
 
 Error bars show ±1σ across 40 timed iterations.
 
-![Latency bars](benchmarks/results/figures/fig2_latency_bars.png)
+![Latency bars](figures/fig2_latency_bars.png)
 
 **Key observations:**
 - TensorFlow eager dispatch dominates latency for small, sequential workloads (RNN, LSTM)
@@ -70,7 +70,7 @@ Error bars show ±1σ across 40 timed iterations.
 
 Cells show efficiency as a percentage of the theoretical roofline bound.
 
-![Efficiency heatmap](benchmarks/results/figures/fig3_efficiency_heatmap.png)
+![Efficiency heatmap](figures/fig3_efficiency_heatmap.png)
 
 **Interpretation:**
 - Higher is better; 100% would mean perfect roofline utilisation
@@ -82,7 +82,7 @@ Cells show efficiency as a percentage of the theoretical roofline bound.
 
 ## Figure 4 — Latency Scaling with Batch Size
 
-![Batch scaling](benchmarks/results/figures/fig4_batch_scaling.png)
+![Batch scaling](figures/fig4_batch_scaling.png)
 
 **Key observations:**
 - All frameworks show approximately linear latency growth with batch size (expected: workloads are memory-bound)
@@ -96,7 +96,7 @@ Cells show efficiency as a percentage of the theoretical roofline bound.
 
 Speedup ratio = eager latency / optimised latency. Higher is better.
 
-![Speedup](benchmarks/results/figures/fig5_speedup.png)
+![Speedup](figures/fig5_speedup.png)
 
 **Key observations:**
 - `jax.jit()` delivers the largest speedup for JAX, especially on sequential workloads (RNN: up to 8×, LSTM: up to 6×) where Python loop overhead is eliminated by tracing
@@ -107,7 +107,7 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 ## Figure 6 — Achieved Throughput (GFLOP/s, batch=16)
 
-![Throughput](benchmarks/results/figures/fig6_throughput.png)
+![Throughput](figures/fig6_throughput.png)
 
 ---
 
@@ -115,7 +115,7 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 Lower CV (%) indicates more stable, reproducible measurements.
 
-![CV heatmap](benchmarks/results/figures/fig7_cv_heatmap.png)
+![CV heatmap](figures/fig7_cv_heatmap.png)
 
 **Interpretation:**
 - JAX JIT shows very low CV (<3%) — deterministic compilation produces stable execution times
@@ -128,7 +128,7 @@ Lower CV (%) indicates more stable, reproducible measurements.
 
 Empirical memory telemetry measured from framework allocators compared against theoretical tensor bounds calculated by `neural_cost.profile_model` and `neural_cost.analyze_memory_gap`.
 
-![Memory utilization](benchmarks/results/figures/fig8_memory_utilization.png)
+![Memory utilization](figures/fig8_memory_utilization.png)
 
 ### Memory Telemetry and Allocator Fragmentation Table (batch=16)
 
