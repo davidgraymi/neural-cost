@@ -85,6 +85,16 @@ python benchmarks/collect_gpu_data.py \
 Results are written to `benchmarks/results/<device>/benchmark_gpu_data.json`
 (for example `nvidia-tesla-t4/` or `apple-m3/`), stamped with the neural-cost
 version, git commit and framework versions.
+
+Configurations that would not fit in accelerator memory are skipped up front:
+the sweep compares neural-cost's own memory estimate (with a 3× allowance for
+allocator pools) against the device budget (`torch.mps.recommended_max_memory()`
+on Apple Silicon, total memory on CUDA) and prints which batch sizes it skipped.
+On a 16 GB Mac, set `PYTORCH_MPS_HIGH_WATERMARK_RATIO=1.0` and
+`PYTORCH_MPS_LOW_WATERMARK_RATIO=0.8` so PyTorch raises an out-of-memory error
+before macOS kills the process. TensorFlow is skipped when it has no GPU device;
+its CPU numbers come from `collect_data.py`.
+
 Generate figures and the full markdown report:
 
 ```bash
