@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate neural-cost predictions against measured runtimes on this machine.
 
-For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit) this:
+For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit on CPU / MPS) this:
 
 1. calibrates achievable FLOP/s, bandwidth and dispatch overhead with
    microbenchmarks that never touch the evaluated models;
@@ -136,7 +136,14 @@ def torch_workloads(device: str, quick: bool) -> list[Workload]:
 # -------------------------------------------------------------------- jax models
 
 
-def jax_workloads(quick: bool) -> list[Workload]:
+def jax_workloads(quick: bool, device=None) -> list[Workload]:
+    import jax
+
+    with jax.default_device(device):
+        return _jax_workloads(quick)
+
+
+def _jax_workloads(quick: bool) -> list[Workload]:
     import jax
     import jax.numpy as jnp
 
@@ -250,8 +257,22 @@ def available_backends() -> list[str]:
         if torch.backends.mps.is_available():
             found.append("torch-mps")
     if importlib.util.find_spec("jax"):
+        import jax
+
         found.append("jax-cpu")
+        if _jax_device("mps") is not None:
+            found.append("jax-mps")
     return found
+
+
+def _jax_device(platform: str):
+    """First JAX device of ``platform`` (``"cpu"``, ``"mps"``, ``"gpu"``), or None."""
+    import jax
+
+    try:
+        return jax.devices(platform)[0]
+    except RuntimeError:
+        return None
 
 
 def main() -> None:
@@ -292,16 +313,20 @@ def main() -> None:
         else:
             from neural_cost.adapters import JaxAdapter
 
-            adapter = JaxAdapter()
-            calibration = adapter.calibrate()
-            workloads = jax_workloads(args.quick)
-            title = "JAX jit (cpu)"
+            jax_platform = backend.split("-", 1)[1]
+            device = _jax_device(jax_platform)
+            if device is None:
+                raise SystemExit(f"{backend}: JAX has no {jax_platform} device")
+            adapter = JaxAdapter(trace_device_time=False)  # as for torch: no profiler
+            calibration = adapter.calibrate(device=device)
+            workloads = jax_workloads(args.quick, device)
+            title = f"JAX jit ({jax_platform})"
         print(f"\n[{backend}] calibration: {calibration}")
         # Each backend is bounded by its own device: on a CUDA host the default
         # spec is the GPU's, which would make every CPU bound far too loose.
         spec, _ = detect_hardware(device="cpu" if backend.endswith("cpu") else "gpu")
         if backend.endswith("cpu"):
-            spec = replace(hardware, caches=hardware.caches + cpu_caches())
+            spec = replace(spec, caches=spec.caches + cpu_caches())
         report = run_validation_suite(
             adapter,
             workloads,

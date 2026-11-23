@@ -210,7 +210,7 @@ def benchmark_llm_decode(
     achieved_gbw = (step_traffic / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
 
     if hardware is None:
-        hardware, _ = detect_hardware()
+        hardware, _ = detect_hardware(device="cpu")  # the models run on CPU tensors
 
     bw_util = (achieved_gbw * 1e9) / hardware.memory_bandwidth if hardware.memory_bandwidth > 0 else 0.0
 
@@ -310,7 +310,7 @@ def benchmark_moe_decode(
 
     achieved_gbw = (moe_est.total_bytes / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
     if hardware is None:
-        hardware, _ = detect_hardware()
+        hardware, _ = detect_hardware(device="cpu")  # the models run on CPU tensors
     bw_util = (
         (achieved_gbw * 1e9) / hardware.memory_bandwidth
         if hardware.memory_bandwidth > 0
@@ -469,7 +469,7 @@ def benchmark_paged_attention(
     # the paged layout (allocated blocks, fragmentation) and is reported as such.
     achieved_gbw = (kernel_bytes / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
     if hardware is None:
-        hardware, _ = detect_hardware()
+        hardware, _ = detect_hardware(device="cpu")  # the models run on CPU tensors
     bw_util = (
         (achieved_gbw * 1e9) / hardware.memory_bandwidth
         if hardware.memory_bandwidth > 0
@@ -519,7 +519,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    hardware, _ = detect_hardware()
+    hardware, _ = detect_hardware(device="cpu")  # the models run on CPU tensors
     lengths = [128, 512] if args.quick else args.prompt_lengths
 
     print(f"Hardware: {hardware.name} ({hardware.peak_flops/1e12:.2f} TFLOP/s, {hardware.memory_bandwidth/1e9:.1f} GB/s)")
