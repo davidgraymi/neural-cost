@@ -34,8 +34,136 @@ def _parameter_count(layer: Any) -> int:
     return total
 
 
+def _layer_types(tf: Any, *names: str) -> tuple[type, ...]:
+    """Keras layer classes by name, skipping ones this Keras version lacks."""
+    layers = tf.keras.layers
+    return tuple(getattr(layers, name) for name in names if hasattr(layers, name))
+
+
+def _channels_first(layer: Any, shape: tuple[int, ...]) -> tuple[int, ...]:
+    if getattr(layer, "data_format", "channels_last") == "channels_first":
+        return shape
+    return (shape[0], shape[-1], *shape[1:-1])
+
+
+def _weight_shape(weight: Any) -> tuple[int, ...]:
+    return tuple(int(dim) for dim in weight.shape)
+
+
+def _keras_conv_operations(
+    tf: Any, layer: Any, x: tuple[int, ...], y: tuple[int, ...], dtype_bytes: int
+) -> list[Operation]:
+    """Portable channels-first conv records for any Keras convolution layer.
+
+    Keras kernels are ``(*k, C_in / groups, C_out)`` for convolutions,
+    ``(*k, C_out, C_in)`` for transposed convolutions and ``(*k, C_in, mult)``
+    for depthwise kernels.  A separable convolution becomes its depthwise and
+    pointwise halves.  The transposed/depthwise/separable checks come first
+    because older Keras versions subclass them from the plain ``ConvND``.
+    """
+    data, out = _channels_first(layer, x), _channels_first(layer, y)
+    rank = len(data) - 2
+
+    def record(
+        name: str,
+        inputs: tuple[int, ...],
+        kernel: tuple[int, ...],
+        output: tuple[int, ...],
+        weight: Any,
+        parameter_count: int,
+        **attrs: Any,
+    ) -> Operation:
+        kind = "conv2d" if rank == 2 and not attrs.get("transposed") else "conv"
+        return Operation(
+            name,
+            kind,
+            (inputs, kernel),
+            output,
+            dtype_bytes,
+            {
+                "parameter_bytes": parameter_count * dtype_bytes,
+                "parameter_id": id(weight),
+                **attrs,
+            },
+        )
+
+    transposed = _layer_types(tf, "Conv1DTranspose", "Conv2DTranspose", "Conv3DTranspose")
+    depthwise = _layer_types(tf, "DepthwiseConv1D", "DepthwiseConv2D")
+    separable = _layer_types(tf, "SeparableConv1D", "SeparableConv2D")
+    if transposed and isinstance(layer, transposed):
+        k = _weight_shape(layer.kernel)
+        kernel = (k[-2], k[-1], *k[:-2])
+        return [
+            record(
+                layer.name,
+                data,
+                kernel,
+                out,
+                layer.kernel,
+                _parameter_count(layer),
+                transposed=True,
+            )
+        ]
+    if separable and isinstance(layer, separable):
+        dw_weight, pw_weight = layer.depthwise_kernel, layer.pointwise_kernel
+        dw, pw = _weight_shape(dw_weight), _weight_shape(pw_weight)
+        channels, multiplier = dw[-2], dw[-1]
+        middle = (out[0], channels * multiplier, *out[2:])
+        dw_params = channels * multiplier
+        for size in dw[:-2]:
+            dw_params *= size
+        return [
+            record(
+                f"{layer.name}.depthwise",
+                data,
+                (channels * multiplier, 1, *dw[:-2]),
+                middle,
+                dw_weight,
+                dw_params,
+                groups=channels,
+            ),
+            record(
+                f"{layer.name}.pointwise",
+                middle,
+                (pw[-1], pw[-2], *pw[:-2]),
+                out,
+                pw_weight,
+                _parameter_count(layer) - dw_params,
+            ),
+        ]
+    if depthwise and isinstance(layer, depthwise):
+        weight = getattr(layer, "depthwise_kernel", None)
+        if weight is None:  # Keras 3 names it ``kernel``
+            weight = layer.kernel
+        dw = _weight_shape(weight)
+        channels, multiplier = dw[-2], dw[-1]
+        return [
+            record(
+                layer.name,
+                data,
+                (channels * multiplier, 1, *dw[:-2]),
+                out,
+                weight,
+                _parameter_count(layer),
+                groups=channels,
+            )
+        ]
+    k = _weight_shape(layer.kernel)
+    return [
+        record(
+            layer.name,
+            data,
+            (k[-1], k[-2], *k[:-2]),
+            out,
+            layer.kernel,
+            _parameter_count(layer),
+            groups=int(getattr(layer, "groups", 1)),
+        )
+    ]
+
+
 class TensorFlowAdapter(FrameworkAdapter):
-    """Capture Keras Dense and Conv2D layer calls through temporary hooks."""
+    """Capture Keras layer calls (dense, convolution, pooling, ...) through temporary hooks."""
 
     name = "tensorflow"
 
@@ -66,12 +194,36 @@ class TensorFlowAdapter(FrameworkAdapter):
             layers.append(layer)
             pending.extend(getattr(layer, "layers", ()))
 
+        conv_types = _layer_types(
+            tf,
+            "Conv1D",
+            "Conv2D",
+            "Conv3D",
+            "Conv1DTranspose",
+            "Conv2DTranspose",
+            "Conv3DTranspose",
+            "DepthwiseConv1D",
+            "DepthwiseConv2D",
+            "SeparableConv1D",
+            "SeparableConv2D",
+        )
+        window_pool_types = _layer_types(
+            tf,
+            *(f"{kind}Pooling{dims}D" for kind in ("Max", "Average") for dims in (1, 2, 3)),
+        )
+        global_pool_types = _layer_types(
+            tf,
+            *(f"Global{kind}Pooling{dims}D" for kind in ("Max", "Average") for dims in (1, 2, 3)),
+        )
+
         for layer in layers:
             if not isinstance(
                 layer,
                 (
                     tf.keras.layers.Dense,
-                    tf.keras.layers.Conv2D,
+                    *conv_types,
+                    *window_pool_types,
+                    *global_pool_types,
                     tf.keras.layers.Activation,
                     tf.keras.layers.ReLU,
                     tf.keras.layers.LeakyReLU,
@@ -79,9 +231,6 @@ class TensorFlowAdapter(FrameworkAdapter):
                     tf.keras.layers.Softmax,
                     tf.keras.layers.BatchNormalization,
                     tf.keras.layers.LayerNormalization,
-                    tf.keras.layers.MaxPooling2D,
-                    tf.keras.layers.AveragePooling2D,
-                    tf.keras.layers.GlobalAveragePooling2D,
                     tf.keras.layers.Embedding,
                     tf.keras.layers.LSTM,
                     tf.keras.layers.GRU,
@@ -114,25 +263,10 @@ class TensorFlowAdapter(FrameworkAdapter):
                             },
                         )
                     )
-                elif isinstance(_layer, tf.keras.layers.Conv2D):
-                    # TF is NHWC while the portable Conv2D record is NCHW.
-                    x = shape(inputs)
-                    y = shape(output)
-                    kernel = shape(_layer.kernel)  # HWIO -> OIHW
-                    captured.append(
-                        Operation(
-                            _layer.name,
-                            "conv2d",
-                            (
-                                (x[0], x[3], x[1], x[2]),
-                                (kernel[3], kernel[2], kernel[0], kernel[1]),
-                            ),
-                            (y[0], y[3], y[1], y[2]),
-                            inputs.dtype.size,
-                            {
-                                "parameter_bytes": _parameter_count(_layer) * inputs.dtype.size,
-                                "parameter_id": id(_layer.kernel),
-                            },
+                elif isinstance(_layer, conv_types):
+                    captured.extend(
+                        _keras_conv_operations(
+                            tf, _layer, shape(inputs), shape(output), inputs.dtype.size
                         )
                     )
                 elif isinstance(
@@ -188,32 +322,27 @@ class TensorFlowAdapter(FrameworkAdapter):
                             _layer.name, kind, (in_shape,), out_shape, inputs.dtype.size, attrs
                         )
                     )
-                elif isinstance(
-                    _layer, (tf.keras.layers.MaxPooling2D, tf.keras.layers.AveragePooling2D)
-                ):
-                    x = shape(inputs)
-                    y = shape(output)
+                elif isinstance(_layer, window_pool_types):
                     captured.append(
                         Operation(
                             _layer.name,
                             "pooling",
-                            ((x[0], x[3], x[1], x[2]),),
-                            (y[0], y[3], y[1], y[2]),
+                            (_channels_first(_layer, shape(inputs)),),
+                            _channels_first(_layer, shape(output)),
                             inputs.dtype.size,
-                            {"kernel_size": tuple(_layer.pool_size)},
+                            {"kernel_size": tuple(int(size) for size in _layer.pool_size)},
                         )
                     )
-                elif isinstance(_layer, tf.keras.layers.GlobalAveragePooling2D):
-                    x = shape(inputs)
-                    y = shape(output)
+                elif isinstance(_layer, global_pool_types):
+                    x = _channels_first(_layer, shape(inputs))
                     captured.append(
                         Operation(
                             _layer.name,
                             "pooling",
-                            ((x[0], x[3], x[1], x[2]),),
-                            y,
+                            (x,),
+                            shape(output),
                             inputs.dtype.size,
-                            {"kernel_size": (x[1], x[2])},
+                            {"kernel_size": x[2:]},
                         )
                     )
                 elif isinstance(_layer, tf.keras.layers.Embedding):

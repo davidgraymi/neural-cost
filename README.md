@@ -95,6 +95,7 @@ flowchart LR
 |---|---|
 | `linear` | Dense / fully-connected projection |
 | `conv2d` | 2-D convolution (NCHW / OIHW) |
+| `conv` | 1-D, 2-D or 3-D convolution, channels-first; `transposed`, grouped and depthwise variants |
 | `matmul` | Raw matrix multiply |
 | `embedding` | Token embedding lookup (read-only traffic model) |
 | `attention` | Multi-head self-attention (QKV projections + softmax + output) |
@@ -102,18 +103,23 @@ flowchart LR
 | `softmax` / `layernorm` / `batchnorm` | Normalisation ops |
 | `rmsnorm` | Root Mean Square normalisation |
 | `swiglu` | Gated linear unit with Swish activation |
-| `pooling` | Max / average / global-average pooling |
+| `pooling` | Max / average / adaptive / global pooling over 1 to 3 spatial dimensions |
 | `moe` | Mixture-of-Experts sparse routing and expert FFN execution |
 | `gather` / `scatter` | Indexed reads and in-place indexed updates; only touched elements count as traffic |
 | `custom` | Caller-supplied explicit FLOP count |
+
+A transposed `conv` counts `C_out / groups × prod(k)` MACs for every input
+element (the fvcore/ptflops convention), so the zeros a strided transposed
+convolution inserts are not counted. Plain 2-D convolutions keep the
+`conv2d` kind. `estimate_conv` estimates any `conv` record.
 
 Adapters automatically emit the right kind for each layer type:
 
 | Framework | Captured layer types |
 |---|---|
-| **PyTorch** | `Linear`, `Conv2d`, `Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, `BatchNorm1d/2d` |
-| **TensorFlow** | `Dense`, `Conv2D`, `Embedding`, `GRU`, `LSTM`, `MultiHeadAttention`, `BatchNormalization`, `LayerNormalization`, pooling layers |
-| **JAX** | `dot_general` (matmul), `conv_general_dilated` (conv2d), elementwise/comparison/reduction primitives, `gather`/`scatter`/`dynamic_slice`/`dynamic_update_slice`, and `scan`/`while`/`cond` bodies |
+| **PyTorch** | `Linear`, `Conv1d/2d/3d`, `ConvTranspose1d/2d/3d`, `Max/Avg/AdaptiveMax/AdaptiveAvgPool1d/2d/3d`, `Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, `BatchNorm1d/2d/3d` |
+| **TensorFlow** | `Dense`, `Conv1D/2D/3D`, `Conv1D/2D/3DTranspose`, `DepthwiseConv1D/2D`, `SeparableConv1D/2D` (as depthwise + pointwise), 1-D/2-D/3-D max, average and global pooling, `Embedding`, `GRU`, `LSTM`, `MultiHeadAttention`, `BatchNormalization`, `LayerNormalization` |
+| **JAX** | `dot_general` (matmul), `conv_general_dilated` (1-D to 3-D conv; `conv_transpose` as a transposed conv), elementwise/comparison/reduction primitives, `gather`/`scatter`/`dynamic_slice`/`dynamic_update_slice`, and `scan`/`while`/`cond` bodies |
 
 ## Analyze portable operations
 
@@ -605,8 +611,9 @@ estimate = estimate_model(model, inputs, TorchAdapter())
 measurement = TorchAdapter().benchmark(model, *inputs)
 ```
 
-`TorchAdapter` captures `Linear`, `Conv2d`, `Embedding`, `RNN`, `GRU`, `LSTM`,
-`MultiheadAttention`, `LayerNorm`, and `BatchNorm` modules via forward hooks and
+`TorchAdapter` captures `Linear`, 1-D to 3-D (transposed) convolution and pooling,
+`Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, and
+`BatchNorm` modules via forward hooks and
 synchronizes CUDA benchmarks.  Its `trace` method uses `torch.profiler` and
 returns aggregate profiler-event and CUDA allocator statistics.
 `TensorFlowAdapter` captures the equivalent Keras layers and returns supported

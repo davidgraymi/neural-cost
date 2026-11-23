@@ -62,6 +62,45 @@ def _dtype(torch: Any, dtype_bytes: int, device: Any) -> Any:
     return torch.float32
 
 
+def _conv_builder(torch: Any, op: Operation, rand: Callable[..., Any]) -> Callable[[], Any] | None:
+    """Replay an N-d (optionally transposed) convolution, inferring stride and padding."""
+    functional = torch.nn.functional
+    data, kernel = op.inputs[0], op.inputs[1]
+    output = op.output
+    dims = len(output) - 2
+    if len(data) != dims + 2 or len(kernel) != dims + 2:
+        return None
+    groups = int(op.attrs.get("groups", 1))
+    taps = kernel[2:]
+    x = rand(data)
+    if op.attrs.get("transposed"):
+        stride = tuple(max(1, round(o / i)) for i, o in zip(data[2:], output[2:], strict=True))
+        padding = tuple(
+            max(0, ceil(((i - 1) * s + k - o) / 2))
+            for i, o, s, k in zip(data[2:], output[2:], stride, taps, strict=True)
+        )
+        extra = tuple(
+            o - ((i - 1) * s - 2 * p + k)
+            for i, o, s, p, k in zip(data[2:], output[2:], stride, padding, taps, strict=True)
+        )
+        if any(not 0 <= e < s for e, s in zip(extra, stride, strict=True)):
+            return None
+        # PyTorch stores transposed weights as (C_in, C_out / groups, *k).
+        weight = rand((kernel[1] * groups, kernel[0] // groups, *taps))
+        conv_t = getattr(functional, f"conv_transpose{dims}d")
+        fn = lambda: conv_t(x, weight, None, stride, padding, extra, groups)
+    else:
+        stride = tuple(max(1, round(i / o)) for i, o in zip(data[2:], output[2:], strict=True))
+        padding = tuple(
+            max(0, ceil(((o - 1) * s + k - i) / 2))
+            for i, o, s, k in zip(data[2:], output[2:], stride, taps, strict=True)
+        )
+        weight = rand(kernel)
+        conv = getattr(functional, f"conv{dims}d")
+        fn = lambda: conv(x, weight, None, stride, padding, 1, groups)
+    return fn if tuple(fn().shape) == tuple(output) else None
+
+
 def _builder(torch: Any, op: Operation, device: Any) -> Callable[[], Any] | None:
     """Return a zero-argument callable executing ``op`` once, or None if unsupported."""
     functional = torch.nn.functional
@@ -84,16 +123,8 @@ def _builder(torch: Any, op: Operation, device: Any) -> Callable[[], Any] | None
         except RuntimeError:
             return None
         return lambda: torch.matmul(a, b)
-    if kind == "conv2d" and len(op.inputs) >= 2 and len(op.output) == 4:
-        (n, c, h, w), (o, ci, kh, kw) = op.inputs[0], op.inputs[1]
-        ho, wo = op.output[2], op.output[3]
-        sh, sw = max(1, round(h / ho)), max(1, round(w / wo))
-        ph = max(0, ceil(((ho - 1) * sh + kh - h) / 2))
-        pw = max(0, ceil(((wo - 1) * sw + kw - w) / 2))
-        groups = int(attrs.get("groups", 1))
-        x, weight = rand((n, c, h, w)), rand((o, ci, kh, kw))
-        fn = lambda: functional.conv2d(x, weight, None, (sh, sw), (ph, pw), groups=groups)
-        return fn if tuple(fn().shape) == tuple(op.output) else None
+    if kind in {"conv2d", "conv"} and len(op.inputs) >= 2 and 3 <= len(op.output) <= 5:
+        return _conv_builder(torch, op, rand)
     if kind == "elementwise":
         x = rand(op.output)
         return lambda: torch.relu(x)
@@ -117,10 +148,12 @@ def _builder(torch: Any, op: Operation, device: Any) -> Callable[[], Any] | None
         indices = torch.randint(0, vocab, op.inputs[0], device=device)
         table = rand((vocab, dim))
         return lambda: functional.embedding(indices, table)
-    if kind == "pooling" and op.inputs and len(op.inputs[0]) == 4:
+    if kind == "pooling" and op.inputs and 3 <= len(op.inputs[0]) <= 5:
         x = rand(op.inputs[0])
-        size = op.output[2:] if len(op.output) == 4 else (1, 1)
-        return lambda: functional.adaptive_avg_pool2d(x, size)
+        dims = len(op.inputs[0]) - 2
+        size = op.output[2:] if len(op.output) == dims + 2 else (1,) * dims
+        pool = getattr(functional, f"adaptive_avg_pool{dims}d")
+        return lambda: pool(x, size)
     if kind == "attention" and len(op.output) >= 2:
         num_heads = int(attrs.get("num_heads", 1))
         if len(op.output) >= 4:

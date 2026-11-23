@@ -26,6 +26,74 @@ _FREE_MODULES = frozenset(
     }
 )
 
+_FUNCTIONAL_CONVS = frozenset(
+    {
+        "conv1d",
+        "conv2d",
+        "conv3d",
+        "conv_transpose1d",
+        "conv_transpose2d",
+        "conv_transpose3d",
+    }
+)
+
+
+def _conv_types(torch: Any) -> tuple[type, ...]:
+    nn = torch.nn
+    return (
+        nn.Conv1d,
+        nn.Conv2d,
+        nn.Conv3d,
+        nn.ConvTranspose1d,
+        nn.ConvTranspose2d,
+        nn.ConvTranspose3d,
+    )
+
+
+def _pool_types(torch: Any) -> tuple[type, ...]:
+    nn = torch.nn
+    return tuple(
+        getattr(nn, f"{prefix}Pool{dims}d")
+        for prefix in ("Max", "Avg", "AdaptiveMax", "AdaptiveAvg")
+        for dims in (1, 2, 3)
+    )
+
+
+def _pool_window(module: Any, source: tuple[int, ...], output: tuple[int, ...]) -> tuple[int, ...]:
+    """Pooling window per spatial dimension (``ceil(in / out)`` for adaptive pools)."""
+    dims = int(module.__class__.__name__[-2])
+    kernel = getattr(module, "kernel_size", None)
+    if kernel is not None:
+        return tuple(kernel) if isinstance(kernel, (tuple, list)) else (int(kernel),) * dims
+    spatial_in, spatial_out = source[-dims:], output[-dims:]
+    return tuple(-(-i // max(o, 1)) for i, o in zip(spatial_in, spatial_out, strict=True))
+
+
+def _conv_shapes(
+    data: tuple[int, ...],
+    weight: tuple[int, ...],
+    output: tuple[int, ...],
+    groups: int,
+    transposed: bool,
+) -> tuple[str, tuple[tuple[int, ...], tuple[int, ...]], tuple[int, ...], dict[str, Any]]:
+    """Portable (kind, inputs, output, attrs) for a PyTorch convolution.
+
+    PyTorch stores transposed-convolution weights as ``(C_in, C_out / groups, *k)``;
+    the portable record wants ``(C_out, C_in / groups, *k)``.  Unbatched inputs
+    ``(C, *spatial)`` get a batch dimension of 1.  Plain 2-D convolutions keep
+    the ``conv2d`` kind; everything else is ``conv``.
+    """
+    if transposed:
+        weight = (weight[1] * groups, weight[0] // groups, *weight[2:])
+    if len(data) == len(weight) - 1:
+        data, output = (1, *data), (1, *output)
+    attrs: dict[str, Any] = {"groups": groups}
+    if transposed:
+        attrs["transposed"] = True
+    kind = "conv2d" if len(weight) == 4 and not transposed else "conv"
+    return kind, (data, weight), output, attrs
+
+
 # ATen kernels that correspond to operations the hook adapter captures
 # (contractions, normalization, attention, embedding, pooling, RNN cells).
 _HEAVY_KERNEL_PREFIXES = (
@@ -92,6 +160,8 @@ class TorchAdapter(FrameworkAdapter):
         except ImportError as error:  # pragma: no cover - depends on optional package
             raise ImportError("Install neural-cost[torch] to use TorchAdapter") from error
 
+        _CONV_TYPES = _conv_types(torch)
+        _POOL_TYPES = _pool_types(torch)
         captured: list[Operation] = []
         hooks = []
 
@@ -124,15 +194,22 @@ class TorchAdapter(FrameworkAdapter):
                             },
                         )
                     )
-                elif isinstance(module, torch.nn.Conv2d):
+                elif isinstance(module, _CONV_TYPES):
                     if not isinstance(output, torch.Tensor):
                         return
+                    kind, conv_inputs, conv_output, conv_attrs = _conv_shapes(
+                        tuple(source.shape),
+                        tuple(module.weight.shape),
+                        tuple(output.shape),
+                        module.groups,
+                        bool(module.transposed),
+                    )
                     captured.append(
                         Operation(
                             name,
-                            "conv2d",
-                            (tuple(source.shape), tuple(module.weight.shape)),
-                            tuple(output.shape),
+                            kind,
+                            conv_inputs,
+                            conv_output,
                             dtype_bytes(source),
                             {
                                 "parameter_bytes": sum(
@@ -140,7 +217,24 @@ class TorchAdapter(FrameworkAdapter):
                                     for p in module.parameters(recurse=False)
                                 ),
                                 "parameter_id": id(module.weight),
-                                "groups": module.groups,
+                                **conv_attrs,
+                            },
+                        )
+                    )
+                elif isinstance(module, _POOL_TYPES):
+                    if not isinstance(output, torch.Tensor):
+                        return
+                    captured.append(
+                        Operation(
+                            name,
+                            "pooling",
+                            (tuple(source.shape),),
+                            tuple(output.shape),
+                            dtype_bytes(source),
+                            {
+                                "kernel_size": _pool_window(
+                                    module, tuple(source.shape), tuple(output.shape)
+                                )
                             },
                         )
                     )
@@ -246,7 +340,13 @@ class TorchAdapter(FrameworkAdapter):
                     )
                 elif (
                     isinstance(
-                        module, (torch.nn.LayerNorm, torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)
+                        module,
+                        (
+                            torch.nn.LayerNorm,
+                            torch.nn.BatchNorm1d,
+                            torch.nn.BatchNorm2d,
+                            torch.nn.BatchNorm3d,
+                        ),
                     )
                     or (hasattr(torch.nn, "RMSNorm") and isinstance(module, torch.nn.RMSNorm))
                     or module.__class__.__name__ == "RMSNorm"
@@ -282,7 +382,8 @@ class TorchAdapter(FrameworkAdapter):
 
         _tracked_list = [
             torch.nn.Linear,
-            torch.nn.Conv2d,
+            *_CONV_TYPES,
+            *_POOL_TYPES,
             torch.nn.Embedding,
             torch.nn.RNN,
             torch.nn.GRU,
@@ -291,6 +392,7 @@ class TorchAdapter(FrameworkAdapter):
             torch.nn.LayerNorm,
             torch.nn.BatchNorm1d,
             torch.nn.BatchNorm2d,
+            torch.nn.BatchNorm3d,
         ]
         if hasattr(torch.nn, "RMSNorm"):
             _tracked_list.append(torch.nn.RMSNorm)
@@ -693,6 +795,9 @@ class TorchFxAdapter(TorchAdapter):
         except ImportError as error:  # pragma: no cover
             raise ImportError("Install neural-cost[torch] to use TorchFxAdapter") from error
 
+        _CONV_TYPES = _conv_types(torch)
+        _POOL_TYPES = _pool_types(torch)
+
         try:
             gm = torch.fx.symbolic_trace(model)
             ShapeProp(gm).propagate(*example_inputs)
@@ -782,14 +887,21 @@ class TorchFxAdapter(TorchAdapter):
                                 },
                             )
                         )
-                elif isinstance(mod, torch.nn.Conv2d):
+                elif isinstance(mod, _CONV_TYPES):
                     if in_shapes:
+                        kind, conv_inputs, conv_output, conv_attrs = _conv_shapes(
+                            in_shapes[0],
+                            tuple(mod.weight.shape),
+                            out_shape,
+                            mod.groups,
+                            bool(mod.transposed),
+                        )
                         captured.append(
                             Operation(
                                 node.name,
-                                "conv2d",
-                                (in_shapes[0], tuple(mod.weight.shape)),
-                                out_shape,
+                                kind,
+                                conv_inputs,
+                                conv_output,
                                 dtype_b,
                                 {
                                     "parameter_bytes": sum(
@@ -797,7 +909,7 @@ class TorchFxAdapter(TorchAdapter):
                                         for p in mod.parameters(recurse=False)
                                     ),
                                     "parameter_id": id(mod.weight),
-                                    "groups": mod.groups,
+                                    **conv_attrs,
                                 },
                             )
                         )
@@ -854,7 +966,9 @@ class TorchFxAdapter(TorchAdapter):
                             attrs,
                         )
                     )
-                elif isinstance(mod, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
+                elif isinstance(
+                    mod, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)
+                ):
                     captured.append(
                         Operation(
                             node.name,
@@ -865,11 +979,8 @@ class TorchFxAdapter(TorchAdapter):
                             norm_attrs(mod),
                         )
                     )
-                elif isinstance(
-                    mod, (torch.nn.MaxPool2d, torch.nn.AvgPool2d, torch.nn.AdaptiveAvgPool2d)
-                ):
-                    k = getattr(mod, "kernel_size", (1, 1))
-                    k_tuple = k if isinstance(k, tuple) else (k, k)
+                elif isinstance(mod, _POOL_TYPES):
+                    source_shape = in_shapes[0] if in_shapes else out_shape
                     captured.append(
                         Operation(
                             node.name,
@@ -877,7 +988,7 @@ class TorchFxAdapter(TorchAdapter):
                             in_shapes or (out_shape,),
                             out_shape,
                             dtype_b,
-                            {"kernel_size": k_tuple},
+                            {"kernel_size": _pool_window(mod, source_shape, out_shape)},
                         )
                     )
 
@@ -946,22 +1057,22 @@ class TorchFxAdapter(TorchAdapter):
                             node.name, "softmax", in_shapes or (out_shape,), out_shape, dtype_b
                         )
                     )
-                elif (
-                    fn_name in {"conv2d"}
-                    or fn in {torch.nn.functional.conv2d, getattr(torch, "conv2d", None)}
-                ) and len(in_shapes) >= 2:
+                elif fn_name in _FUNCTIONAL_CONVS and len(in_shapes) >= 2:
+                    transposed = fn_name.startswith("conv_transpose")
+                    # conv{n}d(input, weight, bias, stride, padding, dilation, groups);
+                    # conv_transpose{n}d(..., stride, padding, output_padding, groups, dilation).
+                    group_index = 7 if transposed else 6
                     groups = int(
-                        node.kwargs.get("groups", node.args[6] if len(node.args) > 6 else 1)
+                        node.kwargs.get(
+                            "groups",
+                            node.args[group_index] if len(node.args) > group_index else 1,
+                        )
+                    )
+                    kind, conv_inputs, conv_output, conv_attrs = _conv_shapes(
+                        in_shapes[0], in_shapes[1], out_shape, groups, transposed
                     )
                     captured.append(
-                        Operation(
-                            node.name,
-                            "conv2d",
-                            in_shapes[:2],
-                            out_shape,
-                            dtype_b,
-                            {"groups": groups},
-                        )
+                        Operation(node.name, kind, conv_inputs, conv_output, dtype_b, conv_attrs)
                     )
                 elif fn_name == "scaled_dot_product_attention" or fn == getattr(
                     torch.nn.functional, "scaled_dot_product_attention", None

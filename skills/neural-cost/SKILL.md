@@ -96,8 +96,9 @@ gap = analyze_gap(
 print(gap.render(top=5))
 ```
 
-`TorchAdapter` hooks modules (Linear, Conv2d, Embedding, RNN/GRU/LSTM,
-MultiheadAttention, norms) and `scaled_dot_product_attention`.
+`TorchAdapter` hooks modules (Linear, 1-D to 3-D Conv and ConvTranspose,
+pooling, Embedding, RNN/GRU/LSTM, MultiheadAttention, norms) and
+`scaled_dot_product_attention`.
 Untracked modules such as ReLU and GELU show up in `adapter.coverage`.
 TensorFlow: `TensorFlowAdapter()` follows the same pattern.
 

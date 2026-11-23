@@ -68,7 +68,7 @@ def estimate_memory(
         parameter_id = operation.attrs.get("parameter_id")
         if (
             declared is None
-            and operation.kind in {"linear", "conv2d"}
+            and operation.kind in {"linear", "conv2d", "conv"}
             and len(operation.inputs) >= 2
         ):
             declared = numel(operation.inputs[1]) * operation.dtype_bytes
