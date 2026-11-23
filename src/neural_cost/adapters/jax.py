@@ -505,7 +505,7 @@ class JaxAdapter(FrameworkAdapter):
             )
         elif primitive == "conv_general_dilated" and len(input_shapes) == 2:
             lhs, rhs = input_shapes
-            if len(lhs) != 4 or len(rhs) != 4 or len(output_shape) != 4:
+            if not 3 <= len(lhs) <= 5 or len(rhs) != len(lhs) or len(output_shape) != len(lhs):
                 return None
             numbers = equation.params.get("dimension_numbers")
             if numbers is not None and hasattr(numbers, "lhs_spec"):
@@ -516,12 +516,17 @@ class JaxAdapter(FrameworkAdapter):
                 out = output_shape
             attrs = dict(base_attrs)
             attrs["groups"] = int(equation.params.get("feature_group_count", 1))
+            # ``lax.conv_transpose`` dilates the input with zeros; multiplying
+            # those zeros is not useful work, so model it as a transposed conv.
+            lhs_dilation = equation.params.get("lhs_dilation") or ()
+            transposed = any(int(step) > 1 for step in lhs_dilation)
+            if transposed:
+                attrs["transposed"] = True
             entry = param_vars.get(id(equation.invars[1]))
             if entry is not None:
                 attrs["parameter_id"], attrs["parameter_bytes"] = entry
-            operations.append(
-                Operation(f"conv_{index}", "conv2d", (lhs, rhs), out, dtype_bytes, attrs)
-            )
+            kind = "conv2d" if len(lhs) == 4 and not transposed else "conv"
+            operations.append(Operation(f"conv_{index}", kind, (lhs, rhs), out, dtype_bytes, attrs))
         elif primitive in {"gather", "dynamic_slice", "slice"}:
             operand = input_shapes[0] if input_shapes else output_shape
             indices = input_shapes[1] if primitive == "gather" and len(input_shapes) > 1 else ()

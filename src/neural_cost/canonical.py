@@ -32,7 +32,7 @@ from .estimate import attention_flop_parts, estimate_operation
 from .operations import Operation, numel
 
 DENSE_KINDS = frozenset(
-    {"matmul", "linear", "conv2d", "moe", "paged_attention", "state_space_model"}
+    {"matmul", "linear", "conv2d", "conv", "moe", "paged_attention", "state_space_model"}
 )
 
 
@@ -78,7 +78,7 @@ def flop_breakdown(operations: Iterable[Operation]) -> FlopBreakdown:
         declared = operation.attrs.get("parameter_bytes")
         if (
             declared is None
-            and operation.kind in {"linear", "conv2d"}
+            and operation.kind in {"linear", "conv2d", "conv"}
             and len(operation.inputs) > 1
         ):
             declared = numel(operation.inputs[1]) * operation.dtype_bytes

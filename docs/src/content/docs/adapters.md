@@ -16,8 +16,9 @@ estimate = estimate_model(model, inputs, TorchAdapter())
 measurement = TorchAdapter().benchmark(model, *inputs)
 ```
 
-`TorchAdapter` captures `Linear`, `Conv2d`, `Embedding`, `RNN`, `GRU`, `LSTM`,
-`MultiheadAttention`, `LayerNorm`, and `BatchNorm` modules via forward hooks and
+`TorchAdapter` captures `Linear`, 1-D to 3-D (transposed) convolution and pooling,
+`Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, and
+`BatchNorm` modules via forward hooks and
 synchronizes CUDA benchmarks.  Its `trace` method uses `torch.profiler` and
 returns aggregate profiler-event and CUDA allocator statistics.
 `TensorFlowAdapter` captures the equivalent Keras layers and returns supported
