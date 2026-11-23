@@ -4,13 +4,18 @@ import types
 
 import pytest
 
-tf = pytest.importorskip("tensorflow")
-
 from neural_cost.adapters import tensorflow as tf_adapter
 from neural_cost.adapters.tensorflow import TensorFlowAdapter
 
 
-def test_every_sample_waits_for_the_device(monkeypatch):
+@pytest.fixture
+def tf():
+    # Import inside the test, never at collection: loading TensorFlow before
+    # torch._dynamo imports Triton aborts the interpreter on Linux CI.
+    return pytest.importorskip("tensorflow")
+
+
+def test_every_sample_waits_for_the_device(monkeypatch, tf):
     calls = []
     monkeypatch.setattr(tf.test.experimental, "sync_devices", lambda: calls.append(1))
     x = tf.ones((8, 8))
@@ -19,7 +24,7 @@ def test_every_sample_waits_for_the_device(monkeypatch):
     assert len(meas.samples_seconds) == 3
 
 
-def test_falls_back_to_waiting_on_outputs_without_sync_devices(monkeypatch):
+def test_falls_back_to_waiting_on_outputs_without_sync_devices(monkeypatch, tf):
     monkeypatch.setattr(tf.test, "experimental", types.SimpleNamespace())
     waited = []
     real_reshape = tf.reshape
@@ -34,7 +39,7 @@ def test_falls_back_to_waiting_on_outputs_without_sync_devices(monkeypatch):
     assert waited == [tf.TensorShape((2, 3))]  # empty tensors and non-tensors skipped
 
 
-def test_memory_device_follows_the_inputs(monkeypatch):
+def test_memory_device_follows_the_inputs(monkeypatch, tf):
     gpu = types.SimpleNamespace(name="/device:GPU:0")
     monkeypatch.setattr(tf.config, "list_logical_devices", lambda kind: [gpu, gpu])
     on_gpu1 = types.SimpleNamespace(device="/job:localhost/replica:0/task:0/device:GPU:1")
@@ -46,7 +51,7 @@ def test_memory_device_follows_the_inputs(monkeypatch):
     assert tf_adapter._input_gpu(tf, (on_gpu1,), {}) is None
 
 
-def test_peak_reset_after_warmup(monkeypatch):
+def test_peak_reset_after_warmup(monkeypatch, tf):
     events = []
     monkeypatch.setattr(tf_adapter, "_input_gpu", lambda tf, a, k: "GPU:0")
     monkeypatch.setattr(
