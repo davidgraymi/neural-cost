@@ -98,7 +98,7 @@ flowchart LR
 | `conv` | 1-D, 2-D or 3-D convolution, channels-first; `transposed`, grouped and depthwise variants |
 | `matmul` | Raw matrix multiply |
 | `embedding` | Token embedding lookup (read-only traffic model) |
-| `attention` | Multi-head self-attention (QKV projections + softmax + output) |
+| `attention` | Multi-head self- or cross-attention (QKV projections + softmax + output); causal and sliding-window masks count only visible pairs |
 | `elementwise` | Point-wise ops (ReLU, exp, tanh, …) |
 | `softmax` / `layernorm` / `batchnorm` | Normalisation ops |
 | `rmsnorm` | Root Mean Square normalisation |
@@ -112,6 +112,17 @@ A transposed `conv` counts `C_out / groups × prod(k)` MACs for every input
 element (the fvcore/ptflops convention), so the zeros a strided transposed
 convolution inserts are not counted. Plain 2-D convolutions keep the
 `conv2d` kind. `estimate_conv` estimates any `conv` record.
+
+Masked attention pairs are not useful work, so they are excluded.
+`attention` ops accept `kv_len` (key length; defaults to `seq_len`), `causal`,
+`window` (sliding window, requires `causal`) and `q_offset` (absolute position
+of the first query). A causal prefill scores `T(T+1)/2` pairs, about half of
+`T²`. A decode step against a 1024-token cache scores 1024 pairs per head.
+The adapters fill these in from `scaled_dot_product_attention(is_causal=...)`,
+`nn.MultiheadAttention(is_causal=...)`, Keras `use_causal_mask=True`, and the
+key length. Arbitrary `attn_mask` tensors are still counted as dense.
+`attention_visible_pairs(q_len, kv_len, causal=True, window=...)` returns the
+per-head count.
 
 Adapters automatically emit the right kind for each layer type:
 
@@ -158,8 +169,12 @@ Adapters see a model at different granularity. A PyTorch hook records one
 `reduce_sum` primitives that implement it. `flop_breakdown` separates
 granularity-invariant **dense FLOPs** (contractions, 2 FLOPs per MAC) and
 **unique parameters** from **auxiliary FLOPs** (point-wise work, which depends
-on what the adapter captures). `cross_check` then compares adapters against
-their median:
+on what the adapter captures). Causal attention is one case where adapters
+legitimately differ: a fused causal `attention` op counts only the visible
+lower triangle, while attention written out as `dot_general` plus a mask
+counts the full score matrix it computes. Compare non-causal models, or
+models built the same way, when you expect exact agreement. `cross_check`
+then compares adapters against their median:
 
 ```python
 from neural_cost import cross_check

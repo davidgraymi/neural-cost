@@ -94,6 +94,31 @@ def _conv_shapes(
     return kind, (data, weight), output, attrs
 
 
+def _sdpa_attrs(
+    q_shape: tuple[int, ...], k_shape: tuple[int, ...], is_causal: bool
+) -> dict[str, Any]:
+    """Attention attrs for ``scaled_dot_product_attention`` on (..., L, E) / (..., S, E)."""
+    if len(q_shape) == 4:
+        _, heads, q_len, head_dim = q_shape
+    elif len(q_shape) == 3:
+        _, q_len, head_dim = q_shape
+        heads = 1
+    else:
+        heads, q_len, head_dim = 1, 1, 1
+    kv_len = k_shape[-2] if len(k_shape) >= 2 else q_len
+    attrs: dict[str, Any] = {
+        "num_heads": heads,
+        "seq_len": q_len,
+        "kv_len": kv_len,
+        "head_dim": head_dim,
+        "include_projections": False,
+    }
+    if is_causal:
+        # PyTorch aligns the causal mask to the top-left corner when L != S.
+        attrs.update(causal=True, q_offset=0)
+    return attrs
+
+
 # ATen kernels that correspond to operations the hook adapter captures
 # (contractions, normalization, attention, embedding, pooling, RNN cells).
 _HEAVY_KERNEL_PREFIXES = (
@@ -167,6 +192,10 @@ class TorchAdapter(FrameworkAdapter):
 
         def dtype_bytes(tensor: Any) -> int:
             return tensor.element_size()
+
+        # MultiheadAttention key length and causal flag, recorded by a pre-hook
+        # because forward hooks do not see keyword arguments.
+        mha_calls: dict[int, tuple[int | None, bool]] = {}
 
         def hook(name: str, module: Any):
             def record(_module: Any, inputs: tuple[Any, ...], output: Any) -> None:
@@ -318,6 +347,12 @@ class TorchAdapter(FrameworkAdapter):
                         batch = source.shape[0] if batch_first else source.shape[1]
                     else:  # unbatched (L, E)
                         seq_len, batch = source.shape[0], 1
+                    kv_len, is_causal = mha_calls.pop(id(module), (None, False))
+                    mha_attrs: dict[str, Any] = {}
+                    if kv_len is not None and kv_len != seq_len:
+                        mha_attrs["kv_len"] = kv_len
+                    if is_causal:
+                        mha_attrs["causal"] = True
                     captured.append(
                         Operation(
                             name,
@@ -335,6 +370,7 @@ class TorchAdapter(FrameworkAdapter):
                                 "parameter_id": id(module.in_proj_weight)
                                 if module.in_proj_weight is not None
                                 else id(module),
+                                **mha_attrs,
                             },
                         )
                     )
@@ -402,8 +438,17 @@ class TorchAdapter(FrameworkAdapter):
         # functional capture while inside one.
         mha_depth = [0]
 
-        def enter_mha(*_args: Any) -> None:
+        def enter_mha(module: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
             mha_depth[0] += 1
+            key = args[1] if len(args) > 1 else kwargs.get("key")
+            kv_len = None
+            if isinstance(key, torch.Tensor):
+                if key.dim() >= 3:
+                    kv_len = key.shape[1] if getattr(module, "batch_first", False) else key.shape[0]
+                elif key.dim() == 2:
+                    kv_len = key.shape[0]
+            is_causal = args[7] if len(args) > 7 else kwargs.get("is_causal", False)
+            mha_calls[id(module)] = (kv_len, bool(is_causal))
 
         def exit_mha(*_args: Any) -> None:
             mha_depth[0] -= 1
@@ -426,7 +471,7 @@ class TorchAdapter(FrameworkAdapter):
         for name, module in model.named_modules():
             if isinstance(module, _TRACKED) or module.__class__.__name__ == "RMSNorm":
                 if isinstance(module, torch.nn.MultiheadAttention):
-                    hooks.append(module.register_forward_pre_hook(enter_mha))
+                    hooks.append(module.register_forward_pre_hook(enter_mha, with_kwargs=True))
                     hooks.append(module.register_forward_hook(exit_mha))
                 hooks.append(
                     module.register_forward_hook(hook(name or module.__class__.__name__, module))
@@ -448,13 +493,7 @@ class TorchAdapter(FrameworkAdapter):
                     q_shape = tuple(query.shape)
                     k_shape = tuple(key.shape) if isinstance(key, torch.Tensor) else q_shape
                     v_shape = tuple(value.shape) if isinstance(value, torch.Tensor) else q_shape
-                    if len(q_shape) == 4:
-                        _, h, l, d_h = q_shape
-                    elif len(q_shape) == 3:
-                        _, l, d = q_shape
-                        h, d_h = 1, d
-                    else:
-                        h, l, d_h = 1, 1, 1
+                    is_causal = kwargs.get("is_causal", args[2] if len(args) > 2 else False)
                     captured.append(
                         Operation(
                             f"scaled_dot_product_attention_{sdpa_counter[0]}",
@@ -462,12 +501,7 @@ class TorchAdapter(FrameworkAdapter):
                             (q_shape, k_shape, v_shape),
                             tuple(out.shape),
                             dtype_bytes(query),
-                            {
-                                "num_heads": h,
-                                "seq_len": l,
-                                "head_dim": d_h,
-                                "include_projections": False,
-                            },
+                            _sdpa_attrs(q_shape, k_shape, bool(is_causal)),
                         )
                     )
                 return out
@@ -1082,13 +1116,10 @@ class TorchFxAdapter(TorchAdapter):
                         s for s in (get_shape(arg) for arg in all_args) if s is not None
                     )
                     q_shape = in_shapes[0] if in_shapes else out_shape
-                    if len(q_shape) == 4:
-                        _, h, l, d_h = q_shape
-                    elif len(q_shape) == 3:
-                        _, l, d = q_shape
-                        h, d_h = 1, d
-                    else:
-                        h, l, d_h = 1, 1, 1
+                    k_shape = in_shapes[1] if len(in_shapes) > 1 else q_shape
+                    is_causal = node.kwargs.get(
+                        "is_causal", node.args[5] if len(node.args) > 5 else False
+                    )
                     captured.append(
                         Operation(
                             node.name,
@@ -1096,12 +1127,7 @@ class TorchFxAdapter(TorchAdapter):
                             in_shapes or (out_shape,),
                             out_shape,
                             dtype_b,
-                            {
-                                "num_heads": h,
-                                "seq_len": l,
-                                "head_dim": d_h,
-                                "include_projections": False,
-                            },
+                            _sdpa_attrs(q_shape, k_shape, is_causal is True),
                         )
                     )
                 elif fn_name in {"rms_norm"} or fn == getattr(

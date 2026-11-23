@@ -169,18 +169,46 @@ def _builder(torch: Any, op: Operation, device: Any) -> Callable[[], Any] | None
             hd = int(attrs.get("head_dim", d // max(heads, 1)))
         q = rand((b, heads, t, hd))
         sdpa = functional.scaled_dot_product_attention
+        s_len = int(attrs.get("kv_len", t))
+        mask_kwargs: dict[str, Any] = {}
+        if attrs.get("causal"):
+            q_offset = attrs.get("q_offset")
+            window = attrs.get("window")
+            if window is None and (s_len == t or q_offset == 0):
+                mask_kwargs["is_causal"] = True
+            else:
+                offset = s_len - t if q_offset is None else int(q_offset)
+                pos = torch.arange(t, device=device)[:, None] + offset
+                key = torch.arange(s_len, device=device)[None, :]
+                allowed = key <= pos
+                if window is not None:
+                    allowed &= key > pos - int(window)
+                mask_kwargs["attn_mask"] = allowed
         if not bool(attrs.get("include_projections", True)):
-            return lambda: sdpa(q, q, q)
+            kv = q if s_len == t else rand((b, heads, s_len, hd))
+            return lambda: sdpa(q, kv, kv, **mask_kwargs)
         proj = int(attrs.get("proj_dim", d))
         x = rand((b, t, d))
         w_in, w_out = rand((3 * proj, d)), rand((d, proj))
+        x_kv = rand((b, s_len, d)) if s_len != t else None
+
+        def project() -> tuple[Any, Any, Any]:
+            if x_kv is None:  # self-attention: one packed in-projection, like nn.MHA
+                qkv = functional.linear(x, w_in)
+                q_p, k_p, v_p = qkv[..., :proj], qkv[..., proj : 2 * proj], qkv[..., 2 * proj :]
+            else:
+                q_p = functional.linear(x, w_in[:proj])
+                kv = functional.linear(x_kv, w_in[proj:])
+                k_p, v_p = kv[..., :proj], kv[..., proj:]
+            return (
+                q_p.reshape(b, t, heads, -1).transpose(1, 2),
+                k_p.reshape(b, s_len, heads, -1).transpose(1, 2),
+                v_p.reshape(b, s_len, heads, -1).transpose(1, 2),
+            )
 
         def full() -> Any:
-            qkv = functional.linear(x, w_in)
-            qh = qkv[..., :proj].reshape(b, t, heads, -1).transpose(1, 2)
-            kh = qkv[..., proj : 2 * proj].reshape(b, t, heads, -1).transpose(1, 2)
-            vh = qkv[..., 2 * proj :].reshape(b, t, heads, -1).transpose(1, 2)
-            out = sdpa(qh, kh, vh).transpose(1, 2).reshape(b, t, proj)
+            qh, kh, vh = project()
+            out = sdpa(qh, kh, vh, **mask_kwargs).transpose(1, 2).reshape(b, t, proj)
             return functional.linear(out, w_out)
 
         return full

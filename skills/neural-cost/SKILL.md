@@ -160,6 +160,11 @@ Add `--json` for machine-readable output.
    `trip_counts` or `default_trip_count` is given. Check `adapter.warnings`.
 4. **Timing.** Use the adapter's `benchmark`, which waits for asynchronous
    JAX/CUDA/MPS work, and warm up so compilation is excluded.
+5. **Attention masks.** Causal and sliding-window attention count only the
+   visible (query, key) pairs, about half of `T²` for a causal prefill. This
+   is detected from `is_causal` / `use_causal_mask` on fused attention. Explicit
+   `attn_mask` tensors, and JAX attention written as `dot_general` plus `where`,
+   count the full score matrix because that is what runs.
 
 ## Reporting rule
 

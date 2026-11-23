@@ -573,24 +573,32 @@ class JaxAdapter(FrameworkAdapter):
             q, k = input_shapes[0], input_shapes[1]
             if len(q) != 4 or len(k) != 4:
                 return None
-            batch, heads, q_len, head_dim = q
+            _, heads, q_len, head_dim = q
             kv_len = k[2]
             attrs = dict(base_attrs)
-            name = f"{primitive}_{index}"
-            if q_len == kv_len:
-                attrs.update(
-                    num_heads=heads, seq_len=q_len, head_dim=head_dim, include_projections=0
+            attrs.update(
+                num_heads=heads,
+                seq_len=q_len,
+                kv_len=kv_len,
+                head_dim=head_dim,
+                include_projections=0,
+            )
+            params = equation.params
+            if any(bool(params.get(flag)) for flag in ("is_causal", "causal")):
+                attrs["causal"] = True
+                window = params.get("sliding_window_length") or params.get("window")
+                if isinstance(window, int) and window > 0:
+                    attrs["window"] = window
+            operations.append(
+                Operation(
+                    f"{primitive}_{index}",
+                    "attention",
+                    input_shapes[:3],
+                    output_shape,
+                    dtype_bytes,
+                    attrs,
                 )
-                operations.append(
-                    Operation(name, "attention", input_shapes[:3], output_shape, dtype_bytes, attrs)
-                )
-            else:
-                # QKᵀ and AV (2 FLOP per MAC each) plus a 5-FLOP softmax per score.
-                scores = batch * heads * q_len * kv_len
-                attrs["flops"] = 4 * scores * head_dim + 5 * scores
-                operations.append(
-                    Operation(name, "custom", input_shapes[:3], output_shape, dtype_bytes, attrs)
-                )
+            )
         elif primitive in _DATA_MOVEMENT_PRIMITIVES:
             attrs = dict(base_attrs)
             attrs["flops_per_element"] = 0
