@@ -301,14 +301,29 @@ def test_timed_samples_default_is_one_call_per_sample() -> None:
     assert log.endswith("cw" * 4)
 
 
-def test_sync_overhead_is_single_call_minus_batched_cost() -> None:
-    import time
+def test_sync_overhead_is_single_call_minus_batched_cost(monkeypatch) -> None:
+    from neural_cost import profiler
 
-    from neural_cost.profiler import timed_samples
+    # A fake clock, so the test does not depend on how precisely the runner
+    # sleeps: each call costs 1 µs, each wait 2 ms (like a GPU round trip).
+    now = [0]
+    monkeypatch.setattr(profiler, "perf_counter_ns", lambda: now[0])
 
-    # A wait that costs 2 ms whenever it is called, like a GPU completion round trip.
-    _, _, overhead = timed_samples(lambda: None, lambda out: time.sleep(2e-3), warmup=0, repeats=1)
-    assert 1.8e-3 < overhead < 3e-3
+    def call():
+        now[0] += 1_000
+
+    def wait(output):
+        now[0] += 2_000_000
+
+    samples, calls, overhead = profiler.timed_samples(call, wait, warmup=1, repeats=3)
+    assert overhead == pytest.approx(2e-3)
+    assert calls == 1 and samples == [pytest.approx(2.001e-3)] * 3
+    batched, calls, _ = profiler.timed_samples(
+        call, wait, warmup=0, repeats=2, min_sample_seconds=0.1
+    )
+    assert calls > 1
+    # Batching spreads the 2 ms wait over every call in the sample.
+    assert batched[0] == pytest.approx(1e-6 + 2e-3 / calls)
 
 
 def test_short_sample_warning_and_amortized_overhead() -> None:
