@@ -17,8 +17,12 @@ Adapters see a model at different granularity. A PyTorch hook records one
 `reduce_sum` primitives that implement it. `flop_breakdown` separates
 granularity-invariant **dense FLOPs** (contractions, 2 FLOPs per MAC) and
 **unique parameters** from **auxiliary FLOPs** (point-wise work, which depends
-on what the adapter captures). `cross_check` then compares adapters against
-their median:
+on what the adapter captures). Causal attention is one case where adapters
+legitimately differ: a fused causal `attention` op counts only the visible
+lower triangle, while attention written out as `dot_general` plus a mask
+counts the full score matrix it computes. Compare non-causal models, or
+models built the same way, when you expect exact agreement. `cross_check`
+then compares adapters against their median:
 
 ```python
 from neural_cost import cross_check

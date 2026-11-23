@@ -20,7 +20,7 @@ order: 2
 | `conv2d` | 2-D convolution (NCHW / OIHW) |
 | `matmul` | Raw matrix multiply |
 | `embedding` | Token embedding lookup (read-only traffic model) |
-| `attention` | Multi-head self-attention (QKV projections + softmax + output) |
+| `attention` | Multi-head self- or cross-attention (QKV projections + softmax + output); causal and sliding-window masks count only visible pairs |
 | `elementwise` | Point-wise ops (ReLU, exp, tanh, …) |
 | `softmax` / `layernorm` / `batchnorm` | Normalisation ops |
 | `rmsnorm` | Root Mean Square normalisation |
@@ -29,6 +29,17 @@ order: 2
 | `moe` | Mixture-of-Experts sparse routing and expert FFN execution |
 | `gather` / `scatter` | Indexed reads and in-place indexed updates; only touched elements count as traffic |
 | `custom` | Caller-supplied explicit FLOP count |
+
+Masked attention pairs are not useful work, so they are excluded.
+`attention` ops accept `kv_len` (key length; defaults to `seq_len`), `causal`,
+`window` (sliding window, requires `causal`) and `q_offset` (absolute position
+of the first query). A causal prefill scores `T(T+1)/2` pairs, about half of
+`T²`. A decode step against a 1024-token cache scores 1024 pairs per head.
+The adapters fill these in from `scaled_dot_product_attention(is_causal=...)`,
+`nn.MultiheadAttention(is_causal=...)`, Keras `use_causal_mask=True`, and the
+key length. Arbitrary `attn_mask` tensors are still counted as dense.
+`attention_visible_pairs(q_len, kv_len, causal=True, window=...)` returns the
+per-head count.
 
 Adapters automatically emit the right kind for each layer type:
 
