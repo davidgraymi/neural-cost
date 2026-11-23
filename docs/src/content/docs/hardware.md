@@ -39,8 +39,10 @@ spec, _ = JaxAdapter().hardware()                       # active JAX device
 Every detected `HardwareSpec` records a `device_type` (`"cpu"` or `"gpu"`).
 When an adapter benchmark records the device it ran on, `analyze_gap` adds a
 **Device mismatch** finding if the two disagree.  On Apple Silicon the CPU
-peak uses a NEON P/E-core table and the CPU shares the chip's unified memory
-bandwidth with the GPU.  The CLI accepts the same option:
+peak is the higher of the NEON P/E-core peak and the per-cluster AMX/SME matrix
+units that Accelerate (PyTorch's CPU BLAS) drives, and the CPU is bounded by the
+chip's unified memory bandwidth (a single-threaded NumPy triad reaches well
+under half of it).  The CLI accepts the same option:
 `neural-cost hardware --device cpu`.
 
 Apple variants are told apart by GPU core count (from `system_profiler`): the

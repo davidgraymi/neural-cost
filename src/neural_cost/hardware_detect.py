@@ -315,14 +315,20 @@ def _probe_nvidia(
 
 # Apple Silicon CPU clocks (P-core, E-core) per generation.  Each P-core issues
 # four 128-bit FP32 FMAs per cycle (32 FLOP/cycle) and each E-core two
-# (16 FLOP/cycle).  This is the NEON peak an XLA/Eigen CPU backend can reach;
-# Accelerate's AMX matmul units are not counted.
+# (16 FLOP/cycle): the NEON peak an XLA/Eigen CPU backend can reach.
+# Accelerate (PyTorch's CPU BLAS on macOS) also drives the matrix coprocessor
+# (AMX, SME on M4) that each CPU cluster shares, so the CPU peak is whichever
+# of the two is higher.
 _APPLE_CPU_CLOCKS: dict[str, tuple[float, float]] = {
     "M1": (3.2e9, 2.06e9),
     "M2": (3.5e9, 2.42e9),
     "M3": (4.05e9, 2.75e9),
     "M4": (4.4e9, 2.9e9),
 }
+
+# FP32 FLOP/cycle of one cluster's matrix coprocessor: a 16x16 FP32 outer-product
+# FMA per cycle (512 FLOP) on a P-cluster; E-clusters carry a quarter-rate unit.
+_APPLE_AMX_FLOP_PER_CYCLE = (512.0, 128.0)
 
 
 def _sysctl_int(key: str) -> int | None:
@@ -338,7 +344,7 @@ def _sysctl_int(key: str) -> int | None:
 
 
 def _apple_cpu_peak_flops(chip_name: str | None) -> float | None:
-    """FP32 NEON peak of an Apple Silicon CPU complex, or ``None`` if unknown."""
+    """FP32 peak of an Apple Silicon CPU complex (NEON or AMX), or ``None`` if unknown."""
     if not chip_name:
         return None
     match = re.search(r"\b(M\d+)\b", chip_name)
@@ -349,7 +355,21 @@ def _apple_cpu_peak_flops(chip_name: str | None) -> float | None:
     if not p_cores:
         return None
     p_clock, e_clock = _APPLE_CPU_CLOCKS[match.group(1)]
-    return p_cores * p_clock * 32.0 + e_cores * e_clock * 16.0
+    neon = p_cores * p_clock * 32.0 + e_cores * e_clock * 16.0
+    p_clusters = _clusters(p_cores, _sysctl_int("hw.perflevel0.cpusperl2"))
+    e_clusters = _clusters(e_cores, _sysctl_int("hw.perflevel1.cpusperl2"))
+    p_amx, e_amx = _APPLE_AMX_FLOP_PER_CYCLE
+    amx = p_clusters * p_clock * p_amx + e_clusters * e_clock * e_amx
+    return max(neon, amx)
+
+
+def _clusters(cores: int, cores_per_cluster: int | None) -> int:
+    """Number of CPU clusters (cores sharing an L2 and a matrix unit)."""
+    if cores <= 0:
+        return 0
+    if not cores_per_cluster:
+        return 1
+    return -(-cores // cores_per_cluster)
 
 
 def _probe_cpu_flops() -> tuple[int, float | None]:
@@ -561,14 +581,20 @@ def detect_hardware(
         # Very conservative: assume 2 GFLOP/s per core at unknown speed
         peak_flops = cores * 2e9 * mult
 
-    # Apple Silicon CPU and GPU share unified memory: without a live
-    # measurement the chip's published bandwidth is the best available bound.
-    fallback_bw = apple_bw if apple_bw else 30e9
-    memory_bandwidth = (measured_bw * 1e9) if measured_bw is not None else fallback_bw
+    # Apple Silicon CPU and GPU share unified memory, so the CPU's bound is the
+    # chip's published bandwidth: the single-threaded NumPy triad reaches well
+    # under half of it, while multi-threaded BLAS gets close.  Elsewhere the
+    # measurement is the only figure available.
+    if apple_bw and apple_cpu_flops is not None:
+        memory_bandwidth = max(apple_bw, (measured_bw or 0.0) * 1e9)
+    elif measured_bw is not None:
+        memory_bandwidth = measured_bw * 1e9
+    else:
+        memory_bandwidth = apple_bw if apple_bw else 30e9
     source = (
         f"CPU estimate ({cores} cores"
         + (f" @ {clock_hz / 1e9:.2f} GHz" if clock_hz else "")
-        + (", Apple NEON P/E-core table" if apple_cpu_flops is not None else "")
+        + (", Apple NEON/AMX table" if apple_cpu_flops is not None else "")
         + f" [{precision.upper()}])"
     )
     if measured_bw is not None:
