@@ -238,7 +238,11 @@ def _probe_apple_silicon() -> tuple[str | None, float | None, float | None, tupl
         return chip_raw, None, None, ()
 
     tflops, bw, caches = _APPLE_CHIP_TABLE[matched_key]
-    cores_match = re.search(r"Total Number of Cores:\s+(\d+)", out)
+    # SPHardwareDataType also has a "Total Number of Cores" line, for the CPU
+    # ("8 (4 Performance and 4 Efficiency)"): read the GPU's from the
+    # Graphics/Displays section only.
+    _, found, graphics = out.partition("Graphics/Displays:")
+    cores_match = re.search(r"Total Number of Cores:\s+(\d+)", graphics) if found else None
     if cores_match:
         gpu_cores = int(cores_match.group(1))
         reference = _APPLE_GPU_CORES.get(matched_key)

@@ -9,7 +9,12 @@ from neural_cost.hardware_detect import _probe_apple_silicon
 
 
 def profiler_output(chip, cores=None):
-    text = f"Hardware:\n  Chip: Apple {chip}\nGraphics/Displays:\n"
+    # The CPU's core count comes first, in the Hardware section, as on a real Mac.
+    text = (
+        f"Hardware:\n  Chip: Apple {chip}\n"
+        "  Total Number of Cores: 8 (4 Performance and 4 Efficiency)\n"
+        "Graphics/Displays:\n"
+    )
     if cores is not None:
         text += f"  Total Number of Cores: {cores}\n"
     return text
@@ -24,6 +29,7 @@ def profiler_output(chip, cores=None):
         ("M4 Max", 40, 18.4, 546.0),
         ("M3 Pro", 18, 7.4, 150.0),
         ("M3", 8, 3.6 * 8 / 10, 100.0),
+        ("M3", 10, 3.6, 100.0),
         ("M3 Ultra", 80, 28.4, 819.0),
         ("M3 Max", None, 14.2, 400.0),  # core count unknown: full configuration
     ],
