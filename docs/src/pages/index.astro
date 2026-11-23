@@ -1,0 +1,389 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import Footer from "../components/Footer.astro";
+import { url } from "../lib/site";
+---
+<Base
+  title="neural-cost: roofline gap analysis for neural networks"
+  description="neural-cost estimates a neural network's FLOPs and tensor traffic, measures its runtime, and explains the gap to the roofline lower bound. PyTorch, JAX and TensorFlow adapters, zero mandatory dependencies."
+>
+  <Header />
+<main id="main">
+    <section class="hero" id="top">
+      <div class="wrap hero-grid">
+        <div>
+          <span class="eyebrow">roofline · FLOPs · tensor traffic</span>
+          <h1>Find out <span class="hl">why</span> your model is slower than the hardware allows.</h1>
+          <p class="lede">neural-cost estimates a network's useful compute and compulsory memory traffic, measures its runtime, and splits the gap to the roofline bound into physical causes. PyTorch, JAX and TensorFlow are optional adapters; the core has zero dependencies.</p>
+
+          <div class="install">
+            <code><span class="prompt">$ </span>pip install neural-cost</code>
+            <button class="copy" type="button" data-copy="pip install neural-cost" aria-label="Copy install command">
+              <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>
+            </button>
+          </div>
+
+          <div class="hero-ctas">
+            <a class="btn btn-primary" href={url("docs/getting-started/")}>
+              Get started <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>
+            </a>
+            <a class="btn btn-ghost" href="https://pypi.org/project/neural-cost/">
+              <svg class="icon" aria-hidden="true"><use href="#i-package"/></svg> PyPI
+            </a>
+          </div>
+
+          <div class="hero-meta">
+            <span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Python 3.11+</span>
+            <span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>MIT licensed</span>
+            <span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>CPU · CUDA · Apple MPS</span>
+          </div>
+        </div>
+
+        <figure style="margin:0; min-width:0">
+          <div class="window" role="group" aria-label="Example: profiling a PyTorch MLP">
+            <div class="window-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>profile_mlp.py</div>
+<pre><code><span class="k">from</span> neural_cost <span class="k">import</span> analyze_gap, detect_hardware, estimate_operations
+<span class="k">from</span> neural_cost.adapters <span class="k">import</span> TorchAdapter
+
+adapter = <span class="f">TorchAdapter</span>(use_profiler=<span class="k">False</span>)
+ops = adapter.<span class="f">operations</span>(model, (x,))
+measurement = adapter.<span class="f">benchmark</span>(model, x, repeats=<span class="n">20</span>)
+hardware, _ = <span class="f">detect_hardware</span>(device=<span class="s">"cpu"</span>)
+
+<span class="f">print</span>(<span class="f">analyze_gap</span>(<span class="f">estimate_operations</span>(ops), measurement, hardware).<span class="f">render</span>())</code></pre>
+            <div class="sep"></div>
+<pre><code><span class="c">Neural cost gap analysis</span>
+  bound: <span class="n">0.680</span> ms (compute <span class="n">0.435</span> ms, memory <span class="n">0.680</span> ms)
+  observed: <span class="n">1.270</span> ms
+  roofline efficiency: <span class="o">53.5%</span> (memory-bound)
+  achieved: <span class="n">237.834</span> GFLOP/s, <span class="n">15.651</span> GB/s
+  next: Memory-bound: consider fusion, reduced precision,
+        or fewer materialized tensors.</code></pre>
+          </div>
+          <figcaption class="figcap">768→3072→768 MLP, batch 32, Apple M3 CPU, 20 timed runs. Coverage: both <code>Linear</code> layers captured; the GELU between them is not modeled, so the bound slightly understates the work.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="block" id="why">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <p class="kicker">Explain the gap, not just its size</p>
+          <h2>A 4% roofline efficiency tells you a workload is slow. It doesn't tell you why.</h2>
+          <p>neural-cost goes further in three ways.</p>
+        </div>
+        <div class="grid-3">
+          <article class="card reveal">
+            <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-scale"/></svg></div>
+            <h3>Cross-framework consistency</h3>
+            <p>A PyTorch hook sees one <code>attention</code> op; a JAX trace sees the <code>dot_general</code>, <code>exp</code> and <code>reduce_sum</code> that implement it. <code>cross_check</code> separates granularity-invariant dense FLOPs and unique parameters, and the test suite asserts they match exactly across all three frameworks.</p>
+            <a class="more" href={url("docs/cross-framework/")}>How it's tested <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+          </article>
+          <article class="card reveal">
+            <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg></div>
+            <h3>Gap attribution</h3>
+            <p><code>attribute_gap</code> splits measured runtime into ordered, non-overlapping components that sum exactly to the median: roofline floor, unfused traffic, lost overlap, peak derate, dispatch, kernel inefficiency, jitter and residual.</p>
+            <a class="more" href={url("docs/attribution/")}>See the components <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+          </article>
+          <article class="card reveal">
+            <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-flask"/></svg></div>
+            <h3>Published validation</h3>
+            <p>Three predictors, none fit to the workload it predicts, scored out-of-sample on 59 workloads. The roofline is checked as a true lower bound: any measurement faster than it would falsify the model.</p>
+            <a class="more" href={url("docs/validation/")}>View results <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" id="attribution">
+      <div class="wrap split">
+        <div class="reveal">
+          <div class="section-head" style="margin-bottom:28px">
+            <p class="kicker">Gap attribution</p>
+            <h2>Every millisecond, accounted for.</h2>
+            <p>Calibration measures throughput as a function of size, from 32² to 4096² matmuls and from cache-resident to DRAM-sized copies, so small kernels are modeled at the rate they actually reach. On async devices only the un-hidden part of launch overhead is charged.</p>
+          </div>
+          <div class="window">
+            <div class="window-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>attribute.py</div>
+<pre><code>calibration = adapter.<span class="f">calibrate</span>(<span class="s">"mps"</span>)
+kernels = adapter.<span class="f">trace_kernels</span>(model, inputs)
+
+attribution = <span class="f">attribute_gap</span>(
+    ops, measurement, hardware, calibration,
+    kernel_count=<span class="f">len</span>(kernels),
+    isolated_seconds=adapter.<span class="f">replay</span>(ops, <span class="s">"mps"</span>),
+    assume_fusion=<span class="k">False</span>,
+)
+<span class="f">print</span>(attribution.<span class="f">render</span>())
+<span class="k">for</span> step <span class="k">in</span> attribution.<span class="f">recommendations</span>():
+    <span class="f">print</span>(step)</code></pre>
+          </div>
+        </div>
+        <ol class="stack reveal" aria-label="Runtime components, in order">
+          <li class="floor"><span class="idx">01</span><code>roofline_floor</code><p>FLOPs and fused bytes at datasheet peak with perfect overlap. Nothing can run faster.</p></li>
+          <li><span class="idx">02</span><code>unfused_traffic</code><p>Extra DRAM round-trips for intermediates a fusing compiler would keep on chip.</p></li>
+          <li><span class="idx">03</span><code>serialization</code><p>Lost compute/memory overlap: each op bounded by its own roofline.</p></li>
+          <li><span class="idx">04</span><code>peak_derate</code><p>Datasheet peak vs. measured achievable throughput at each op's size.</p></li>
+          <li><span class="idx">05</span><code>dispatch</code><p>Per-kernel launch overhead not hidden by async execution, plus per-call sync.</p></li>
+          <li><span class="idx">06</span><code>kernel_inefficiency</code><p>How much slower each op runs alone than its achievable roofline (op replay).</p></li>
+          <li><span class="idx">07</span><code>timing_jitter</code><p>Median minus fastest sample.</p></li>
+          <li><span class="idx">08</span><code>residual</code><p>Composition effects: framework glue, uncaptured ops, cache interference.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="block" id="validation">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <p class="kicker">Published validation</p>
+          <h2>Out-of-sample error, on real hardware.</h2>
+          <p><code>benchmarks/validate.py</code> runs a grid of MLP, CNN, LSTM and Transformer workloads on every installed backend and scores three predictors: zero-shot (microbenchmark calibration only), op-replay (each op timed alone, then composed) and a leave-one-out 4-parameter fit.</p>
+        </div>
+        <div class="stats reveal">
+          <div class="stat"><b>0 / 59</b><span>lower-bound violations</span></div>
+          <div class="stat"><b>59</b><span>workloads, 3 backends</span></div>
+          <div class="stat"><b>0.91–0.99</b><span>Spearman ρ, workload ranking</span></div>
+          <div class="stat"><b>13–33%</b><span>median error, best predictor</span></div>
+        </div>
+        <div class="table-wrap reveal">
+          <table>
+            <caption>Apple M3. Mean absolute percentage error, median in parentheses. Best predictor per backend in bold.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Backend</th>
+                <th scope="col" class="num">Bound violations</th>
+                <th scope="col" class="num">Zero-shot MAPE</th>
+                <th scope="col" class="num">Op-replay MAPE</th>
+                <th scope="col" class="num">LOO fit MAPE</th>
+                <th scope="col" class="num">Rank corr.</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row" style="background:none;color:var(--fg)">PyTorch eager, CPU</th><td class="num">0 / 23</td><td class="num">61% (66%)</td><td class="num"><strong>26% (22%)</strong></td><td class="num">51% (52%)</td><td class="num">0.987</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">PyTorch eager, MPS</th><td class="num">0 / 23</td><td class="num">29% (19%)</td><td class="num">30% (15%)</td><td class="num"><strong>22% (13%)</strong></td><td class="num">0.948</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">JAX jit, CPU</th><td class="num">0 / 13</td><td class="num"><strong>39% (33%)</strong></td><td class="num">n/a</td><td class="num">45% (41%)</td><td class="num">0.989</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note reveal">Most of the remaining error is eager-LSTM decomposition and composition effects that only appear when ops run together, which is what the <code>residual</code> component isolates. Every per-workload number is in <a href="https://github.com/davidgraymi/neural-cost/blob/main/VALIDATION_REPORT.md">VALIDATION_REPORT.md</a>. Run it on your own hardware with <code>python benchmarks/validate.py</code>.</p>
+      </div>
+    </section>
+
+    <section class="block" id="frameworks">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <p class="kicker">Frameworks</p>
+          <h2>Bring your own framework. Or none.</h2>
+          <p>The core works on portable <code>Operation</code> records and has no mandatory dependencies. Adapters are optional extras that emit the right operation kind for each layer.</p>
+        </div>
+        <div class="fw">
+          <article class="card reveal">
+            <span class="tag">torch</span>
+            <h3>PyTorch</h3>
+            <p>Eager hooks and FX tracing. Linear, Conv2d, Embedding, RNN/GRU/LSTM, MultiheadAttention, norms. Kernel tracing and op replay for attribution.</p>
+            <div class="cmd"><code>pip install "neural-cost[torch]"</code><button class="copy" type="button" data-copy='pip install "neural-cost[torch]"' aria-label="Copy PyTorch install command"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+          </article>
+          <article class="card reveal">
+            <span class="tag">jax</span>
+            <h3>JAX</h3>
+            <p>jaxpr tracing that recurses into <code>jit</code>, <code>scan</code>, <code>while</code>, <code>cond</code> and <code>custom_jvp</code>, with arbitrary <code>dot_general</code> contractions and NHWC convolutions.</p>
+            <div class="cmd"><code>pip install "neural-cost[jax]"</code><button class="copy" type="button" data-copy='pip install "neural-cost[jax]"' aria-label="Copy JAX install command"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+          </article>
+          <article class="card reveal">
+            <span class="tag">tensorflow</span>
+            <h3>TensorFlow / Keras</h3>
+            <p>Dense, Conv2D, Embedding, GRU/LSTM, MultiHeadAttention, BatchNormalization, LayerNormalization and pooling layers.</p>
+            <div class="cmd"><code>pip install "neural-cost[tensorflow]"</code><button class="copy" type="button" data-copy='pip install "neural-cost[tensorflow]"' aria-label="Copy TensorFlow install command"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+          </article>
+        </div>
+        <p class="note reveal"><a href={url("docs/adapters/")}>Adapter guide</a> · <a href={url("docs/hardware/")}>Hardware detection</a>. On Apple Silicon, JAX runs on the GPU through <code>neural-cost[jax-metal]</code> (Apple's Metal plugin) or <code>neural-cost[jax-mps]</code> (community plugin via MLX). Hardware is detected from a chip table, a STREAM triad, <code>nvidia-smi</code>, or a CPU fallback.</p>
+      </div>
+    </section>
+
+    <section class="block" id="serving">
+      <div class="wrap">
+        <div class="section-head reveal">
+          <p class="kicker">LLM serving models</p>
+          <h2>Analytical models for modern inference.</h2>
+          <p>Closed-form cost models for the techniques that dominate LLM serving, each with a gap analysis against your hardware. See <a href={url("docs/llm-serving/")}>LLM serving models</a> and <a href={url("docs/distributed/")}>distributed training</a>.</p>
+        </div>
+        <div class="chips">
+          <div class="chip reveal"><svg class="icon" aria-hidden="true"><use href="#i-split"/></svg><div><h3>Mixture-of-Experts</h3><p>Top-k routing, expected loaded experts and memory thrashing at small batch.</p></div></div>
+          <div class="chip reveal"><svg class="icon" aria-hidden="true"><use href="#i-zap"/></svg><div><h3>Speculative decoding</h3><p>Breakeven acceptance rate α*, including per-position acceptance profiles.</p></div></div>
+          <div class="chip reveal"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg><div><h3>PagedAttention</h3><p>Block allocation, fragmentation, prefix sharing and concurrency gain.</p></div></div>
+          <div class="chip reveal"><svg class="icon" aria-hidden="true"><use href="#i-rows"/></svg><div><h3>Continuous batching</h3><p>Mixed decode and chunked-prefill iterations and optimal chunk size.</p></div></div>
+          <div class="chip reveal"><svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg><div><h3>State space models</h3><p>Mamba / S6 / SSD scans and linear attention.</p></div></div>
+          <div class="chip reveal"><svg class="icon" aria-hidden="true"><use href="#i-memory"/></svg><div><h3>Training memory</h3><p>Parameters, gradients, optimizer state and activation bounds.</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" id="agents">
+      <div class="wrap">
+        <div class="cta reveal">
+          <div>
+            <p class="kicker"><svg class="icon" aria-hidden="true" style="width:16px;height:16px;vertical-align:-3px"><use href="#i-bot"/></svg> AI agent skill</p>
+            <h2>Teach your coding agent to profile models.</h2>
+            <p>neural-cost ships an agent skill covering when to use it, which extra to install, per-framework recipes and how to report results. It's bundled with the package, so it always matches the installed API. In Claude Code you can also add it as a plugin. <a href={url("docs/agent-skill/")}>Agent skill docs</a>.</p>
+          </div>
+          <div class="window">
+            <div class="window-bar"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>terminal</div>
+<pre><code><span class="c"># Claude Code</span>
+neural-cost skill --install ~/.claude/skills
+
+<span class="c"># Any agent that reads AGENTS.md</span>
+neural-cost skill --agents-md &gt;&gt; AGENTS.md</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</Base>
+
+<style is:global>
+    /* Hero */
+    .hero { padding: 56px 0 64px; }
+    @media (min-width: 960px) { .hero { padding: 88px 0 96px; } }
+    .hero-grid { display: grid; gap: 40px; align-items: center; }
+    @media (min-width: 960px) { .hero-grid { grid-template-columns: 1fr 1.05fr; gap: 56px; } }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      font: 500 13px/1 var(--font-mono); color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      padding: 7px 11px; border-radius: 999px; margin-bottom: 20px;
+    }
+    .hero h1 { font-size: clamp(34px, 6vw, 54px); font-weight: 700; text-wrap: balance; }
+    .hero h1 .hl { color: var(--accent); }
+    .lede { margin-top: 18px; font-size: 18px; color: var(--fg-muted); max-width: 34em; text-wrap: pretty; }
+    .install {
+      margin-top: 28px; display: flex; align-items: center; gap: 8px;
+      background: var(--code-bg); border: 1px solid var(--border);
+      border-radius: 10px; padding: 6px 6px 6px 16px; max-width: 420px;
+    }
+    .install code {
+      flex: 1; min-width: 0; color: var(--code-fg); font-size: 15px;
+      white-space: nowrap; overflow-x: auto; background: none; padding: 0;
+    }
+    .install code .prompt { color: var(--code-dim); user-select: none; }
+    .copy {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 44px; height: 44px; border-radius: 8px; flex: none;
+      background: transparent; border: 0; color: var(--code-dim); cursor: pointer;
+      transition: color .15s, background-color .15s;
+    }
+    .copy:hover { color: var(--code-fg); background: rgba(255,255,255,.06); }
+    .copy[data-copied="true"] { color: var(--code-str); }
+    .hero-ctas { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 12px; }
+    .hero-meta { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 8px 20px; color: var(--fg-muted); font-size: 14px; }
+    .hero-meta span { display: inline-flex; align-items: center; gap: 6px; }
+    .hero-meta .icon { width: 16px; height: 16px; color: var(--accent); }
+
+    /* Terminal / code window */
+    .window {
+      background: var(--code-bg); border: 1px solid #1E293B; border-radius: var(--radius);
+      box-shadow: var(--shadow); overflow: hidden; min-width: 0;
+    }
+    .window-bar {
+      display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+      border-bottom: 1px solid #1E293B; color: var(--code-dim); font: 500 12.5px/1 var(--font-mono);
+    }
+    .dots { display: inline-flex; gap: 6px; margin-right: 6px; }
+    .dots i { width: 10px; height: 10px; border-radius: 50%; background: #334155; display: block; }
+    .window pre {
+      margin: 0; padding: 18px 18px 20px; overflow-x: auto;
+      color: var(--code-fg); font-size: 13.5px; line-height: 1.65; tab-size: 4;
+    }
+    .window .sep { border-top: 1px dashed #1E293B; }
+    .k { color: var(--code-kw); } .s { color: var(--code-str); } .f { color: var(--code-fn); }
+    .n { color: var(--code-num); } .c { color: var(--code-dim); } .o { color: var(--code-str); font-weight: 600; }
+    .figcap { margin-top: 12px; font-size: 13px; color: var(--fg-muted); line-height: 1.5; }
+
+    /* Sections */
+    section.block { padding: 72px 0; border-top: 1px solid var(--border); }
+    @media (min-width: 960px) { section.block { padding: 96px 0; } }
+    .section-head { max-width: 46em; margin-bottom: 40px; }
+    .kicker { font: 600 13px/1 var(--font-mono); color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 14px; }
+    .section-head h2 { font-size: clamp(26px, 3.6vw, 36px); font-weight: 700; text-wrap: balance; }
+    .section-head p { margin-top: 14px; color: var(--fg-muted); font-size: 17px; text-wrap: pretty; }
+
+    .grid-3 { display: grid; gap: 16px; }
+    @media (min-width: 760px) { .grid-3 { grid-template-columns: repeat(3, 1fr); gap: 20px; } }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 24px; display: flex; flex-direction: column; gap: 12px;
+    }
+    .card-icon {
+      width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+      background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+    }
+    .card h3 { font-size: 19px; font-weight: 600; }
+    .card p { color: var(--fg-muted); font-size: 15.5px; }
+    .card .more { margin-top: auto; padding-top: 4px; font-weight: 600; font-size: 15px; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+    .card .more .icon { width: 16px; height: 16px; transition: transform .15s; }
+    .card .more:hover .icon { transform: translateX(3px); }
+
+    /* Attribution list */
+    .split { display: grid; gap: 32px; align-items: start; }
+    .split > *, .hero-grid > *, .cta > *, .fw > *, .grid-3 > *, .chips > * { min-width: 0; }
+    .card p, .chip p { overflow-wrap: break-word; }
+    .split > *, .hero-grid > *, .cta > *, .fw > *, .grid-3 > *, .chips > * { min-width: 0; }
+    .card p, .chip p { overflow-wrap: break-word; }
+    @media (min-width: 960px) { .split { grid-template-columns: 1fr 1fr; gap: 48px; } }
+    .stack { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--card); }
+    .stack li { display: grid; grid-template-columns: 28px 1fr; gap: 4px 12px; padding: 14px 18px; border-top: 1px solid var(--border); }
+    .stack li:first-child { border-top: 0; }
+    .stack .idx { font: 600 13px/1.6 var(--font-mono); color: var(--fg-muted); }
+    .stack code { background: none; padding: 0; font-size: 14px; font-weight: 600; color: var(--fg); }
+    .stack p { grid-column: 2; color: var(--fg-muted); font-size: 14.5px; }
+    .stack li.floor code { color: var(--accent); }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+    table { width: 100%; border-collapse: collapse; font-size: 15px; min-width: 640px; }
+    caption { text-align: left; padding: 14px 18px; color: var(--fg-muted); font-size: 14px; border-bottom: 1px solid var(--border); caption-side: top; }
+    th, td { padding: 12px 18px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    th { font-weight: 600; font-size: 13.5px; color: var(--fg-muted); background: var(--muted); }
+    td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; }
+    td strong { color: var(--accent); }
+    .note { margin-top: 16px; color: var(--fg-muted); font-size: 15px; max-width: 52em; }
+    .stats { display: grid; gap: 16px; margin-bottom: 28px; grid-template-columns: repeat(2, 1fr); }
+    @media (min-width: 760px) { .stats { grid-template-columns: repeat(4, 1fr); } }
+    .stat { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+    .stat b { display: block; font: 600 28px/1.1 var(--font-mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+    .stat span { display: block; margin-top: 6px; font-size: 14px; color: var(--fg-muted); }
+
+    /* Frameworks */
+    .fw { display: grid; gap: 16px; }
+    @media (min-width: 700px) { .fw { grid-template-columns: repeat(2, 1fr); } }
+    @media (min-width: 1000px) { .fw { grid-template-columns: repeat(3, 1fr); } }
+    .fw .card { gap: 10px; }
+    .fw .cmd {
+      display: flex; align-items: center; gap: 4px; margin-top: auto;
+      background: var(--code-bg); border-radius: 8px; padding: 2px 2px 2px 12px; border: 1px solid #1E293B;
+    }
+    .fw .cmd code { flex: 1; min-width: 0; background: none; padding: 0; color: var(--code-fg); font-size: 13px; white-space: nowrap; overflow-x: auto; }
+    .tag { display: inline-block; font: 500 12px/1 var(--font-mono); color: var(--fg-muted); border: 1px solid var(--border-strong); border-radius: 999px; padding: 5px 9px; }
+
+    /* Serving models */
+    .chips { display: grid; gap: 12px; }
+    @media (min-width: 700px) { .chips { grid-template-columns: repeat(2, 1fr); } }
+    @media (min-width: 1000px) { .chips { grid-template-columns: repeat(3, 1fr); } }
+    .chip { display: flex; gap: 14px; padding: 18px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+    .chip .icon { color: var(--accent); margin-top: 2px; }
+    .chip h3 { font-size: 16px; font-weight: 600; }
+    .chip p { margin-top: 4px; color: var(--fg-muted); font-size: 14.5px; }
+
+    /* CTA */
+    .cta {
+      background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+      padding: 32px 24px; display: grid; gap: 24px; align-items: center;
+    }
+    @media (min-width: 860px) { .cta { grid-template-columns: 1.2fr 1fr; padding: 40px 44px; } }
+    .cta h2 { font-size: clamp(24px, 3vw, 30px); }
+    .cta p { margin-top: 10px; color: var(--fg-muted); }
+    .cta .window pre { font-size: 13px; }
+</style>

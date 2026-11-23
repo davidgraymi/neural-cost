@@ -1,0 +1,57 @@
+---
+import { REPO, url } from "../lib/site";
+
+interface Props {
+  active?: "home" | "docs";
+}
+const { active = "home" } = Astro.props;
+---
+<header class="nav">
+  <div class="nav-inner">
+    <slot name="before" />
+    <a class="brand" href={url()} aria-label="neural-cost home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0F172A" stroke="#334155"/><path d="M6 24 L14 24 L26 8" stroke="#22C55E" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      neural-cost
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href={url("docs/getting-started/")} aria-current={active === "docs" ? "page" : undefined}>Docs</a>
+      <a href={url("docs/attribution/")}>Attribution</a>
+      <a href={url("docs/validation/")}>Validation</a>
+      <a href={url("docs/cli/")}>CLI</a>
+    </nav>
+    <a class="btn btn-ghost btn-sm nav-gh" href={REPO}>
+      <svg class="icon" aria-hidden="true"><use href="#i-github"/></svg> GitHub
+    </a>
+  </div>
+</header>
+
+<style>
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: saturate(140%) blur(10px);
+    -webkit-backdrop-filter: saturate(140%) blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
+    display: flex; align-items: center; gap: 12px; height: var(--nav-h);
+    max-width: 1400px; margin: 0 auto; padding: 0 16px;
+  }
+  @media (min-width: 768px) { .nav-inner { padding: 0 32px; gap: 24px; } }
+  .brand {
+    display: inline-flex; align-items: center; gap: 10px;
+    font: 600 17px/1 var(--font-mono); color: var(--fg); text-decoration: none;
+  }
+  .brand svg { width: 26px; height: 26px; }
+  .nav-links { display: none; gap: 4px; margin-left: auto; }
+  .nav-links a {
+    color: var(--fg-muted); text-decoration: none; font-weight: 500; font-size: 15px;
+    padding: 10px 12px; border-radius: 8px; transition: color .15s, background-color .15s;
+  }
+  .nav-links a:hover, .nav-links a[aria-current="page"] { color: var(--fg); background: var(--muted); }
+  .nav-gh { margin-left: auto; }
+  @media (min-width: 860px) {
+    .nav-links { display: flex; }
+    .nav-gh { margin-left: 8px; }
+  }
+</style>
