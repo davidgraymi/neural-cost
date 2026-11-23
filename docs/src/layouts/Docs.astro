@@ -1,0 +1,227 @@
+---
+import type { CollectionEntry } from "astro:content";
+import type { MarkdownHeading } from "astro";
+import Base from "./Base.astro";
+import Header from "../components/Header.astro";
+import Footer from "../components/Footer.astro";
+import { REPO, SECTIONS, url } from "../lib/site";
+
+interface Props {
+  entry: CollectionEntry<"docs">;
+  all: CollectionEntry<"docs">[];
+  headings: MarkdownHeading[];
+}
+const { entry, all, headings } = Astro.props;
+
+const ordered = SECTIONS.flatMap((s) =>
+  all.filter((d) => d.data.section === s).sort((a, b) => a.data.order - b.data.order),
+);
+const idx = ordered.findIndex((d) => d.id === entry.id);
+const prev = idx > 0 ? ordered[idx - 1] : undefined;
+const next = idx < ordered.length - 1 ? ordered[idx + 1] : undefined;
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+const editUrl = `${REPO}/edit/main/docs/src/content/docs/${entry.id}.md`;
+const href = (d: CollectionEntry<"docs">) => url(`docs/${d.id}/`);
+---
+<Base title={`${entry.data.title} · neural-cost`} description={entry.data.description}>
+  <Header active="docs" />
+  <div class="docs">
+    <aside class="sidebar" aria-label="Documentation">
+      <details class="side-toggle" open>
+        <summary>
+          <svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg>
+          <span>{entry.data.section} / {entry.data.title}</span>
+        </summary>
+        <nav>
+          {SECTIONS.map((section) => (
+            <div class="side-group">
+              <p class="side-title">{section}</p>
+              <ul>
+                {ordered.filter((d) => d.data.section === section).map((d) => (
+                  <li>
+                    <a href={href(d)} aria-current={d.id === entry.id ? "page" : undefined}>{d.data.title}</a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </nav>
+      </details>
+    </aside>
+
+    <main id="main" class="content">
+      <article>
+        <header class="page-head">
+          <p class="crumb">{entry.data.section}</p>
+          <h1>{entry.data.title}</h1>
+          <p class="lede">{entry.data.description}</p>
+        </header>
+        <div class="prose">
+          <slot />
+        </div>
+      </article>
+
+      <nav class="pager" aria-label="Previous and next pages">
+        {prev ? (
+          <a class="pager-link" href={href(prev)}>
+            <span class="pager-label"><svg class="icon" aria-hidden="true"><use href="#i-arrow-left"/></svg> Previous</span>
+            <span class="pager-title">{prev.data.title}</span>
+          </a>
+        ) : <span />}
+        {next && (
+          <a class="pager-link next" href={href(next)}>
+            <span class="pager-label">Next <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></span>
+            <span class="pager-title">{next.data.title}</span>
+          </a>
+        )}
+      </nav>
+      <a class="edit" href={editUrl}><svg class="icon" aria-hidden="true"><use href="#i-pencil"/></svg> Edit this page on GitHub</a>
+    </main>
+
+    {toc.length > 1 && (
+      <aside class="toc" aria-label="On this page">
+        <p class="side-title">On this page</p>
+        <ul>
+          {toc.map((h) => (
+            <li class={`d${h.depth}`}><a href={`#${h.slug}`}>{h.text}</a></li>
+          ))}
+        </ul>
+      </aside>
+    )}
+  </div>
+  <Footer />
+</Base>
+
+<script>
+  // Sidebar is open by default (no-JS fallback); collapse it behind its toggle on narrow screens.
+  const toggle = document.querySelector<HTMLDetailsElement>(".side-toggle");
+  const wide = window.matchMedia("(min-width: 960px)");
+  const sync = () => { if (toggle) toggle.open = wide.matches; };
+  sync();
+  wide.addEventListener("change", sync);
+</script>
+
+<style>
+  .docs {
+    max-width: 1400px; margin: 0 auto; padding: 0 16px;
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 48px;
+  }
+  @media (min-width: 768px) { .docs { padding: 0 32px; } }
+  @media (min-width: 960px) { .docs { grid-template-columns: 240px minmax(0, 1fr); } }
+  @media (min-width: 1240px) { .docs { grid-template-columns: 240px minmax(0, 1fr) 220px; } }
+
+  /* Sidebar */
+  .sidebar { padding-top: 16px; }
+  @media (min-width: 960px) {
+    .sidebar {
+      position: sticky; top: var(--nav-h); align-self: start;
+      max-height: calc(100vh - var(--nav-h)); overflow-y: auto; padding: 32px 0 48px;
+    }
+  }
+  .side-toggle summary {
+    display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--card);
+    cursor: pointer; list-style: none; font-weight: 500; font-size: 15px;
+  }
+  .side-toggle summary::-webkit-details-marker { display: none; }
+  .side-toggle summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side-toggle nav { padding: 16px 4px 8px; }
+  @media (min-width: 960px) {
+    .side-toggle summary { display: none; }
+    .side-toggle nav { padding: 0; }
+  }
+  .side-group + .side-group { margin-top: 24px; }
+  .side-title {
+    font: 600 12px/1 var(--font-mono); text-transform: uppercase; letter-spacing: .08em;
+    color: var(--fg-muted); margin: 0 0 10px 12px;
+  }
+  .sidebar ul, .toc ul { list-style: none; margin: 0; padding: 0; }
+  .sidebar a {
+    display: block; padding: 8px 12px; border-radius: 8px; font-size: 15px;
+    color: var(--fg-muted); text-decoration: none; transition: color .15s, background-color .15s;
+  }
+  .sidebar a:hover { color: var(--fg); background: var(--muted); }
+  .sidebar a[aria-current="page"] {
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600;
+  }
+
+  /* Content */
+  .content { padding: 32px 0 64px; min-width: 0; }
+  @media (min-width: 960px) { .content { padding-top: 48px; } }
+  article { max-width: 780px; }
+  .page-head { margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+  .crumb { font: 600 13px/1 var(--font-mono); color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+  .page-head h1 { font-size: clamp(30px, 4.5vw, 42px); font-weight: 700; text-wrap: balance; }
+  .lede { margin-top: 12px; color: var(--fg-muted); font-size: 18px; text-wrap: pretty; }
+
+  .pager { max-width: 780px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 56px; }
+  .pager-link {
+    display: flex; flex-direction: column; gap: 6px; padding: 16px 18px;
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+    text-decoration: none; transition: border-color .15s;
+  }
+  .pager-link:hover { border-color: var(--accent); }
+  .pager-link.next { text-align: right; align-items: flex-end; grid-column: 2; }
+  .pager-label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg-muted); }
+  .pager-label .icon { width: 14px; height: 14px; }
+  .pager-title { font-weight: 600; color: var(--fg); }
+  .edit {
+    display: inline-flex; align-items: center; gap: 8px; margin-top: 24px; min-height: 44px;
+    color: var(--fg-muted); font-size: 14px; text-decoration: none;
+  }
+  .edit:hover { color: var(--fg); }
+  .edit .icon { width: 16px; height: 16px; }
+
+  /* TOC */
+  .toc { display: none; }
+  @media (min-width: 1240px) {
+    .toc {
+      display: block; position: sticky; top: var(--nav-h); align-self: start;
+      max-height: calc(100vh - var(--nav-h)); overflow-y: auto; padding: 48px 0;
+    }
+  }
+  .toc .side-title { margin-left: 0; }
+  .toc a {
+    display: block; padding: 5px 0; font-size: 14px; line-height: 1.4;
+    color: var(--fg-muted); text-decoration: none;
+  }
+  .toc a:hover { color: var(--fg); }
+  .toc .d3 a { padding-left: 14px; font-size: 13.5px; }
+</style>
+
+<style is:global>
+  .prose { font-size: 16.5px; line-height: 1.7; }
+  .prose > * + * { margin-top: 1.1em; }
+  .prose h2 { font-size: 26px; font-weight: 700; margin-top: 2em; padding-top: .2em; }
+  .prose h3 { font-size: 20px; font-weight: 600; margin-top: 1.7em; }
+  .prose h4 { font-size: 17px; font-weight: 600; margin-top: 1.5em; }
+  .prose ul, .prose ol { padding-left: 1.4em; }
+  .prose li + li { margin-top: .35em; }
+  .prose strong { font-weight: 600; }
+  .prose blockquote {
+    margin-left: 0; padding: 4px 0 4px 18px; border-left: 3px solid var(--accent); color: var(--fg-muted);
+  }
+  .prose img { max-width: 100%; height: auto; border-radius: 8px; }
+  .prose hr { border: 0; border-top: 1px solid var(--border); margin: 2.5em 0; }
+
+  .prose .code-wrap { position: relative; }
+  .prose pre {
+    margin: 0; padding: 16px 18px; overflow-x: auto; border-radius: 10px;
+    border: 1px solid var(--border); font-size: 13.5px; line-height: 1.65;
+  }
+  .prose .code-wrap .copy {
+    position: absolute; top: 6px; right: 6px; width: 36px; height: 36px;
+    opacity: 0; background: var(--card); border: 1px solid var(--border);
+  }
+  .prose .code-wrap:hover .copy, .prose .code-wrap .copy:focus-visible { opacity: 1; }
+  @media (hover: none) { .prose .code-wrap .copy { opacity: 1; } }
+
+  .prose table {
+    display: block; overflow-x: auto; width: 100%; border-collapse: collapse; font-size: 14.5px;
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .prose th, .prose td { padding: 10px 14px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  .prose th { background: var(--muted); font-weight: 600; font-size: 13.5px; color: var(--fg-muted); white-space: nowrap; }
+  .prose tbody tr:last-child td { border-bottom: 0; }
+  .prose td code { white-space: nowrap; }
+</style>

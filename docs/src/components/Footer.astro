@@ -1,0 +1,27 @@
+---
+import { PYPI, REPO, url } from "../lib/site";
+---
+<footer>
+  <div class="foot">
+    <span>neural-cost · MIT License</span>
+    <nav aria-label="Footer">
+      <a href={url("docs/getting-started/")}>Docs</a>
+      <a href={REPO}>GitHub</a>
+      <a href={PYPI}>PyPI</a>
+      <a href={`${REPO}/issues`}>Issues</a>
+      <a href={`${REPO}/releases`}>Releases</a>
+    </nav>
+  </div>
+</footer>
+
+<style>
+  footer { border-top: 1px solid var(--border); padding: 32px 0 48px; color: var(--fg-muted); font-size: 14px; }
+  .foot {
+    max-width: var(--maxw); margin: 0 auto; padding: 0 16px;
+    display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; justify-content: space-between;
+  }
+  @media (min-width: 768px) { .foot { padding: 0 32px; } }
+  nav { display: flex; flex-wrap: wrap; gap: 4px 20px; }
+  a { color: var(--fg-muted); text-decoration: none; padding: 6px 0; }
+  a:hover { color: var(--fg); }
+</style>

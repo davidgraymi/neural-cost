@@ -30,7 +30,8 @@ workload it covers.
   tensorflow and numpy lazily, and guard tests with `pytest.importorskip`.
 - Format and lint: `uv run --extra dev python scripts/format.py` (CI runs it with `--check`).
 - Tests: `uv run --extra dev --extra torch --extra jax python -m pytest tests/`.
-- When you change a public API, update `README.md` and `skills/neural-cost/SKILL.md`.
+- When you change a public API, update `README.md`, `skills/neural-cost/SKILL.md`
+  and the matching page in `docs/src/content/docs/` (the Astro website; see `docs/README.md`).
   `tests/test_skill.py` executes the skill's Python examples and checks its CLI
   commands exist, so a stale skill fails CI.
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`). They

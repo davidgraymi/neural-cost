@@ -1,0 +1,119 @@
+:root {
+  --bg: #0F172A;
+  --bg-elev: #131C31;
+  --card: #1B2336;
+  --muted: #272F42;
+  --fg: #F8FAFC;
+  --fg-muted: #A3B1C6;
+  --border: #334155;
+  --border-strong: #475569;
+  --accent: #22C55E;
+  --accent-strong: #4ADE80;
+  --on-accent: #0F172A;
+  --code-bg: #0B1222;
+  --code-fg: #E2E8F0;
+  --code-dim: #8796AD;
+  --code-kw: #C4B5FD;
+  --code-str: #86EFAC;
+  --code-fn: #7DD3FC;
+  --code-num: #FCD34D;
+  --ring: #F8FAFC;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+  --radius: 12px;
+  --maxw: 1120px;
+  --nav-h: 60px;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #F8FAFC;
+    --bg-elev: #FFFFFF;
+    --card: #FFFFFF;
+    --muted: #EEF2F7;
+    --fg: #0F172A;
+    --fg-muted: #475569;
+    --border: #E2E8F0;
+    --border-strong: #CBD5E1;
+    --accent: #15803D;
+    --accent-strong: #166534;
+    --on-accent: #FFFFFF;
+    --ring: #0F172A;
+    --shadow: 0 1px 2px rgba(15,23,42,.06), 0 8px 24px rgba(15,23,42,.06);
+    color-scheme: light;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: calc(var(--nav-h) + 16px); -webkit-text-size-adjust: 100%; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 16px/1.6 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { color: var(--accent-strong); }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; border-radius: 6px; }
+code, pre, kbd { font-family: var(--font-mono); }
+:not(pre) > code {
+  font-size: .875em;
+  background: var(--muted);
+  padding: .1em .4em;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+h1, h2, h3 { line-height: 1.2; margin: 0; letter-spacing: -0.015em; }
+p { margin: 0; }
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 16px; }
+@media (min-width: 768px) { .wrap { padding: 0 32px; } }
+.skip {
+  position: absolute; left: 16px; top: -48px;
+  background: var(--accent); color: var(--on-accent);
+  padding: 8px 14px; border-radius: 8px; z-index: 100; font-weight: 600;
+}
+.skip:focus { top: 12px; }
+.icon { width: 20px; height: 20px; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; padding: 0 18px; border-radius: 10px;
+  font: 600 15px/1 var(--font-sans); text-decoration: none; cursor: pointer;
+  border: 1px solid transparent; transition: background-color .15s, border-color .15s, color .15s, transform .15s;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--accent); color: var(--on-accent); }
+.btn-primary:hover { background: var(--accent-strong); color: var(--on-accent); }
+.btn-ghost { background: transparent; color: var(--fg); border-color: var(--border-strong); }
+.btn-ghost:hover { background: var(--muted); color: var(--fg); }
+.btn-sm { min-height: 40px; padding: 0 14px; font-size: 14px; }
+
+/* Copy button */
+.copy {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; border-radius: 8px; flex: none;
+  background: transparent; border: 0; color: var(--code-dim); cursor: pointer;
+  transition: color .15s, background-color .15s;
+}
+.copy:hover { color: var(--code-fg); background: rgba(255,255,255,.06); }
+.copy[data-copied="true"] { color: var(--code-str); }
+
+/* Shiki dual themes */
+.astro-code, .astro-code span { color: var(--shiki-dark); background-color: var(--shiki-dark-bg); }
+@media (prefers-color-scheme: light) {
+  .astro-code, .astro-code span { color: var(--shiki-light); background-color: var(--shiki-light-bg); }
+}
+
+/* Reveal on scroll */
+.reveal { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .js .reveal { opacity: 0; transform: translateY(12px); transition: opacity .35s ease-out, transform .35s ease-out; }
+  .js .reveal.in { opacity: 1; transform: none; }
+}

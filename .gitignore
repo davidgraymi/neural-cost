@@ -217,3 +217,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Astro site (docs/)
+docs/node_modules/
+docs/dist/
+docs/.astro/
+!docs/src/lib/
