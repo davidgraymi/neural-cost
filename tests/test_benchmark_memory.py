@@ -185,3 +185,61 @@ class BenchmarkMemoryTelemetryTests(unittest.TestCase):
         }
         fig_path = fig_memory_utilization(hw, records)
         self.assertTrue(Path(fig_path).exists())
+
+
+def test_torch_cpu_peak_is_high_water_not_sum_of_allocations() -> None:
+    torch = pytest.importorskip("torch")
+
+    def churn(x):
+        for _ in range(5):
+            block = torch.empty(2_500_000)  # 10 MB, freed before the next one
+            del block
+        return x
+
+    meas = TorchAdapter().trace(churn, torch.ones(1), warmup=1, repeats=3)
+    # Only one 10 MB block is ever live; summing allocations reported 150 MB.
+    assert meas.peak_memory_bytes is not None
+    assert 10_000_000 <= meas.peak_memory_bytes < 11_000_000
+
+
+def test_torch_benchmark_times_without_profiler_and_keeps_trace_stats(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+    profiling = []
+    real_profile = torch.profiler.profile
+
+    class Spy(real_profile):
+        def __enter__(self):
+            profiling.append(True)
+            return super().__enter__()
+
+        def __exit__(self, *exc):
+            profiling.pop()
+            return super().__exit__(*exc)
+
+    monkeypatch.setattr(torch.profiler, "profile", Spy)
+    states = []
+    model = torch.nn.Linear(64, 64).eval()
+    x = torch.randn(4, 64)
+
+    def run(inp):
+        states.append(bool(profiling))
+        return model(inp)
+
+    meas = TorchAdapter().benchmark(run, x, warmup=1, repeats=4)
+    # warmup + 4 timed calls unprofiled, then 4 profiled calls for trace stats.
+    assert states == [False] * 5 + [True] * 4
+    assert meas.trace_event_count and meas.trace_event_count > 0
+    assert meas.peak_memory_bytes is not None
+    plain = TorchAdapter(use_profiler=False).benchmark(run, x, warmup=0, repeats=2)
+    assert plain.trace_event_count is None
+
+
+def test_torch_mps_reports_gpu_time_and_no_fake_peak() -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS not available")
+    x = torch.randn(1024, 1024, device="mps")
+    meas = TorchAdapter(use_profiler=False).benchmark(lambda a: a @ a, x, warmup=2, repeats=5)
+    assert meas.peak_memory_bytes is None  # MPS has no peak counter
+    assert meas.allocated_memory_bytes is not None
+    assert 0 < meas.trace_device_time_seconds <= sum(meas.samples_seconds)

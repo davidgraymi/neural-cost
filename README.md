@@ -217,7 +217,7 @@ components that sum exactly to the median:
 from neural_cost import attribute_gap, detect_hardware
 from neural_cost.adapters import TorchAdapter
 
-adapter = TorchAdapter(use_profiler=False)            # no profiler overhead in timings
+adapter = TorchAdapter(use_profiler=False)            # skip the extra profiled pass
 hardware, _ = detect_hardware()
 calibration = adapter.calibrate("mps")                 # size-dependent FLOP/s + bandwidth curves,
                                                        # dispatch and sync latency
@@ -629,8 +629,11 @@ measurement = TorchAdapter().benchmark(model, *inputs)
 `TorchAdapter` captures `Linear`, 1-D to 3-D (transposed) convolution and pooling,
 `Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, and
 `BatchNorm` modules via forward hooks and
-synchronizes CUDA benchmarks.  Its `trace` method uses `torch.profiler` and
-returns aggregate profiler-event and CUDA allocator statistics.
+synchronizes CUDA and MPS benchmarks.  `benchmark` always times a loop with
+no profiler attached, then (unless `use_profiler=False`) runs a separate
+`torch.profiler` pass for event counts, per-op self time and CPU peak memory.
+CUDA reports allocator peak, current and reserved bytes; MPS reports GPU time
+from `torch.mps.Event` pairs and current/driver memory (it has no peak counter).
 `TensorFlowAdapter` captures the equivalent Keras layers and returns supported
 TensorFlow GPU allocator statistics.  `JaxAdapter` traces `dot_general`,
 `conv_general_dilated`, elementwise, comparison and reduction primitives, and
