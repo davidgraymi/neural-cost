@@ -89,7 +89,7 @@ hardware, _ = <span class="f">detect_hardware</span>(device=<span class="s">"cpu
           <article class="card reveal">
             <div class="card-icon"><svg class="icon" aria-hidden="true"><use href="#i-flask"/></svg></div>
             <h3>Published validation</h3>
-            <p>Three predictors, none fit to the workload it predicts, scored out-of-sample on 59 workloads. The roofline is checked as a true lower bound: any measurement faster than it would falsify the model.</p>
+            <p>Three predictors, none fit to the workload it predicts, scored out-of-sample on 95 workloads. The roofline is checked as a true lower bound: any measurement faster than it would falsify the model.</p>
             <a class="more" href={url("docs/validation/")}>View results <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
           </article>
         </div>
@@ -141,10 +141,10 @@ attribution = <span class="f">attribute_gap</span>(
           <p><code>benchmarks/validate.py</code> runs a grid of MLP, CNN, LSTM and Transformer workloads on every installed backend and scores three predictors: zero-shot (microbenchmark calibration only), op-replay (each op timed alone, then composed) and a leave-one-out 4-parameter fit.</p>
         </div>
         <div class="stats reveal">
-          <div class="stat"><b>0 / 59</b><span>lower-bound violations</span></div>
-          <div class="stat"><b>59</b><span>workloads, 3 backends</span></div>
-          <div class="stat"><b>0.91–0.99</b><span>Spearman ρ, workload ranking</span></div>
-          <div class="stat"><b>13–33%</b><span>median error, best predictor</span></div>
+          <div class="stat"><b>0 / 95</b><span>lower-bound violations</span></div>
+          <div class="stat"><b>95</b><span>workloads, 5 backends</span></div>
+          <div class="stat"><b>0.89–0.995</b><span>Spearman ρ, workload ranking</span></div>
+          <div class="stat"><b>2–22%</b><span>median error, best predictor</span></div>
         </div>
         <div class="table-wrap reveal">
           <table>
@@ -160,9 +160,11 @@ attribution = <span class="f">attribute_gap</span>(
               </tr>
             </thead>
             <tbody>
-              <tr><th scope="row" style="background:none;color:var(--fg)">PyTorch eager, CPU</th><td class="num">0 / 23</td><td class="num">61% (66%)</td><td class="num"><strong>26% (22%)</strong></td><td class="num">51% (52%)</td><td class="num">0.987</td></tr>
-              <tr><th scope="row" style="background:none;color:var(--fg)">PyTorch eager, MPS</th><td class="num">0 / 23</td><td class="num">29% (19%)</td><td class="num">30% (15%)</td><td class="num"><strong>22% (13%)</strong></td><td class="num">0.948</td></tr>
-              <tr><th scope="row" style="background:none;color:var(--fg)">JAX jit, CPU</th><td class="num">0 / 13</td><td class="num"><strong>39% (33%)</strong></td><td class="num">n/a</td><td class="num">45% (41%)</td><td class="num">0.989</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">PyTorch eager, CPU</th><td class="num">0 / 23</td><td class="num">63% (68%)</td><td class="num"><strong>25% (18%)</strong></td><td class="num">51% (52%)</td><td class="num">0.987</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">PyTorch eager, MPS</th><td class="num">0 / 23</td><td class="num">29% (20%)</td><td class="num">29% (14%)</td><td class="num"><strong>21% (12%)</strong></td><td class="num">0.936</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">JAX jit, CPU</th><td class="num">0 / 13</td><td class="num">63% (76%)</td><td class="num">n/a</td><td class="num"><strong>5% (2%)</strong></td><td class="num">0.995</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">JAX jit, MPS</th><td class="num">0 / 13</td><td class="num">26% (20%)</td><td class="num">n/a</td><td class="num"><strong>21% (16%)</strong></td><td class="num">0.951</td></tr>
+              <tr><th scope="row" style="background:none;color:var(--fg)">TensorFlow graph, CPU</th><td class="num">0 / 23</td><td class="num">n/a</td><td class="num">n/a</td><td class="num"><strong>22% (22%)</strong></td><td class="num">0.954</td></tr>
             </tbody>
           </table>
         </div>
