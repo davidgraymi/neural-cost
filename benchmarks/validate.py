@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate neural-cost predictions against measured runtimes on this machine.
 
-For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit) this:
+For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit on CPU / MPS,
+TensorFlow graph on CPU) this:
 
 1. calibrates achievable FLOP/s, bandwidth and dispatch overhead with
    microbenchmarks that never touch the evaluated models;
@@ -136,7 +137,14 @@ def torch_workloads(device: str, quick: bool) -> list[Workload]:
 # -------------------------------------------------------------------- jax models
 
 
-def jax_workloads(quick: bool) -> list[Workload]:
+def jax_workloads(quick: bool, device=None) -> list[Workload]:
+    import jax
+
+    with jax.default_device(device):
+        return _jax_workloads(quick)
+
+
+def _jax_workloads(quick: bool) -> list[Workload]:
     import jax
     import jax.numpy as jnp
 
@@ -205,6 +213,80 @@ def jax_workloads(quick: bool) -> list[Workload]:
     return out
 
 
+# -------------------------------------------------------------- tensorflow models
+
+
+def tf_workloads(quick: bool) -> list[Workload]:
+    """Keras models run as ``tf.function`` graphs on the CPU (no Metal plugin)."""
+    import tensorflow as tf
+
+    keras = tf.keras
+    tf.random.set_seed(0)
+    out: list[Workload] = []
+
+    def add(name: str, model, x, **meta) -> None:
+        graph = tf.function(lambda inp, _m=model: _m(inp, training=False))
+        out.append(Workload(name, model, (x,), runner=graph, metadata=meta))
+
+    widths = (256, 1024) if quick else (256, 1024, 4096)
+    batches = (1, 64) if quick else (1, 16, 128)
+    for w in widths:
+        for b in batches:
+            mlp = keras.Sequential(
+                [
+                    keras.Input((w,)),
+                    keras.layers.Dense(w, activation="gelu"),
+                    keras.layers.Dense(w, activation="gelu"),
+                    keras.layers.Dense(10),
+                ]
+            )
+            add(f"mlp w={w} b={b}", mlp, tf.random.normal((b, w)), family="mlp")
+
+    for img in (32,) if quick else (32, 64):
+        for b in (1, 16) if quick else (1, 8, 32):
+            cnn = keras.Sequential(
+                [
+                    keras.Input((img, img, 3)),
+                    keras.layers.Conv2D(32, 3, padding="same", activation="relu"),
+                    keras.layers.Conv2D(64, 3, strides=2, padding="same", activation="relu"),
+                    keras.layers.Conv2D(128, 3, strides=2, padding="same", activation="relu"),
+                    keras.layers.GlobalAveragePooling2D(),
+                    keras.layers.Dense(10),
+                ]
+            )
+            add(f"cnn {img}px b={b}", cnn, tf.random.normal((b, img, img, 3)), family="cnn")
+
+    for d in (128,) if quick else (128, 256):
+        for b in (1, 16):
+            lstm = keras.Sequential(
+                [
+                    keras.Input((32, d)),
+                    keras.layers.LSTM(d, return_sequences=True),
+                    keras.layers.LSTM(d),
+                    keras.layers.Dense(10),
+                ]
+            )
+            add(f"lstm d={d} b={b}", lstm, tf.random.normal((b, 32, d)), family="lstm")
+
+    def block(t: int, d: int = 256, h: int = 8):
+        x = inp = keras.Input((t, d))
+        y = keras.layers.LayerNormalization()(x)
+        x = x + keras.layers.MultiHeadAttention(h, d // h)(y, y)
+        y = keras.layers.LayerNormalization()(x)
+        y = keras.layers.Dense(4 * d, activation="gelu")(y)
+        return keras.Model(inp, x + keras.layers.Dense(d)(y))
+
+    for t in (64,) if quick else (64, 256):
+        for b in (1, 8):
+            add(
+                f"transformer d=256 T={t} b={b}",
+                block(t),
+                tf.random.normal((b, t, 256)),
+                family="transformer",
+            )
+    return out
+
+
 # ------------------------------------------------------------------------ driver
 
 
@@ -250,8 +332,24 @@ def available_backends() -> list[str]:
         if torch.backends.mps.is_available():
             found.append("torch-mps")
     if importlib.util.find_spec("jax"):
+        import jax
+
         found.append("jax-cpu")
+        if _jax_device("mps") is not None:
+            found.append("jax-mps")
+    if importlib.util.find_spec("tensorflow"):
+        found.append("tf-cpu")
     return found
+
+
+def _jax_device(platform: str):
+    """First JAX device of ``platform`` (``"cpu"``, ``"mps"``, ``"gpu"``), or None."""
+    import jax
+
+    try:
+        return jax.devices(platform)[0]
+    except RuntimeError:
+        return None
 
 
 def main() -> None:
@@ -289,19 +387,33 @@ def main() -> None:
             calibration = adapter.calibrate(device)
             workloads = torch_workloads(device, args.quick)
             title = f"PyTorch eager ({device})"
+        elif backend == "tf-cpu":
+            from neural_cost.adapters import TensorFlowAdapter
+
+            # TensorFlow has no calibration microbenchmarks: its section reports
+            # lower-bound validity and the fitted model, without zero-shot or
+            # gap attribution.
+            adapter = TensorFlowAdapter(trace_device_time=False)
+            calibration = None
+            workloads = tf_workloads(args.quick)
+            title = "TensorFlow graph (cpu)"
         else:
             from neural_cost.adapters import JaxAdapter
 
-            adapter = JaxAdapter()
-            calibration = adapter.calibrate()
-            workloads = jax_workloads(args.quick)
-            title = "JAX jit (cpu)"
+            jax_platform = backend.split("-", 1)[1]
+            device = _jax_device(jax_platform)
+            if device is None:
+                raise SystemExit(f"{backend}: JAX has no {jax_platform} device")
+            adapter = JaxAdapter(trace_device_time=False)  # as for torch: no profiler
+            calibration = adapter.calibrate(device=device)
+            workloads = jax_workloads(args.quick, device)
+            title = f"JAX jit ({jax_platform})"
         print(f"\n[{backend}] calibration: {calibration}")
         # Each backend is bounded by its own device: on a CUDA host the default
         # spec is the GPU's, which would make every CPU bound far too loose.
         spec, _ = detect_hardware(device="cpu" if backend.endswith("cpu") else "gpu")
         if backend.endswith("cpu"):
-            spec = replace(hardware, caches=hardware.caches + cpu_caches())
+            spec = replace(spec, caches=spec.caches + cpu_caches())
         report = run_validation_suite(
             adapter,
             workloads,
@@ -316,6 +428,8 @@ def main() -> None:
 
         # Attribute the gap for the smallest, the most expensive, and the last workload.
         picks = [workloads[0], max(workloads, key=lambda w: _flops(adapter, w)), workloads[-1]]
+        if calibration is None:
+            picks = []  # attribution needs measured achievable peaks
         attributions = []
         seen: set[str] = set()
         for workload in picks:
@@ -349,16 +463,18 @@ def main() -> None:
             attributions.append((workload.name, attribution))
             print(attribution.render())
 
-        md = [
-            report.to_markdown(),
-            "",
-            f"Calibration: {calibration.source} — "
-            f"{calibration.achievable_flops / 1e9:.0f} GFLOP/s achievable, "
-            f"{calibration.achievable_bandwidth / 1e9:.1f} GB/s, "
-            f"{calibration.dispatch_seconds * 1e6:.2f} µs/kernel dispatch, "
-            f"{calibration.call_overhead_seconds * 1e6:.1f} µs/call sync latency.",
-            "",
-        ]
+        md = [report.to_markdown(), ""]
+        if calibration is None:
+            md += ["No calibration microbenchmarks for this backend; no gap attribution.", ""]
+        else:
+            md += [
+                f"Calibration: {calibration.source} — "
+                f"{calibration.achievable_flops / 1e9:.0f} GFLOP/s achievable, "
+                f"{calibration.achievable_bandwidth / 1e9:.1f} GB/s, "
+                f"{calibration.dispatch_seconds * 1e6:.2f} µs/kernel dispatch, "
+                f"{calibration.call_overhead_seconds * 1e6:.1f} µs/call sync latency.",
+                "",
+            ]
         for name, attribution in attributions:
             md += [
                 f"<details><summary>Gap attribution: {name}</summary>",
@@ -372,7 +488,9 @@ def main() -> None:
             ]
         sections.append("\n".join(md))
         payload["backends"][backend] = {
-            "calibration": {
+            "calibration": None
+            if calibration is None
+            else {
                 "achievable_flops": calibration.achievable_flops,
                 "achievable_bandwidth": calibration.achievable_bandwidth,
                 "dispatch_seconds": calibration.dispatch_seconds,

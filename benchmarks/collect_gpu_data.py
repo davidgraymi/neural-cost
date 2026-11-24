@@ -234,9 +234,16 @@ def _torch_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measur
     return TorchAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _jax_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
-    """Time ``fn`` exactly as users do: through ``JaxAdapter.benchmark``."""
-    return JaxAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
+def _jax_block(
+    fn: Callable, args: tuple, warmup: int, repeats: int, trace_device_time: bool = True
+) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``JaxAdapter.benchmark``.
+
+    ``trace_device_time=False`` skips the profiler pass, which jax-mps does not
+    support (every attempt logs an error and leaks memory).
+    """
+    adapter = JaxAdapter(trace_device_time=trace_device_time)
+    return adapter.benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
 def _tf_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
@@ -245,6 +252,62 @@ def _tf_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measureme
 
 
 _stats = timing_stats
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """True for a device allocation failure (PyTorch CUDA/MPS, XLA)."""
+    text = str(exc).lower()
+    return "out of memory" in text or "resource_exhausted" in text or "resource exhausted" in text
+
+
+# Framework allocators hold roughly three times the estimated peak activation
+# footprint (measured: ConvNeXt B=32 holds 6.2 GiB on MPS for a 2.1 GiB estimate).
+_ALLOCATOR_OVERHEAD = 3.0
+
+
+def _device_memory_budget(torch_device: Any) -> int | None:
+    """Bytes a single process can safely allocate on the accelerator, or None."""
+    if importlib.util.find_spec("torch") is None or torch_device is None:
+        return None
+    import torch
+
+    if str(torch_device).startswith("cuda"):
+        return int(torch.cuda.get_device_properties(torch_device).total_memory)
+    if str(torch_device) == "mps":
+        return int(torch.mps.recommended_max_memory())
+    return None
+
+
+def _exceeds_budget(prof: Any, budget: int | None) -> float | None:
+    """Estimated footprint in GiB when it would not fit ``budget``, else None.
+
+    jax-mps never raises an out-of-memory error: an oversized configuration
+    swaps until the OS kills the process, so it has to be skipped up front.
+    """
+    if budget is None or prof.memory is None:
+        return None
+    need = prof.memory.parameter_bytes + prof.memory.conservative_peak_activation_bytes
+    return need / 2**30 if need * _ALLOCATOR_OVERHEAD > budget else None
+
+
+def _release_device_memory() -> None:
+    """Free cached device memory between configurations.
+
+    Without this, the allocator pools of earlier (smaller) configurations stay
+    resident on unified-memory Macs, and the OS kills the process before the
+    framework can raise an out-of-memory error.
+    """
+    import gc
+
+    gc.collect()
+    torch = sys.modules.get("torch")  # only a framework already in use
+    if torch is not None:
+
+        torch._dynamo.reset()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +801,7 @@ def eval_torch_gpu(
     device_label: str,
     use_fx: bool = True,
     architectures: list[str] | None = None,
+    memory_budget: int | None = None,
 ) -> list[BenchRecord]:
     import torch
 
@@ -760,6 +824,7 @@ def eval_torch_gpu(
         if arch not in TORCH_GPU_BUILDERS:
             continue
         for batch in batches:
+            print(f"  PyTorch GPU {arch} B={batch}…", flush=True)
             try:
                 model, inputs = TORCH_GPU_BUILDERS[arch](batch, torch_device)
             except Exception as exc:
@@ -773,6 +838,14 @@ def eval_torch_gpu(
                 cost = prof.cost
             except Exception:
                 continue
+            need_gib = _exceeds_budget(prof, memory_budget)
+            if need_gib is not None:
+                print(
+                    f"  PyTorch GPU {arch}: skipping B>={batch} "
+                    f"(needs ~{need_gib:.1f} GiB, budget {memory_budget / 2**30:.1f} GiB)"
+                )
+                del model, inputs
+                break
 
 
             # Baseline (eager GPU)
@@ -804,6 +877,11 @@ def eval_torch_gpu(
                 )
             except Exception as exc:
                 print(f"  PyTorch GPU baseline {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  PyTorch GPU {arch}: skipping batches above {batch} (out of memory)")
+                    del model, inputs
+                    _release_device_memory()
+                    break
 
             # Optimised: torch.compile (Inductor backend, GPU)
             try:
@@ -847,6 +925,13 @@ def eval_torch_gpu(
                 )
             except Exception as exc:
                 print(f"  PyTorch GPU compiled {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  PyTorch GPU {arch}: skipping batches above {batch} (out of memory)")
+                    del model, inputs
+                    _release_device_memory()
+                    break
+            del model, inputs
+            _release_device_memory()
 
     return records
 
@@ -859,11 +944,14 @@ def eval_jax_gpu(
     jax_device: Any,
     device_label: str,
     architectures: list[str] | None = None,
+    memory_budget: int | None = None,
 ) -> list[BenchRecord]:
     import jax
 
     adapter = JaxAdapter()
     records: list[BenchRecord] = []
+    # jax-mps has no profiler plugin; tracing it only logs errors.
+    trace = getattr(jax_device, "platform", "") != "mps"
 
     active_archs = architectures if architectures is not None else list(JAX_GPU_BUILDERS.keys())
 
@@ -871,6 +959,7 @@ def eval_jax_gpu(
         if arch not in JAX_GPU_BUILDERS:
             continue
         for batch in batches:
+            print(f"  JAX GPU {arch} B={batch}…", flush=True)
             try:
                 model, inputs = JAX_GPU_BUILDERS[arch](batch, jax_device)
             except Exception as exc:
@@ -884,14 +973,21 @@ def eval_jax_gpu(
                 cpu_model, cpu_inputs = JAX_GPU_BUILDERS[arch](batch, jax.devices("cpu")[0])
                 prof = profile_model(cpu_model, cpu_inputs, adapter)
                 cost = prof.cost
-                mem = prof.memory
             except Exception:
                 continue
+            need_gib = _exceeds_budget(prof, memory_budget)
+            if need_gib is not None:
+                print(
+                    f"  JAX GPU {arch}: skipping B>={batch} "
+                    f"(needs ~{need_gib:.1f} GiB, budget {memory_budget / 2**30:.1f} GiB)"
+                )
+                del model, inputs
+                break
 
 
             # Baseline (eager on GPU device)
             try:
-                meas = _jax_block(model, inputs, warmup, repeats)
+                meas = _jax_block(model, inputs, warmup, repeats, trace_device_time=trace)
                 st = _stats(meas)
                 peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
@@ -918,6 +1014,9 @@ def eval_jax_gpu(
                 )
             except Exception as exc:
                 print(f"  JAX GPU baseline {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  JAX GPU {arch}: skipping batches above {batch} (out of memory)")
+                    break
 
             # Optimised: jax.jit
             try:
@@ -929,7 +1028,7 @@ def eval_jax_gpu(
                     if hasattr(leaf, "block_until_ready")
                 ]
                 wait(jit_model(*inputs))
-                meas = _jax_block(jit_model, inputs, warmup, repeats)
+                meas = _jax_block(jit_model, inputs, warmup, repeats, trace_device_time=trace)
                 st = _stats(meas)
                 peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
@@ -947,6 +1046,12 @@ def eval_jax_gpu(
                 )
             except Exception as exc:
                 print(f"  JAX GPU jit {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  JAX GPU {arch}: skipping batches above {batch} (out of memory)")
+                    break
+            del model, inputs
+            jax.clear_caches()
+            _release_device_memory()
 
     return records
 
@@ -1443,6 +1548,10 @@ def main() -> None:
                 f"{r.latency_median_ms:7.2f} ms  {r.roofline_efficiency:.1%}  {r.bottleneck}{extra_str}"
             )
 
+    memory_budget = _device_memory_budget(torch_dev)
+    if memory_budget is not None:
+        print(f"  memory budget {memory_budget / 2**30:.1f} GiB (larger configurations are skipped)")
+
     run_torch = args.framework in ("all", "torch")
     run_jax = args.framework in ("all", "jax")
     run_tf = args.framework in ("all", "tensorflow")
@@ -1459,6 +1568,7 @@ def main() -> None:
             torch_label,
             use_fx=not args.no_fx,
             architectures=active_archs,
+            memory_budget=memory_budget,
         )
         all_records.extend(recs)
         _print_recs(recs)
@@ -1479,6 +1589,7 @@ def main() -> None:
                 jax_dev,
                 jax_label,
                 architectures=active_archs,
+                memory_budget=memory_budget,
             )
             all_records.extend(recs)
             _print_recs(recs)
@@ -1491,19 +1602,24 @@ def main() -> None:
     # TensorFlow GPU
     if run_tf and importlib.util.find_spec("tensorflow") is not None:
         tf_dev, tf_label = _detect_tf_gpu()
-        print(f"── TensorFlow ({tf_label}) ─────────────────────────────────")
-        recs = eval_tensorflow_gpu(
-            gpu_hardware,
-            batches,
-            warmup,
-            repeats,
-            tf_dev,
-            tf_label,
-            architectures=active_archs,
-        )
-        all_records.extend(recs)
-        _print_recs(recs)
-        print()
+        if "GPU" not in tf_dev.upper():
+            # A CPU run belongs in collect_data.py; here it would be bounded by
+            # the GPU spec and land in the GPU results.
+            print(f"[skip] TensorFlow: no GPU device ({tf_label})")
+        else:
+            print(f"── TensorFlow ({tf_label}) ─────────────────────────────────")
+            recs = eval_tensorflow_gpu(
+                gpu_hardware,
+                batches,
+                warmup,
+                repeats,
+                tf_dev,
+                tf_label,
+                architectures=active_archs,
+            )
+            all_records.extend(recs)
+            _print_recs(recs)
+            print()
     elif run_tf:
         print("[skip] TensorFlow not installed")
 

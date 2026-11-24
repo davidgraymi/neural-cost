@@ -1,9 +1,11 @@
 # Neural-Cost GPU Benchmark Report
 
-> **Device:** mps (Apple Silicon GPU)  ·  **Peak FP32:** 2.60 TFLOP/s  
-> **Peak bandwidth:** 68 GB/s
-> **Ridge point:** 38.1 FLOP/byte  ·  **Detection:** Apple Silicon table (Apple M1) [FP32] + NumPy STREAM triad  
-> **Timing device:** mps (Apple Silicon GPU)
+> **Run:** neural-cost v0.13.0-18-gcb36a1c-dirty @ cb36a1c2c163 + local changes on Apple M3 (10-core GPU), 2026-11-23T23:57:16+00:00 (Python 3.13.18; jax 0.11.2, jaxlib 0.11.2, keras 3.15.1, numpy 2.5.3, tensorflow 2.21.0, torch 2.14.0)
+
+> **Device:** mps  ·  **Peak FP32:** 3.60 TFLOP/s  
+> **Peak bandwidth:** 100 GB/s
+> **Ridge point:** 36.0 FLOP/byte  ·  **Detection:** Apple Silicon table (Apple M3 (10-core GPU)) [FP32] + NumPy STREAM triad  
+> **Timing device:** mps
 
 ---
 
@@ -30,9 +32,6 @@ force command buffer flushing and device retirement to eliminate host scheduling
 | **ConvNeXt** | Modern Vision | ConvNeXt-Tiny 4-stage hierarchy (7×7 depthwise conv, 1×1 pointwise inverted bottleneck, LayerNorm, GELU, input 224×224×3) |
 | **ViT** | Modern Vision | Vision Transformer Tiny (16×16 patch embedding, 4-layer Transformer encoder with 4 heads, MLP ratio 4, seq_len 197, input 224×224×3) |
 | **Transformer** | Core / Legacy | 2-layer encoder (MHA h=4 + FFN×4 + LayerNorm), embed=128, seq=32 |
-| **CNN** | Core / Legacy | Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3 |
-| **RNN** | Core / Legacy | 2-layer Vanilla RNN, hidden=128, seq=32 |
-| **LSTM** | Core / Legacy | 2-layer LSTM (4-gate), hidden=128, seq=32 |
 
 ### Frameworks and optimisation variants
 
@@ -48,7 +47,7 @@ force command buffer flushing and device retirement to eliminate host scheduling
 - **Timed repeats:** 40 samples per configuration
 - **Statistics reported:** median, mean, σ (stddev), CV%, p95
 - **Roofline efficiency:** `min(1, lower_bound / observed)`
-- **Batch sizes swept:** [32, 256]
+- **Batch sizes swept:** [8, 32, 128, 512]
 
 ---
 
@@ -59,7 +58,7 @@ Each point represents one architecture × framework combination (optimised varia
 ![GPU Roofline](figures/gpu_fig1_roofline.png)
 
 **Key observations:**
-- **Hardware Ridge Point (38.1 FLOP/B):** The M1 GPU's ridge point is much higher than typical CPUs (5–10 FLOP/B). Workloads with arithmetic intensity below 38.1 FLOP/B are fundamentally memory-bandwidth bound.
+- **Hardware Ridge Point (36.0 FLOP/B):** The M1 GPU's ridge point is much higher than typical CPUs (5–10 FLOP/B). Workloads with arithmetic intensity below 36.0 FLOP/B are fundamentally memory-bandwidth bound.
 - **Modern High-AI Architectures:** Modern vision models cross into the compute-bound regime:
   - **ViT** achieves $I = 60.3$ to $89.0$ FLOP/B, well past the ridge point, attaining up to **1,297.5 GFLOP/s** (~50.0% of theoretical peak) in JAX JIT.
   - **ConvNeXt** sits right on the ridge point ($I = 35.5$ to $38.3$ FLOP/B), delivering **732.6–763.2 GFLOP/s** in JAX JIT and **738.3 GFLOP/s** in PyTorch.
@@ -201,44 +200,22 @@ The data and computer architecture principles show definitively that **linear pe
 
 | Architecture | Framework | Variant | FLOPs | Params | AI (FLOP/B) | Latency med (ms) | ±σ | CV% | Efficiency | GFLOP/s | Bottleneck |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| FF DNN | PyTorch | baseline | 7.6M | 473,128 | 6.11 | 0.378 | 0.019 | 5.0 | 4.8% | 20.11 | memory |
-| FF DNN | PyTorch | compiled | 7.6M | 473,128 | 6.11 | 0.457 | 0.012 | 2.6 | 4.0% | 16.63 | memory |
-| FF DNN | JAX | baseline | 7.6M | 472,064 | 6.43 | 1.594 | 0.083 | 5.1 | 1.1% | 4.74 | memory |
-| FF DNN | JAX | jit | 7.6M | 472,064 | 6.43 | 0.581 | 0.066 | 12.5 | 3.0% | 13.01 | memory |
-| FF DNN | TensorFlow | baseline | 7.6M | 475,176 | 6.44 | 3.071 | 0.029 | 0.9 | 0.6% | 2.47 | memory |
-| FF DNN | TensorFlow | tf.function+XLA | 7.6M | 475,176 | 6.44 | 0.228 | 0.005 | 2.3 | 7.6% | 33.38 | memory |
-| ConvNeXt | PyTorch | baseline | 285.92G | 111.2M | 38.32 | 387.275 | 1.717 | 0.4 | 28.4% | 738.30 | compute |
-| ConvNeXt | PyTorch | compiled | 285.92G | 111.2M | 38.32 | 406.660 | 6.308 | 1.5 | 27.0% | 703.10 | compute |
-| ConvNeXt | JAX | baseline | 35.65G | 1.9M | 35.45 | 138.744 | 2.429 | 1.7 | 10.6% | 256.95 | memory |
-| ConvNeXt | JAX | jit | 35.65G | 1.9M | 35.45 | 48.659 | 1.277 | 2.6 | 30.3% | 732.64 | memory |
-| ViT | PyTorch | baseline | 148.67G | 43.7M | 60.26 | 232.938 | 2.610 | 1.1 | 24.5% | 638.25 | compute |
-| ViT | PyTorch | compiled | 148.67G | 43.7M | 60.26 | 132.292 | 1.155 | 0.9 | 43.2% | 1123.83 | compute |
-| ViT | JAX | baseline | 25.90G | 8.3M | 84.66 | 89.809 | 62.222 | 59.1 | 11.1% | 288.43 | compute |
-| ViT | JAX | jit | 25.90G | 8.3M | 84.66 | 21.530 | 0.312 | 1.4 | 46.3% | 1203.14 | compute |
-| Transformer | PyTorch | baseline | 541.1M | 1.1M | 17.18 | 3.656 | 0.517 | 13.8 | 12.6% | 148.02 | memory |
-| Transformer | PyTorch | compiled | 541.1M | 1.1M | 17.18 | 2.316 | 0.072 | 3.1 | 19.9% | 233.68 | memory |
-| Transformer | JAX | baseline | 403.7M | 791,552 | 19.57 | 7.179 | 1.375 | 19.1 | 4.2% | 56.24 | memory |
-| Transformer | JAX | jit | 403.7M | 791,552 | 19.57 | 1.052 | 0.018 | 1.7 | 28.7% | 383.84 | memory |
-| Transformer | TensorFlow | baseline | 842.9M | 1.6M | 43.36 | 23.204 | 2.990 | 12.4 | 1.4% | 36.32 | compute |
-| Transformer | TensorFlow | tf.function+XLA | 842.9M | 1.6M | 43.36 | 4.370 | 0.069 | 1.6 | 7.4% | 192.89 | compute |
-| CNN | PyTorch | baseline | 1.34G | 307,752 | 16.63 | 5.205 | 0.239 | 4.6 | 22.7% | 257.89 | memory |
-| CNN | PyTorch | compiled | 1.34G | 307,752 | 16.63 | 4.451 | 0.058 | 1.3 | 26.6% | 301.54 | memory |
-| CNN | JAX | baseline | 1.32G | 306,944 | 25.78 | 4.414 | 0.091 | 2.1 | 17.1% | 300.05 | memory |
-| CNN | JAX | jit | 1.32G | 306,944 | 25.78 | 2.661 | 0.364 | 13.4 | 28.3% | 497.66 | memory |
-| CNN | TensorFlow | baseline | 1.34G | 310,824 | 24.12 | 9.848 | 0.083 | 0.8 | 8.3% | 136.09 | memory |
-| CNN | TensorFlow | tf.function+XLA | 1.34G | 310,824 | 24.12 | 5.437 | 0.178 | 3.3 | 15.0% | 246.47 | memory |
-| RNN | PyTorch | baseline | 81,920 | 5,160 | 2.93 | 7.543 | 0.387 | 5.1 | 0.0% | 0.01 | memory |
-| RNN | PyTorch | compiled | 81,920 | 5,160 | 2.93 | 4.438 | 0.087 | 1.9 | 0.0% | 0.02 | memory |
-| RNN | JAX | baseline | 67.5M | 136,192 | 5.14 | 68.500 | 5.561 | 8.1 | 0.3% | 0.98 | memory |
-| RNN | JAX | jit | 67.5M | 136,192 | 5.14 | 1.677 | 0.053 | 3.1 | 11.5% | 40.22 | memory |
-| RNN | TensorFlow | baseline | 402.7M | 797,736 | 40.29 | 82.838 | 5.118 | 6.0 | 0.2% | 4.86 | compute |
-| RNN | TensorFlow | tf.function+XLA | 402.7M | 797,736 | 40.29 | 6.875 | 0.024 | 0.3 | 2.3% | 58.58 | compute |
-| LSTM | PyTorch | baseline | 81,920 | 5,160 | 2.93 | 2.925 | 0.110 | 3.8 | 0.0% | 0.03 | memory |
-| LSTM | PyTorch | compiled | 81,920 | 5,160 | 2.93 | 2.699 | 0.154 | 5.7 | 0.0% | 0.03 | memory |
-| LSTM | JAX | baseline | 271.0M | 529,408 | 4.31 | 201.802 | 38.826 | 20.0 | 0.5% | 1.34 | memory |
-| LSTM | JAX | jit | 271.0M | 529,408 | 4.31 | 4.012 | 0.516 | 13.8 | 23.0% | 67.55 | memory |
-| LSTM | TensorFlow | baseline | 537.0M | 1.1M | 42.56 | 67.160 | 0.265 | 0.4 | 0.3% | 8.00 | compute |
-| LSTM | TensorFlow | tf.function+XLA | 537.0M | 1.1M | 42.56 | 8.590 | 0.030 | 0.3 | 2.4% | 62.51 | compute |
+| FF DNN | PyTorch | baseline | 7.6M | 475,176 | 9.83 | 0.432 | 0.036 | 8.6 | 1.8% | 17.61 | memory |
+| FF DNN | PyTorch | compiled | 7.6M | 475,176 | 9.83 | 0.426 | 0.072 | 16.4 | 1.8% | 17.85 | memory |
+| FF DNN | JAX | baseline | 7.6M | 472,064 | 10.73 | 0.683 | 0.072 | 10.6 | 1.0% | 11.07 | memory |
+| FF DNN | JAX | jit | 7.6M | 472,064 | 10.73 | 0.205 | 0.154 | 63.4 | 3.4% | 36.91 | memory |
+| ConvNeXt | PyTorch | baseline | 285.93G | 111.3M | 38.89 | 228.047 | 1.137 | 0.5 | 34.8% | 1253.80 | compute |
+| ConvNeXt | PyTorch | compiled | 285.93G | 111.3M | 38.89 | 256.626 | 1.008 | 0.4 | 30.9% | 1114.17 | compute |
+| ConvNeXt | JAX | baseline | 35.65G | 1.9M | 35.52 | 84.016 | 2.567 | 3.0 | 11.9% | 424.38 | memory |
+| ConvNeXt | JAX | jit | 35.65G | 1.9M | 35.52 | 28.486 | 0.181 | 0.6 | 35.2% | 1251.67 | memory |
+| ViT | PyTorch | baseline | 148.67G | 43.8M | 61.34 | 109.142 | 0.353 | 0.3 | 37.8% | 1362.20 | compute |
+| ViT | PyTorch | compiled | 148.67G | 43.8M | 61.34 | 92.329 | 0.201 | 0.2 | 44.7% | 1610.26 | compute |
+| ViT | JAX | baseline | 27.83G | 8.6M | 82.75 | 32.631 | 2.265 | 6.8 | 23.7% | 852.89 | compute |
+| ViT | JAX | jit | 27.83G | 8.6M | 82.75 | 14.059 | 0.109 | 0.8 | 55.0% | 1979.59 | compute |
+| Transformer | PyTorch | baseline | 844.4M | 1.6M | 25.54 | 1.621 | 0.052 | 3.2 | 20.4% | 520.95 | memory |
+| Transformer | PyTorch | compiled | 844.4M | 1.6M | 25.54 | 1.532 | 0.042 | 2.7 | 21.6% | 551.23 | memory |
+| Transformer | JAX | baseline | 420.7M | 791,552 | 18.70 | 2.915 | 0.106 | 3.7 | 7.7% | 144.32 | memory |
+| Transformer | JAX | jit | 420.7M | 791,552 | 18.70 | 0.559 | 0.018 | 3.2 | 40.3% | 753.06 | memory |
 
 </details>
 
@@ -253,44 +230,22 @@ Diagnostics powered by neural-cost's causal gap analyzer, hierarchical cache mod
 
 | Architecture | Framework | Variant | Fused Efficiency | Traffic Saved | Resident Cache | Top Layer Bottleneck | Layer Share |
 |---|---|---|---|---|---|---|---|
-| FF DNN | PyTorch | baseline | 4.3% | 10.5% | SLC | _0 (linear, memory-bound) | 74.0% |
-| FF DNN | PyTorch | compiled | 3.6% | 10.5% | SLC | _0 (linear, memory-bound) | 74.0% |
-| FF DNN | JAX | baseline | 1.0% | 5.6% | SLC | dot_0 (matmul, memory-bound) | 78.1% |
-| FF DNN | JAX | jit | 2.8% | 5.6% | SLC | dot_0 (matmul, memory-bound) | 78.1% |
-| FF DNN | TensorFlow | baseline | 0.5% | 5.6% | SLC | dense (linear, memory-bound) | 78.0% |
-| FF DNN | TensorFlow | tf.function+XLA | 7.2% | 5.6% | SLC | dense (linear, memory-bound) | 78.0% |
-| ConvNeXt | PyTorch | baseline | 28.4% | 36.9% | DRAM/VRAM | stages_0_0_act (elementwise, memory-bound) | 2.6% |
-| ConvNeXt | PyTorch | compiled | 27.0% | 36.9% | DRAM/VRAM | stages_0_0_act (elementwise, memory-bound) | 2.6% |
-| ConvNeXt | JAX | baseline | 9.9% | 15.3% | DRAM/VRAM | conv_2 (conv2d, compute-bound) | 15.7% |
-| ConvNeXt | JAX | jit | 28.2% | 15.3% | DRAM/VRAM | conv_2 (conv2d, compute-bound) | 15.7% |
-| ViT | PyTorch | baseline | 24.5% | 38.3% | DRAM/VRAM | blocks_0_mlp_0 (linear, compute-bound) | 3.9% |
-| ViT | PyTorch | compiled | 43.2% | 38.3% | DRAM/VRAM | blocks_0_mlp_0 (linear, compute-bound) | 3.9% |
-| ViT | JAX | baseline | 11.1% | 18.9% | DRAM/VRAM | dot_18 (matmul, compute-bound) | 25.3% |
-| ViT | JAX | jit | 46.3% | 18.9% | DRAM/VRAM | dot_18 (matmul, compute-bound) | 25.3% |
-| Transformer | PyTorch | baseline | 6.3% | 49.9% | DRAM/VRAM | relu (elementwise, memory-bound) | 12.7% |
-| Transformer | PyTorch | compiled | 10.0% | 49.9% | DRAM/VRAM | relu (elementwise, memory-bound) | 12.7% |
-| Transformer | JAX | baseline | 2.4% | 43.2% | DRAM/VRAM | tanh_15 (elementwise, memory-bound) | 19.6% |
-| Transformer | JAX | jit | 16.3% | 43.2% | DRAM/VRAM | tanh_15 (elementwise, memory-bound) | 19.6% |
-| Transformer | TensorFlow | baseline | 1.4% | 21.6% | DRAM/VRAM | multi_head_attention (attention, compute-bound) | 15.1% |
-| Transformer | TensorFlow | tf.function+XLA | 7.4% | 21.6% | DRAM/VRAM | multi_head_attention (attention, compute-bound) | 15.1% |
-| CNN | PyTorch | baseline | 9.9% | 93.5% | DRAM/VRAM | _4 (conv2d, compute-bound) | 30.0% |
-| CNN | PyTorch | compiled | 11.6% | 93.5% | DRAM/VRAM | _4 (conv2d, compute-bound) | 30.0% |
-| CNN | JAX | baseline | 11.5% | 65.3% | DRAM/VRAM | conv_2 (conv2d, compute-bound) | 45.4% |
-| CNN | JAX | jit | 19.1% | 65.3% | DRAM/VRAM | conv_2 (conv2d, compute-bound) | 45.4% |
-| CNN | TensorFlow | baseline | 5.2% | 90.6% | DRAM/VRAM | conv2d_1 (conv2d, compute-bound) | 39.4% |
-| CNN | TensorFlow | tf.function+XLA | 9.5% | 90.6% | DRAM/VRAM | conv2d_1 (conv2d, compute-bound) | 39.4% |
-| RNN | PyTorch | baseline | — | — | SLC | fc (linear, memory-bound) | 100.0% |
-| RNN | PyTorch | compiled | — | — | SLC | fc (linear, memory-bound) | 100.0% |
-| RNN | JAX | baseline | 0.2% | 16.0% | DRAM/VRAM | dot_3 (matmul, memory-bound) | 1.2% |
-| RNN | JAX | jit | 9.6% | 16.0% | DRAM/VRAM | dot_3 (matmul, memory-bound) | 1.2% |
-| RNN | TensorFlow | baseline | — | — | DRAM/VRAM | gru.ih (linear, memory-bound) | 25.2% |
-| RNN | TensorFlow | tf.function+XLA | — | — | DRAM/VRAM | gru.ih (linear, memory-bound) | 25.2% |
-| LSTM | PyTorch | baseline | — | — | SLC | fc (linear, memory-bound) | 100.0% |
-| LSTM | PyTorch | compiled | — | — | SLC | fc (linear, memory-bound) | 100.0% |
-| LSTM | JAX | baseline | 0.3% | 25.0% | DRAM/VRAM | dot_4 (matmul, memory-bound) | 1.0% |
-| LSTM | JAX | jit | 17.2% | 25.0% | DRAM/VRAM | dot_4 (matmul, memory-bound) | 1.0% |
-| LSTM | TensorFlow | baseline | — | — | DRAM/VRAM | lstm.ih (linear, compute-bound) | 25.0% |
-| LSTM | TensorFlow | tf.function+XLA | — | — | DRAM/VRAM | lstm.ih (linear, compute-bound) | 25.0% |
+| FF DNN | PyTorch | baseline | 1.5% | 16.9% | SLC | _0 (linear, memory-bound) | 67.1% |
+| FF DNN | PyTorch | compiled | 1.5% | 16.9% | SLC | _0 (linear, memory-bound) | 67.1% |
+| FF DNN | JAX | baseline | 0.9% | 9.3% | SLC | dot_1 (matmul, memory-bound) | 73.5% |
+| FF DNN | JAX | jit | 3.1% | 9.3% | SLC | dot_1 (matmul, memory-bound) | 73.5% |
+| ConvNeXt | PyTorch | baseline | 34.8% | 37.5% | DRAM/VRAM | stages_0_0_act (elementwise, memory-bound) | 2.5% |
+| ConvNeXt | PyTorch | compiled | 30.9% | 37.5% | DRAM/VRAM | stages_0_0_act (elementwise, memory-bound) | 2.5% |
+| ConvNeXt | JAX | baseline | 11.8% | 15.4% | DRAM/VRAM | conv_3 (conv2d, compute-bound) | 15.9% |
+| ConvNeXt | JAX | jit | 34.8% | 15.4% | DRAM/VRAM | conv_3 (conv2d, compute-bound) | 15.9% |
+| ViT | PyTorch | baseline | 37.8% | 39.0% | DRAM/VRAM | blocks_0_mlp_0 (linear, compute-bound) | 4.0% |
+| ViT | PyTorch | compiled | 44.7% | 39.0% | DRAM/VRAM | blocks_0_mlp_0 (linear, compute-bound) | 4.0% |
+| ViT | JAX | baseline | 23.7% | 17.2% | DRAM/VRAM | dot_20 (matmul, compute-bound) | 23.9% |
+| ViT | JAX | jit | 55.0% | 17.2% | DRAM/VRAM | dot_20 (matmul, compute-bound) | 23.9% |
+| Transformer | PyTorch | baseline | 14.5% | 50.7% | DRAM/VRAM | attn1 (attention, compute-bound) | 10.0% |
+| Transformer | PyTorch | compiled | 15.3% | 50.7% | DRAM/VRAM | attn1 (attention, compute-bound) | 10.0% |
+| Transformer | JAX | baseline | 4.6% | 40.9% | DRAM/VRAM | tanh_16 (elementwise, memory-bound) | 17.3% |
+| Transformer | JAX | jit | 23.8% | 40.9% | DRAM/VRAM | tanh_16 (elementwise, memory-bound) | 17.3% |
 
 </details>
 
@@ -300,25 +255,19 @@ Diagnostics powered by neural-cost's causal gap analyzer, hierarchical cache mod
 
 | Architecture | PyTorch (compile) | JAX (jit) | TensorFlow (XLA/graph) |
 |---|---|---|---|
-| FF DNN | **0.83×** (0.378→0.457 ms) | **2.74×** (1.594→0.581 ms) | **13.50×** (3.071→0.228 ms) |
-| ConvNeXt | **0.95×** (387.275→406.660 ms) | **2.85×** (138.744→48.659 ms) | — |
-| ViT | **1.76×** (232.938→132.292 ms) | **4.17×** (89.809→21.530 ms) | — |
-| Transformer | **1.58×** (3.656→2.316 ms) | **6.83×** (7.179→1.052 ms) | **5.31×** (23.204→4.370 ms) |
-| CNN | **1.17×** (5.205→4.451 ms) | **1.66×** (4.414→2.661 ms) | **1.81×** (9.848→5.437 ms) |
-| RNN | **1.70×** (7.543→4.438 ms) | **40.85×** (68.500→1.677 ms) | **12.05×** (82.838→6.875 ms) |
-| LSTM | **1.08×** (2.925→2.699 ms) | **50.30×** (201.802→4.012 ms) | **7.82×** (67.160→8.590 ms) |
+| FF DNN | **1.01×** (0.432→0.426 ms) | **3.33×** (0.683→0.205 ms) | — |
+| ConvNeXt | **0.89×** (228.047→256.626 ms) | **2.95×** (84.016→28.486 ms) | — |
+| ViT | **1.18×** (109.142→92.329 ms) | **2.32×** (32.631→14.059 ms) | — |
+| Transformer | **1.06×** (1.621→1.532 ms) | **5.22×** (2.915→0.559 ms) | — |
 
 ---
 
 ## Per-Architecture Winner (batch=32)
 
-- **FF DNN**: fastest is **TensorFlow** (tf.function+XLA) at 0.228 ms (batch=32)
-- **ConvNeXt**: fastest is **JAX** (jit) at 48.659 ms (batch=32)
-- **ViT**: fastest is **JAX** (jit) at 21.530 ms (batch=32)
-- **Transformer**: fastest is **JAX** (jit) at 1.052 ms (batch=32)
-- **CNN**: fastest is **JAX** (jit) at 2.661 ms (batch=32)
-- **RNN**: fastest is **JAX** (jit) at 1.677 ms (batch=32)
-- **LSTM**: fastest is **PyTorch** (compiled) at 2.699 ms (batch=32)
+- **FF DNN**: fastest is **JAX** (jit) at 0.205 ms (batch=32)
+- **ConvNeXt**: fastest is **JAX** (jit) at 28.486 ms (batch=32)
+- **ViT**: fastest is **JAX** (jit) at 14.059 ms (batch=32)
+- **Transformer**: fastest is **JAX** (jit) at 0.559 ms (batch=32)
 
 ---
 
@@ -389,44 +338,22 @@ Empirical memory telemetry measured from framework device allocators compared ag
 
 | Architecture | Framework | Variant | Theo Min (KB) | Theo Cons (KB) | Peak Alloc (KB) | Peak Reserved (KB) | Overhead Ratio | Pool Caching |
 |---|---|---|---|---|---|---|---|---|
-| FF DNN | PyTorch | baseline | 478.0 | 559.3 | 562.2 | 8,592.0 | **1.18×** | 15.28× |
-| FF DNN | PyTorch | compiled | 478.0 | 559.3 | 562.2 | 8,576.0 | **1.18×** | 15.25× |
-| FF DNN | JAX | baseline | 477.0 | 526.2 | 784.0 | 15,938,355.2 | **1.64×** | 20329.13× |
-| FF DNN | JAX | jit | 477.0 | 526.2 | 912.3 | 15,938,355.2 | **1.91×** | 17471.18× |
-| FF DNN | TensorFlow | baseline | 480.0 | 529.3 | 98.0 | 98.0 | **0.20×** | 1.00× (minimal) |
-| FF DNN | TensorFlow | tf.function+XLA | 480.0 | 529.3 | 98.0 | 98.0 | **0.20×** | 1.00× (minimal) |
-| ConvNeXt | PyTorch | baseline | 259,140.8 | 3,500,390.0 | 129,111.5 | 3,381,952.0 | **0.50×** | 26.19× |
-| ConvNeXt | PyTorch | compiled | 259,140.8 | 3,500,390.0 | 128,647.2 | 4,430,592.0 | **0.50×** | 34.44× |
-| ConvNeXt | JAX | baseline | 152,336.6 | 453,417.9 | 491,082.1 | 15,938,355.2 | **3.22×** | 32.46× |
-| ConvNeXt | JAX | jit | 152,336.6 | 453,417.9 | 511,826.8 | 15,938,355.2 | **3.36×** | 31.14× |
-| ViT | PyTorch | baseline | 80,353.5 | 1,087,010.8 | 180,534.0 | 16,266,080.0 | **2.25×** | 90.10× |
-| ViT | PyTorch | compiled | 80,353.5 | 1,087,010.8 | 68,654.8 | 16,266,080.0 | **0.85×** | 236.93× |
-| ViT | JAX | baseline | 45,711.0 | 130,432.2 | 3,917,561.1 | 15,938,355.2 | **85.70×** | 4.07× |
-| ViT | JAX | jit | 45,711.0 | 130,432.2 | 3,917,561.1 | 15,938,355.2 | **85.70×** | 4.07× |
-| Transformer | PyTorch | baseline | 3,082.0 | 14,347.3 | 45,889.0 | 16,551,792.0 | **14.89×** | 360.69× |
-| Transformer | PyTorch | compiled | 3,082.0 | 14,347.3 | 2,066.2 | 16,557,936.0 | **0.67×** | 8013.52× |
-| Transformer | JAX | baseline | 2,821.0 | 9,242.2 | 3,917,561.1 | 15,938,355.2 | **1388.71×** | 4.07× |
-| Transformer | JAX | jit | 2,821.0 | 9,242.2 | 3,917,561.1 | 15,938,355.2 | **1388.71×** | 4.07× |
-| Transformer | TensorFlow | baseline | 3,602.0 | 9,747.3 | 512.0 | 512.0 | **0.14×** | 1.00× (minimal) |
-| Transformer | TensorFlow | tf.function+XLA | 3,602.0 | 9,747.3 | 512.0 | 512.0 | **0.14×** | 1.00× (minimal) |
-| CNN | PyTorch | baseline | 8,492.5 | 39,229.8 | 2,242.5 | 16,279,408.0 | **0.26×** | 7259.49× |
-| CNN | PyTorch | compiled | 8,492.5 | 39,229.8 | 688.2 | 16,275,312.0 | **0.08×** | 23647.38× |
-| CNN | JAX | baseline | 8,491.8 | 24,893.0 | 3,917,561.1 | 15,938,355.2 | **461.34×** | 4.07× |
-| CNN | JAX | jit | 8,491.8 | 24,893.0 | 3,917,561.1 | 15,938,355.2 | **461.34×** | 4.07× |
-| CNN | TensorFlow | baseline | 8,495.5 | 26,944.8 | 384.0 | 384.0 | **0.05×** | 1.00× (minimal) |
-| CNN | TensorFlow | tf.function+XLA | 8,495.5 | 26,944.8 | 384.0 | 384.0 | **0.05×** | 1.00× (minimal) |
-| RNN | PyTorch | baseline | 6.3 | 6.3 | 1,079.5 | 16,275,312.0 | **171.65×** | 15076.71× |
-| RNN | PyTorch | compiled | 6.3 | 6.3 | 775.2 | 16,275,312.0 | **123.27×** | 20993.63× |
-| RNN | JAX | baseline | 149.0 | 2,182.2 | 3,917,561.1 | 15,938,355.2 | **26292.36×** | 4.07× |
-| RNN | JAX | jit | 149.0 | 2,182.2 | 3,917,561.1 | 15,938,355.2 | **26292.36×** | 4.07× |
-| RNN | TensorFlow | baseline | 2,315.0 | 6,924.3 | 512.0 | 512.0 | **0.22×** | 1.00× (minimal) |
-| RNN | TensorFlow | tf.function+XLA | 2,315.0 | 6,924.3 | 512.0 | 512.0 | **0.22×** | 1.00× (minimal) |
-| LSTM | PyTorch | baseline | 6.3 | 6.3 | 1,812.5 | 16,299,920.0 | **288.20×** | 8993.06× |
-| LSTM | PyTorch | compiled | 6.3 | 6.3 | 1,549.2 | 16,299,920.0 | **246.34×** | 10521.17× |
-| LSTM | JAX | baseline | 581.0 | 14,342.2 | 3,917,561.1 | 15,938,355.2 | **6742.79×** | 4.07× |
-| LSTM | JAX | jit | 581.0 | 14,342.2 | 3,917,561.1 | 15,938,355.2 | **6742.79×** | 4.07× |
-| LSTM | TensorFlow | baseline | 3,081.0 | 9,226.3 | 512.0 | 512.0 | **0.17×** | 1.00× (minimal) |
-| LSTM | TensorFlow | tf.function+XLA | 3,081.0 | 9,226.3 | 512.0 | 512.0 | **0.17×** | 1.00× (minimal) |
+| FF DNN | PyTorch | baseline | 480.0 | 561.3 | — | 8,656.0 | — | — |
+| FF DNN | PyTorch | compiled | 480.0 | 561.3 | — | 8,656.0 | — | — |
+| FF DNN | JAX | baseline | 477.0 | 526.2 | — | 1,599.2 | — | — |
+| FF DNN | JAX | jit | 477.0 | 526.2 | 1,825.8 | 1,993.2 | **3.83×** | 1.09× |
+| ConvNeXt | PyTorch | baseline | 259,204.5 | 3,500,453.8 | — | 7,617,808.0 | — | — |
+| ConvNeXt | PyTorch | compiled | 259,204.5 | 3,500,453.8 | — | 7,617,872.0 | — | — |
+| ConvNeXt | JAX | baseline | 152,336.6 | 453,441.9 | 679,386.6 | 1,277,966.3 | **4.46×** | 1.88× |
+| ConvNeXt | JAX | jit | 152,336.6 | 453,441.9 | — | 1,334,414.3 | — | — |
+| ViT | PyTorch | baseline | 80,392.5 | 1,087,049.8 | — | 3,346,144.0 | — | — |
+| ViT | PyTorch | compiled | 80,392.5 | 1,087,049.8 | — | 3,346,160.0 | — | — |
+| ViT | JAX | baseline | 46,005.0 | 140,182.2 | — | 5,326,830.3 | — | — |
+| ViT | JAX | jit | 46,005.0 | 140,182.2 | — | 5,369,070.3 | — | — |
+| Transformer | PyTorch | baseline | 3,602.0 | 15,891.3 | — | 68,816.0 | — | — |
+| Transformer | PyTorch | compiled | 3,602.0 | 15,891.3 | — | 68,816.0 | — | — |
+| Transformer | JAX | baseline | 2,821.0 | 10,026.2 | — | 7,483,806.3 | — | — |
+| Transformer | JAX | jit | 2,821.0 | 10,026.2 | — | 7,490,462.3 | — | — |
 
 **Key observations & Telemetry Analysis:**
 - **Dynamic Overhead Ratio & Driver Caching:** Observed device memory exceeds theoretical minimum tensor storage due to kernel scratchpads, GEMM workspaces, activation retention, and framework runtime contexts.

@@ -262,17 +262,19 @@ and none of them is ever fit to the workload it predicts:
 It also checks that the roofline is a valid **lower bound**. Any measurement
 faster than the bound would falsify the model.
 
-Results on an Apple M3 (`VALIDATION_REPORT.md`, 59 workloads, 3 backends):
+Results on an Apple M3 (`VALIDATION_REPORT.md`, 95 workloads, 5 backends; TensorFlow has no calibration, so only the LOO fit applies):
 
 | Backend | Bound violations | Zero-shot MAPE (median) | Op-replay MAPE (median) | LOO fit MAPE (median) | Rank corr. (best predictor) |
 |---|---:|---:|---:|---:|---:|
-| PyTorch eager, CPU | 0 / 23 | 61% (66%) | **26% (22%)** | 51% (52%) | 0.987 |
-| PyTorch eager, MPS | 0 / 23 | 29% (19%) | 30% (15%) | **22% (13%)** | 0.948 |
-| JAX jit, CPU | 0 / 13 | **39% (33%)** | n/a | 45% (41%) | 0.989 |
+| PyTorch eager, CPU | 0 / 23 | 63% (68%) | **25% (18%)** | 51% (52%) | 0.987 |
+| PyTorch eager, MPS | 0 / 23 | 29% (20%) | 29% (14%) | **21% (12%)** | 0.936 |
+| JAX jit, CPU | 0 / 13 | 63% (76%) | n/a | **5% (2%)** | 0.995 |
+| JAX jit, MPS | 0 / 13 | 26% (20%) | n/a | **21% (16%)** | 0.951 |
+| TensorFlow graph, CPU | 0 / 23 | n/a | n/a | **22% (22%)** | 0.954 |
 
 What this shows, and what it doesn't. The bound was never violated, and both
-bound and predictions rank workloads correctly (Spearman ρ 0.91–0.99). The
-best predictor still has a typical (median) error of 13–33%. Most of what remains is the eager-LSTM
+bound and predictions rank workloads correctly (Spearman ρ 0.89–0.995). The
+best predictor still has a typical (median) error of 2–22%. Most of what remains is the eager-LSTM
 decomposition and composition effects that only appear when ops run together.
 That is exactly what the `residual` component isolates. The report contains
 every per-workload number. Run it on your hardware with:
@@ -580,8 +582,10 @@ spec, _ = JaxAdapter().hardware()                       # active JAX device
 Every detected `HardwareSpec` records a `device_type` (`"cpu"` or `"gpu"`).
 When an adapter benchmark records the device it ran on, `analyze_gap` adds a
 **Device mismatch** finding if the two disagree.  On Apple Silicon the CPU
-peak uses a NEON P/E-core table and the CPU shares the chip's unified memory
-bandwidth with the GPU.  The CLI accepts the same option:
+peak is the higher of the NEON P/E-core peak and the per-cluster AMX/SME matrix
+units that Accelerate (PyTorch's CPU BLAS) drives, and the CPU is bounded by the
+chip's unified memory bandwidth (a single-threaded NumPy triad reaches well
+under half of it).  The CLI accepts the same option:
 `neural-cost hardware --device cpu`.
 
 Apple variants are told apart by GPU core count (from `system_profiler`): the
