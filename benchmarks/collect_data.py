@@ -23,6 +23,9 @@ import os
 import sys
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# If JAX_PLATFORMS is overridden to include a GPU, don't let JAX reserve 75 % of
+# its memory up front.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
