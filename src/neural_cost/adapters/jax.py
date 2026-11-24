@@ -720,9 +720,18 @@ class JaxAdapter(FrameworkAdapter):
         return result
 
     def benchmark(
-        self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
+        self,
+        function: Any,
+        *args: Any,
+        warmup: int = 3,
+        repeats: int = 10,
+        min_sample_seconds: float | None = None,
+        **kwargs: Any,
     ) -> Measurement:
         """Benchmark a JAX function while waiting for dispatched device work.
+
+        ``min_sample_seconds`` batches short calls into longer samples (see
+        :func:`neural_cost.profiler.timed_samples`).
 
         Every sample blocks on all output leaves, so asynchronous dispatch
         cannot end the clock early.  Memory comes from the device allocator
@@ -743,11 +752,22 @@ class JaxAdapter(FrameworkAdapter):
             output = _block(jax, function(*args, **kwargs))
         dev = _first_device(jax, (args, kwargs)) or _first_device(jax, output)
         before = _allocator_stats(dev)
-        samples = []
-        for _ in range(repeats):
-            start = perf_counter_ns()
-            output = _block(jax, function(*args, **kwargs))
-            samples.append((perf_counter_ns() - start) / 1_000_000_000)
+        from ..profiler import timed_samples
+
+        last: list[Any] = [output]
+
+        def call() -> Any:
+            last[0] = function(*args, **kwargs)
+            return last[0]
+
+        samples, calls, overhead = timed_samples(
+            call,
+            lambda value: _block(jax, value),
+            warmup=0,
+            repeats=repeats,
+            min_sample_seconds=min_sample_seconds,
+        )
+        output = last[0]
         if dev is None:
             dev = _first_device(jax, output)
         after = _allocator_stats(dev)
@@ -776,6 +796,8 @@ class JaxAdapter(FrameworkAdapter):
             reserved_memory_bytes=reserved,
             trace_event_count=traced.event_count if traced else None,
             trace_device_time_seconds=traced.total_seconds if traced else None,
+            calls_per_sample=calls,
+            sync_overhead_seconds=overhead,
         )
 
 

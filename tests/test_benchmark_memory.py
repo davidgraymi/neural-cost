@@ -225,9 +225,11 @@ def test_torch_benchmark_times_without_profiler_and_keeps_trace_stats(monkeypatc
         states.append(bool(profiling))
         return model(inp)
 
-    meas = TorchAdapter().benchmark(run, x, warmup=1, repeats=4)
-    # warmup + 4 timed calls unprofiled, then 4 profiled calls for trace stats.
-    assert states == [False] * 5 + [True] * 4
+    meas = TorchAdapter().benchmark(run, x, warmup=1, repeats=4, min_sample_seconds=None)
+    # Warmup, overhead probes and 4 timed calls run unprofiled; only the last
+    # 4 calls (the separate trace pass) run under the profiler.
+    assert states[-4:] == [True] * 4
+    assert not any(states[:-4]) and len(states) > 8
     assert meas.trace_event_count and meas.trace_event_count > 0
     assert meas.peak_memory_bytes is not None
     plain = TorchAdapter(use_profiler=False).benchmark(run, x, warmup=0, repeats=2)
@@ -268,3 +270,86 @@ def test_analyze_gap_reports_noisy_timing() -> None:
     assert any("Noisy timing" in f for f in analyze_gap(estimate, noisy, hardware).findings)
     steady = Measurement(1e-3, (1e-3,) * 5)
     assert not any("Noisy timing" in f for f in analyze_gap(estimate, steady, hardware).findings)
+
+
+def _call_wait_log(**options):
+    from neural_cost.profiler import timed_samples
+
+    log = []
+
+    def call():
+        log.append("c")
+        return len(log)
+
+    result = timed_samples(call, lambda out: log.append("w"), **options)
+    return result, "".join(log)
+
+
+def test_timed_samples_batches_short_calls_with_one_wait_per_sample() -> None:
+    (samples, per_sample, overhead), log = _call_wait_log(
+        warmup=2, repeats=3, min_sample_seconds=1e-3
+    )
+    assert per_sample > 1  # appending to a list takes far less than 1 ms
+    assert log.endswith(("c" * per_sample + "w") * 3)
+    assert log.startswith("cw" * 2 + "cw" * 5)  # warmup, then single-call probes
+    assert len(samples) == 3 and overhead >= 0
+
+
+def test_timed_samples_default_is_one_call_per_sample() -> None:
+    (samples, per_sample, _), log = _call_wait_log(warmup=0, repeats=4)
+    assert per_sample == 1 and len(samples) == 4
+    assert log.endswith("cw" * 4)
+
+
+def test_sync_overhead_is_single_call_minus_batched_cost(monkeypatch) -> None:
+    from neural_cost import profiler
+
+    # A fake clock, so the test does not depend on how precisely the runner
+    # sleeps: each call costs 1 µs, each wait 2 ms (like a GPU round trip).
+    now = [0]
+    monkeypatch.setattr(profiler, "perf_counter_ns", lambda: now[0])
+
+    def call():
+        now[0] += 1_000
+
+    def wait(output):
+        now[0] += 2_000_000
+
+    samples, calls, overhead = profiler.timed_samples(call, wait, warmup=1, repeats=3)
+    assert overhead == pytest.approx(2e-3)
+    assert calls == 1 and samples == [pytest.approx(2.001e-3)] * 3
+    batched, calls, _ = profiler.timed_samples(
+        call, wait, warmup=0, repeats=2, min_sample_seconds=0.1
+    )
+    assert calls > 1
+    # Batching spreads the 2 ms wait over every call in the sample.
+    assert batched[0] == pytest.approx(1e-6 + 2e-3 / calls)
+
+
+def test_short_sample_warning_and_amortized_overhead() -> None:
+    short = Measurement(10e-6, (10e-6,) * 5, sync_overhead_seconds=2e-6)
+    assert short.sync_overhead_ratio == pytest.approx(0.2)
+    assert "min_sample_seconds" in short.sync_overhead_warning()
+    batched = Measurement(10e-6, (10e-6,) * 5, calls_per_sample=100, sync_overhead_seconds=2e-6)
+    assert batched.sync_overhead_ratio == pytest.approx(0.002)
+    assert batched.sync_overhead_warning() is None
+    with pytest.raises(ValueError):
+        Measurement(1.0, (1.0,), calls_per_sample=0)
+
+
+def test_attribution_amortizes_call_overhead_for_batched_samples() -> None:
+    from neural_cost import HardwareCalibration, HardwareSpec, Operation, attribute_gap
+
+    ops = [Operation("fc", "linear", ((8, 64), (64, 64)), (8, 64), 4)]
+    hardware = HardwareSpec("test", peak_flops=1e12, memory_bandwidth=1e11)
+    calibration = HardwareCalibration(1e11, 1e10, dispatch_seconds=0, call_overhead_seconds=5e-6)
+    single = attribute_gap(ops, Measurement(20e-6, (20e-6,) * 3), hardware, calibration)
+    batched = attribute_gap(
+        ops, Measurement(20e-6, (20e-6,) * 3, calls_per_sample=10), hardware, calibration
+    )
+
+    def dispatch(result):
+        return next(c.seconds for c in result.components if c.name == "dispatch")
+
+    assert dispatch(single) == pytest.approx(5e-6)
+    assert dispatch(batched) == pytest.approx(0.5e-6)

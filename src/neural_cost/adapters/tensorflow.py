@@ -2,7 +2,6 @@
 
 from collections.abc import Sequence
 from statistics import median
-from time import perf_counter_ns
 from typing import Any
 
 from ..operations import Operation
@@ -484,9 +483,18 @@ class TensorFlowAdapter(FrameworkAdapter):
         return captured
 
     def benchmark(
-        self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
+        self,
+        function: Any,
+        *args: Any,
+        warmup: int = 3,
+        repeats: int = 10,
+        min_sample_seconds: float | None = None,
+        **kwargs: Any,
     ) -> Measurement:
         """Benchmark TensorFlow and collect GPU allocator telemetry.
+
+        ``min_sample_seconds`` batches short calls into longer samples (see
+        :func:`neural_cost.profiler.timed_samples`).
 
         Eager GPU ops return as soon as their kernels are queued, so every
         sample waits for the devices with ``tf.test.experimental.sync_devices``
@@ -510,11 +518,15 @@ class TensorFlowAdapter(FrameworkAdapter):
                 tf.config.experimental.reset_memory_stats(memory_device)
             except (RuntimeError, ValueError):
                 memory_device = None
-        samples: list[float] = []
-        for _ in range(repeats):
-            start = perf_counter_ns()
-            sync(function(*args, **kwargs))
-            samples.append((perf_counter_ns() - start) / 1_000_000_000)
+        from ..profiler import timed_samples
+
+        samples, calls, overhead = timed_samples(
+            lambda: function(*args, **kwargs),
+            sync,
+            warmup=0,
+            repeats=repeats,
+            min_sample_seconds=min_sample_seconds,
+        )
         info: dict[str, int] = {}
         if memory_device is not None:
             try:
@@ -532,6 +544,8 @@ class TensorFlowAdapter(FrameworkAdapter):
             info.get("current"),
             trace_event_count=traced.event_count if traced else None,
             trace_device_time_seconds=traced.total_seconds if traced else None,
+            calls_per_sample=calls,
+            sync_overhead_seconds=overhead,
         )
 
 

@@ -20,7 +20,10 @@ def test_every_sample_waits_for_the_device(monkeypatch, tf):
     monkeypatch.setattr(tf.test.experimental, "sync_devices", lambda: calls.append(1))
     x = tf.ones((8, 8))
     meas = TensorFlowAdapter().benchmark(lambda a: tf.matmul(a, a), x, warmup=2, repeats=3)
-    assert len(calls) == 5  # each warmup and timed call is synchronised
+    # Each warmup call, the five single-call probes, the three back-to-back
+    # probe batches and each timed sample end with one device sync.
+    assert len(calls) == 2 + 5 + 3 + 3
+    assert meas.calls_per_sample == 1 and meas.sync_overhead_seconds is not None
     assert len(meas.samples_seconds) == 3
 
 
@@ -70,5 +73,8 @@ def test_peak_reset_after_warmup(monkeypatch, tf):
     meas = TensorFlowAdapter(trace_device_time=False).benchmark(
         run, tf.ones(2), warmup=2, repeats=2
     )
-    assert events == ["call", "call", "reset", "call", "call", "read"]
+    # Reset once, after the two warmup calls and before any probe or timed call.
+    assert events[:3] == ["call", "call", "reset"]
+    assert events.count("reset") == 1 and events[-1] == "read"
+    assert set(events[3:-1]) == {"call"}
     assert (meas.peak_memory_bytes, meas.allocated_memory_bytes, meas.device) == (10, 4, "GPU:0")

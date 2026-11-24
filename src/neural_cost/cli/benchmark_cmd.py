@@ -100,6 +100,15 @@ def _add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--repeats", type=int, default=15, help="Timed benchmark repetitions (default: 15)."
     )
+    parser.add_argument(
+        "--min-sample-ms",
+        type=float,
+        default=None,
+        help=(
+            "Time back-to-back calls until each sample lasts at least this long, to "
+            "amortize timer and sync overhead for short kernels (default: one call per sample)."
+        ),
+    )
 
     # Hardware & output
     parser.add_argument(
@@ -256,7 +265,13 @@ def run_benchmark(args: argparse.Namespace) -> int:
         inputs = (tf.ones((b, k)),)
 
     est = estimate_model(model, inputs, adapter)
-    measurement = adapter.benchmark(model, *inputs, warmup=args.warmup, repeats=args.repeats)
+    measurement = adapter.benchmark(
+        model,
+        *inputs,
+        warmup=args.warmup,
+        repeats=args.repeats,
+        min_sample_seconds=args.min_sample_ms / 1e3 if args.min_sample_ms else None,
+    )
     gap = analyze_gap(est, measurement, hw)
 
     res = {
@@ -269,6 +284,12 @@ def run_benchmark(args: argparse.Namespace) -> int:
         "min_ms": measurement.min_seconds * 1e3,
         "relative_spread": measurement.relative_spread,
         "repeats": len(measurement.samples_seconds),
+        "calls_per_sample": measurement.calls_per_sample,
+        "sync_overhead_us": (
+            measurement.sync_overhead_seconds * 1e6
+            if measurement.sync_overhead_seconds is not None
+            else None
+        ),
         "achieved_gflops": gap.achieved_flops / 1e9,
         "achieved_gbw": gap.achieved_bandwidth / 1e9,
         "roofline_efficiency": gap.efficiency,
@@ -288,6 +309,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
     print(f"│  Workload:           {b}×{k}→{n} Linear ({fw.upper()})")
     spread = measurement.relative_spread
     spread_text = f", IQR {spread:.1%} of median" if spread is not None else ""
+    if measurement.calls_per_sample > 1:
+        spread_text += f", {measurement.calls_per_sample} calls per sample"
     print(
         f"│  Median Latency:     {measurement.median_seconds * 1e3:.3f} ms "
         f"(min {measurement.min_seconds * 1e3:.3f} ms, {len(measurement.samples_seconds)} runs{spread_text})"
@@ -296,7 +319,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
     print(f"│  Achieved Bandwidth: {gap.achieved_bandwidth / 1e9:.2f} GB/s")
     print(f"│  Roofline Efficiency:{gap.efficiency:.1%}")
     print(f"│  Regime:             {gap.bottleneck.upper()}-BOUND")
-    if (noise := measurement.noise_warning()) is not None:
-        print(f"│  Warning:            {noise}")
+    for warning in (measurement.noise_warning(), measurement.sync_overhead_warning()):
+        if warning is not None:
+            print(f"│  Warning:            {warning}")
     print("└────────────────────────────────────────────────────────────────────────────")
     return 0
