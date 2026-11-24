@@ -16,8 +16,11 @@ Usage::
     python benchmarks/validate.py                # all available backends
     python benchmarks/validate.py --quick        # smaller grid
     python benchmarks/validate.py --backends torch-cpu jax-cpu
+    python benchmarks/validate.py --quick --fail-on-violation   # CI gate
 
-Writes ``VALIDATION_REPORT.md`` and ``benchmarks/results/validation_data.json``.
+Writes ``VALIDATION_REPORT.md`` and ``validation_data.json`` to
+``benchmarks/results/<device>/``, stamped with the neural-cost version and git
+commit.  ``--fail-on-violation`` exits 1 if any measurement beat its lower bound.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from neural_cost import (
     CacheSpec,
@@ -42,6 +46,7 @@ from neural_cost import (
     detect_hardware,
     run_validation_suite,
 )
+from benchmarks.run_info import describe_run, results_dir, run_metadata
 from neural_cost.profiler import Measurement
 
 # ------------------------------------------------------------------ torch models
@@ -254,14 +259,27 @@ def main() -> None:
     parser.add_argument("--backends", nargs="*", default=None)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--repeats", type=int, default=30)
-    parser.add_argument("--output", type=Path, default=ROOT / "VALIDATION_REPORT.md")
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: benchmarks/results/<device>/)",
+    )
+    parser.add_argument(
+        "--fail-on-violation",
+        action="store_true",
+        help="Exit 1 if any measured runtime beat its lower bound",
+    )
     args = parser.parse_args()
 
     hardware, info = detect_hardware()
     backends = args.backends or available_backends()
     print(f"Hardware: {hardware.name} ({info.source}); backends: {', '.join(backends)}")
 
-    sections, payload = [], {"hardware": hardware.name, "detection": info.source, "backends": {}}
+    run = run_metadata(hardware.name, script="validate.py", backends=backends, quick=args.quick)
+    sections = []
+    payload = {"run": run, "hardware": hardware.name, "detection": info.source, "backends": {}}
+    violations = 0
     for backend in backends:
         if backend.startswith("torch"):
             from neural_cost.adapters import TorchAdapter
@@ -279,7 +297,9 @@ def main() -> None:
             workloads = jax_workloads(args.quick)
             title = "JAX jit (cpu)"
         print(f"\n[{backend}] calibration: {calibration}")
-        spec = hardware
+        # Each backend is bounded by its own device: on a CUDA host the default
+        # spec is the GPU's, which would make every CPU bound far too loose.
+        spec, _ = detect_hardware(device="cpu" if backend.endswith("cpu") else "gpu")
         if backend.endswith("cpu"):
             spec = replace(hardware, caches=hardware.caches + cpu_caches())
         report = run_validation_suite(
@@ -292,6 +312,7 @@ def main() -> None:
             warmup_seconds=0.25,
         )
         print(report.render())
+        violations += report.bound_violations
 
         # Attribute the gap for the smallest, the most expensive, and the last workload.
         picks = [workloads[0], max(workloads, key=lambda w: _flops(adapter, w)), workloads[-1]]
@@ -368,6 +389,8 @@ def main() -> None:
 Generated {date.today().isoformat()} by `benchmarks/validate.py` on **{hardware.name}**
 ({platform.platform()}), hardware spec from {info.source}.
 
+Run: {describe_run(run)}.
+
 **How to read this.** *Bound* is the per-operation roofline at datasheet peak
 (fused aggregate roofline for jit). It must never exceed the measurement; any
 violation would falsify the model. *Zero-shot* predictions use only
@@ -384,10 +407,15 @@ of their traced traffic, paying Python dispatch only when issued from Python. A
 jitted JAX program is one dispatch.
 
 """
-    args.output.write_text(header + "\n\n".join(sections) + "\n")
-    data_path = ROOT / "benchmarks" / "results" / "validation_data.json"
+    out_dir = results_dir(hardware.name, args.results_dir)
+    report_path = out_dir / "VALIDATION_REPORT.md"
+    data_path = out_dir / "validation_data.json"
+    report_path.write_text(header + "\n\n".join(sections) + "\n")
     data_path.write_text(json.dumps(payload, indent=2, default=str))
-    print(f"\nWrote {args.output} and {data_path}")
+    print(f"\nWrote {report_path} and {data_path}")
+    if args.fail_on_violation and violations:
+        print(f"FAIL: {violations} measurement(s) beat their lower bound", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

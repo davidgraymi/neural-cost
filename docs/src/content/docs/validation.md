@@ -7,7 +7,7 @@ order: 2
 
 `benchmarks/validate.py` runs a grid of MLP, CNN, LSTM and Transformer
 workloads on every installed backend and writes
-[`VALIDATION_REPORT.md`](https://github.com/davidgraymi/neural-cost/blob/main/VALIDATION_REPORT.md). It scores three predictors,
+[`VALIDATION_REPORT.md`](https://github.com/davidgraymi/neural-cost/blob/main/benchmarks/results/apple-m3/VALIDATION_REPORT.md). It scores three predictors,
 and none of them is ever fit to the workload it predicts:
 
 * **Zero-shot**: microbenchmark calibration only. It never sees a model runtime.

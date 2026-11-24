@@ -19,6 +19,46 @@ The script evaluates **FF DNN**, **CNN**, **RNN**, **LSTM**, and **Transformer**
 architectures using a shared hidden dimension (128) and batch size (16).
 Hardware is auto-detected; pass `--peak-flops` / `--memory-bandwidth` to override.
 
+## Results layout and provenance
+
+Every benchmark script times through `adapter.benchmark()`, the same code path
+users run, so published numbers carry the library's device sync, sync-overhead
+measurement, short-kernel batching and profiler device time. Results are
+written per machine:
+
+```text
+benchmarks/results/<device>/          e.g. apple-m3/, tesla-t4/
+  benchmark_data.json                 collect_data.py      (CPU)
+  benchmark_gpu_data.json             collect_gpu_data.py  (GPU)
+  llm_benchmark_data.json             llm_bench.py
+  validation_data.json                validate.py
+  *_REPORT.md, figures/               generate_*report.py, validate.py
+```
+
+Each JSON file starts with a `run` block (neural-cost version, `git describe`,
+the full git commit and whether the tree had local changes, framework
+versions, Python, platform, UTC time), and every record repeats the commit.
+Reports print it on their first line. Pass `--results-dir` to any script to
+write or read elsewhere; the report generators default to the most recently
+written directory.
+
+## Free CUDA runs (Colab or Kaggle)
+
+[`benchmarks/cloud_gpu_benchmark.ipynb`](https://github.com/davidgraymi/neural-cost/blob/main/benchmarks/cloud_gpu_benchmark.ipynb)
+runs the suite on a free NVIDIA GPU. Open it in Google Colab (*Runtime → Change
+runtime type → T4 GPU*) or Kaggle (*Accelerator → GPU T4 x2 / P100*), set
+`REF` to a release tag or commit, and run all cells. It clones that commit,
+installs it, runs `validate.py` and `collect_gpu_data.py --device cuda`, builds
+the reports and downloads a zip to unpack into `benchmarks/results/`.
+
+## Release validation
+
+`.github/workflows/benchmark-validation.yml` runs after every successful
+Publish on `main` (and on demand). It runs
+`validate.py --quick --fail-on-violation` on a hosted CPU runner and fails if
+any measured runtime beats its roofline lower bound. Hosted runners are shared
+VMs, so their timings are kept as a build artifact, never published.
+
 ## GPU benchmark
 
 Run the GPU benchmark to evaluate the same five architectures on available GPU
@@ -42,12 +82,14 @@ python benchmarks/collect_gpu_data.py \
   --peak-flops 312e12 --memory-bandwidth 2.0e12
 ```
 
-Results are written to `benchmarks/results/benchmark_gpu_data.json`.
+Results are written to `benchmarks/results/<device>/benchmark_gpu_data.json`
+(for example `nvidia-tesla-t4/` or `apple-m3/`), stamped with the neural-cost
+version, git commit and framework versions.
 Generate figures and the full markdown report:
 
 ```bash
 python benchmarks/generate_gpu_report.py
-# → GPU_BENCHMARK_REPORT.md + benchmarks/results/figures/gpu_fig*.png
+# → benchmarks/results/<device>/GPU_BENCHMARK_REPORT.md + figures/gpu_fig*.png
 ```
 
 ### GPU-vs-CPU crossover analysis

@@ -1,6 +1,7 @@
 """Scientific evaluation: collect benchmark data across architectures × frameworks × batch sizes.
 
-Writes results/benchmark_data.json when complete.
+Writes results/<device>/benchmark_data.json when complete, stamped with the
+neural-cost version, git commit and framework versions (see run_info.py).
 
 Key improvement over the basic example:
   - JAX models are wrapped with jax.jit() (the dominant performance lever)
@@ -20,13 +21,11 @@ import importlib.util
 import json
 import os
 import sys
-import time
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import mean, median, stdev
 from typing import Any
 
 # Ensure repo root and src/ are importable
@@ -36,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from benchmarks.run_info import results_dir, run_metadata, timing_stats
 from benchmarks.models import (
     SCALE_BATCH_SIZES,
     SCALE_TIERS,
@@ -115,6 +115,12 @@ class BenchRecord:
     peak_allocated_bytes: int | None = None
     peak_reserved_bytes: int | None = None
     memory_overhead_ratio: float | None = None
+    latency_min_ms: float | None = None
+    relative_spread: float | None = None
+    calls_per_sample: int = 1
+    sync_overhead_us: float | None = None
+    trace_device_ms: float | None = None
+    git_commit: str | None = None
     theoretical_min_bytes: int | None = None
     theoretical_conservative_bytes: int | None = None
     training_minimum_bytes: int | None = None
@@ -230,6 +236,11 @@ def _make_bench_record(
         peak_allocated_bytes=peak_alloc,
         peak_reserved_bytes=peak_res,
         memory_overhead_ratio=ratio,
+        latency_min_ms=st.get("min"),
+        relative_spread=st.get("relative_spread"),
+        calls_per_sample=st.get("calls_per_sample", 1),
+        sync_overhead_us=st.get("sync_overhead_us"),
+        trace_device_ms=st.get("trace_device_ms"),
         theoretical_min_bytes=theo_min,
         theoretical_conservative_bytes=theo_cons,
         training_minimum_bytes=training_min_b,
@@ -241,161 +252,22 @@ def _make_bench_record(
 # ---------------------------------------------------------------------------
 
 
-def _jax_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import jax
-
-    def wait(v: Any) -> None:
-        for leaf in jax.tree.leaves(v):
-            if hasattr(leaf, "block_until_ready"):
-                leaf.block_until_ready()
-
-    for _ in range(warmup):
-        wait(fn(*args))
-    samples = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        wait(fn(*args))
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = None
-    peak_reserved = None
-    try:
-        devices = jax.devices()
-        if devices and hasattr(devices[0], "memory_stats"):
-            stats = devices[0].memory_stats()
-            if stats:
-                peak_allocated = stats.get("peak_bytes_in_use") or stats.get("bytes_in_use")
-                peak_reserved = stats.get("bytes_limit") or stats.get("bytes_reserved")
-    except Exception:
-        pass
-    if peak_allocated is None:
-        try:
-            total_nbytes = sum(getattr(leaf, "nbytes", 0) for leaf in jax.tree.leaves(args))
-            if total_nbytes > 0:
-                peak_allocated = int(total_nbytes)
-                peak_reserved = peak_allocated
-        except Exception:
-            pass
-    return samples, peak_allocated, peak_reserved
+def _torch_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``TorchAdapter.benchmark``."""
+    return TorchAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _torch_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import torch
-
-    device = next((arg.device for arg in args if isinstance(arg, torch.Tensor)), None)
-    is_cuda = device is not None and device.type == "cuda"
-    is_mps = device is not None and device.type == "mps"
-
-    if is_cuda:
-        torch.cuda.reset_peak_memory_stats(device)
-    elif is_mps:
-        torch.mps.synchronize()
-
-    for _ in range(warmup):
-        fn(*args)
-
-    if is_cuda:
-        torch.cuda.synchronize(device)
-    elif is_mps:
-        torch.mps.synchronize()
-
-    samples = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        if is_cuda:
-            torch.cuda.synchronize(device)
-        elif is_mps:
-            torch.mps.synchronize()
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated: int | None = None
-    peak_reserved: int | None = None
-    if is_cuda:
-        peak_allocated = int(torch.cuda.max_memory_allocated(device))
-        peak_reserved = int(torch.cuda.max_memory_reserved(device))
-    elif is_mps:
-        peak_allocated = int(torch.mps.current_allocated_memory())
-        peak_reserved = int(torch.mps.driver_allocated_memory())
-    else:
-        try:
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU],
-                profile_memory=True,
-            ) as prof:
-                fn(*args)
-            events = prof.events()
-            act_allocs = [e.cpu_memory_usage for e in events if e.cpu_memory_usage > 0]
-            param_bytes = 0
-            if hasattr(fn, "parameters") and callable(fn.parameters):
-                param_bytes = sum(p.numel() * p.element_size() for p in fn.parameters())
-            peak_allocated = int(param_bytes + sum(act_allocs))
-            peak_reserved = peak_allocated
-        except Exception:
-            peak_allocated = None
-            peak_reserved = None
-
-    return samples, peak_allocated, peak_reserved
+def _jax_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``JaxAdapter.benchmark``."""
+    return JaxAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _tf_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import tensorflow as tf
-
-    async_wait = getattr(tf.experimental, "async_wait", None)
-
-    def wait():
-        if async_wait:
-            async_wait()
-
-    for _ in range(warmup):
-        fn(*args)
-        wait()
-    samples = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        wait()
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = None
-    peak_reserved = None
-    try:
-        gpus = tf.config.list_logical_devices("GPU")
-        if gpus:
-            info = tf.config.experimental.get_memory_info("GPU:0")
-            peak_allocated = info.get("peak")
-            peak_reserved = info.get("current") or peak_allocated
-    except Exception:
-        pass
-    if peak_allocated is None:
-        try:
-            total_bytes = 0
-            for a in args:
-                if hasattr(a, "numpy"):
-                    total_bytes += a.numpy().nbytes
-            if total_bytes > 0:
-                peak_allocated = int(total_bytes)
-                peak_reserved = peak_allocated
-        except Exception:
-            pass
-    return samples, peak_allocated, peak_reserved
+def _tf_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``TensorFlowAdapter.benchmark``."""
+    return TensorFlowAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _stats(samples: list[float]) -> dict[str, float]:
-    s = sorted(samples)
-    n = len(s)
-    med = median(s)
-    mn = mean(s)
-    sd = stdev(s) if n > 1 else 0.0
-    cv = 100 * sd / mn if mn > 0 else 0.0
-    p95 = s[min(int(0.95 * n), n - 1)]
-    return dict(median=med, mean=mn, stddev=sd, cv=cv, p95=p95)
+_stats = timing_stats
 
 
 # ---------------------------------------------------------------------------
@@ -893,7 +765,7 @@ def eval_torch(
                         loss.backward()
                         optimizer.step()
 
-                    samp, peak_alloc, peak_res = _torch_block(run_step, inputs, warmup, repeats)
+                    meas = _torch_block(run_step, inputs, warmup, repeats)
                 elif mode == "backward_only":
                     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
@@ -903,18 +775,12 @@ def eval_torch(
                         loss = out.sum() if isinstance(out, torch.Tensor) else out[0].sum()
                         loss.backward()
 
-                    samp, peak_alloc, peak_res = _torch_block(run_bwd, inputs, warmup, repeats)
+                    meas = _torch_block(run_bwd, inputs, warmup, repeats)
                 else:
-                    samp, peak_alloc, peak_res = _torch_block(model, inputs, warmup, repeats)
+                    meas = _torch_block(model, inputs, warmup, repeats)
 
-                st = _stats(samp)
-                meas = Measurement(
-                    median_seconds=st["median"] / 1e3,
-                    samples_seconds=tuple(s / 1e3 for s in samp),
-                    peak_memory_bytes=peak_alloc,
-                    allocated_memory_bytes=peak_alloc,
-                    reserved_memory_bytes=peak_res,
-                )
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = analyze_gap(
                     cost,
                     meas,
@@ -955,7 +821,7 @@ def eval_torch(
                         loss.backward()
                         optimizer.step()
 
-                    samp, peak_alloc, peak_res = _torch_block(run_compiled_step, inputs, warmup, repeats)
+                    meas = _torch_block(run_compiled_step, inputs, warmup, repeats)
                 elif mode == "backward_only":
                     def run_compiled_bwd(*x: Any) -> None:
                         compiled.zero_grad(set_to_none=True)
@@ -963,18 +829,12 @@ def eval_torch(
                         loss = out.sum() if isinstance(out, torch.Tensor) else out[0].sum()
                         loss.backward()
 
-                    samp, peak_alloc, peak_res = _torch_block(run_compiled_bwd, inputs, warmup, repeats)
+                    meas = _torch_block(run_compiled_bwd, inputs, warmup, repeats)
                 else:
-                    samp, peak_alloc, peak_res = _torch_block(compiled, inputs, warmup, repeats)
+                    meas = _torch_block(compiled, inputs, warmup, repeats)
 
-                st = _stats(samp)
-                meas = Measurement(
-                    median_seconds=st["median"] / 1e3,
-                    samples_seconds=tuple(s / 1e3 for s in samp),
-                    peak_memory_bytes=peak_alloc,
-                    allocated_memory_bytes=peak_alloc,
-                    reserved_memory_bytes=peak_res,
-                )
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = analyze_gap(
                     cost,
                     meas,
@@ -1040,15 +900,9 @@ def eval_jax(
                 )
             # Baseline (eager)
             try:
-                samp, peak_alloc, peak_res = _jax_block(model, inputs, warmup, repeats)
-                st = _stats(samp)
-                meas = Measurement(
-                    median_seconds=st["median"] / 1e3,
-                    samples_seconds=tuple(s / 1e3 for s in samp),
-                    peak_memory_bytes=peak_alloc,
-                    allocated_memory_bytes=peak_alloc,
-                    reserved_memory_bytes=peak_res,
-                )
+                meas = _jax_block(model, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = analyze_gap(
                     cost,
                     meas,
@@ -1082,15 +936,9 @@ def eval_jax(
                     if hasattr(leaf, "block_until_ready")
                 ]
                 wait(jit_model(*inputs))
-                samp, peak_alloc, peak_res = _jax_block(jit_model, inputs, warmup, repeats)
-                st = _stats(samp)
-                meas = Measurement(
-                    median_seconds=st["median"] / 1e3,
-                    samples_seconds=tuple(s / 1e3 for s in samp),
-                    peak_memory_bytes=peak_alloc,
-                    allocated_memory_bytes=peak_alloc,
-                    reserved_memory_bytes=peak_res,
-                )
+                meas = _jax_block(jit_model, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = analyze_gap(
                     cost,
                     meas,
@@ -1154,15 +1002,9 @@ def eval_tensorflow(
             fn = lambda *a: model(*a, training=False)
             # Baseline (eager)
             try:
-                samp, peak_alloc, peak_res = _tf_block(fn, inputs, warmup, repeats)
-                st = _stats(samp)
-                meas = Measurement(
-                    median_seconds=st["median"] / 1e3,
-                    samples_seconds=tuple(s / 1e3 for s in samp),
-                    peak_memory_bytes=peak_alloc,
-                    allocated_memory_bytes=peak_alloc,
-                    reserved_memory_bytes=peak_res,
-                )
+                meas = _tf_block(fn, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = analyze_gap(
                     cost,
                     meas,
@@ -1192,15 +1034,9 @@ def eval_tensorflow(
                 tf_fn = tf.function(fn, jit_compile=False)
                 for _ in range(3):
                     tf_fn(*inputs)
-                samp, peak_alloc, peak_res = _tf_block(tf_fn, inputs, warmup, repeats)
-                st = _stats(samp)
-                meas = Measurement(
-                    median_seconds=st["median"] / 1e3,
-                    samples_seconds=tuple(s / 1e3 for s in samp),
-                    peak_memory_bytes=peak_alloc,
-                    allocated_memory_bytes=peak_alloc,
-                    reserved_memory_bytes=peak_res,
-                )
+                meas = _tf_block(tf_fn, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = analyze_gap(
                     cost,
                     meas,
@@ -1288,6 +1124,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="Target framework to benchmark (default: all)",
     )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: benchmarks/results/<device>/)",
+    )
     return parser
 
 
@@ -1301,7 +1143,8 @@ def main() -> None:
     active_archs = get_benchmarked_architectures(include_legacy=args.include_legacy)
 
     print("Detecting hardware…", flush=True)
-    hardware, detection = detect_hardware(precision=args.precision)
+    # This script times the CPU; without device="cpu" a CUDA host would report the GPU's peak.
+    hardware, detection = detect_hardware(precision=args.precision, device="cpu")
     if args.peak_flops:
         hardware = HardwareSpec(
             hardware.name,
@@ -1380,9 +1223,10 @@ def main() -> None:
             )
         print()
 
-    out_dir = Path(__file__).parent / "results"
-    out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "benchmark_data.json"
+    run = run_metadata(hardware.name, script="collect_data.py")
+    out_path = results_dir(hardware.name, args.results_dir) / "benchmark_data.json"
+    for r in all_records:
+        r.git_commit = run["git_commit"]
 
     records_to_save: list[dict] = []
     if args.append and out_path.exists():
@@ -1418,7 +1262,7 @@ def main() -> None:
     else:
         records_to_save = [asdict(r) for r in all_records]
 
-    payload = {"hardware": hw_meta, "records": records_to_save}
+    payload = {"run": run, "hardware": hw_meta, "records": records_to_save}
     out_path.write_text(json.dumps(payload, indent=2))
     print(f"\nSaved {len(records_to_save)} records → {out_path}")
 

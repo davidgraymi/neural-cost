@@ -1,6 +1,7 @@
 """GPU benchmark: collect performance data across architectures × frameworks × batch sizes on GPU.
 
-Writes results/benchmark_gpu_data.json when complete.
+Writes results/<device>/benchmark_gpu_data.json when complete, stamped with the
+neural-cost version, git commit and framework versions (see run_info.py).
 
 Key differences vs collect_data.py (CPU):
   - PyTorch: tensors/model moved to CUDA; CUDA events used for precise kernel timing
@@ -12,7 +13,7 @@ Key differences vs collect_data.py (CPU):
 
 New in v0.3.0:
   - --crossover: sweeps a fine batch-size grid (1..1024) to find where GPU first beats CPU.
-    Reads the CPU baseline from benchmarks/results/benchmark_data.json if present.
+    Reads the CPU baseline from benchmarks/results/<host cpu>/benchmark_data.json if present.
   - JAX MPS driver check: detects whether jax-metal or jax-mps is installed and warns
     clearly if JAX falls back to CPU on Apple Silicon.
   - CUDA quality-of-life: enables TF32 matmul and cuDNN benchmark mode on Ampere+ GPUs.
@@ -30,11 +31,9 @@ import argparse
 import importlib.util
 import json
 import sys
-import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import mean, median, stdev
 from typing import Any
 
 # Ensure repo root and src/ are importable when run from any directory
@@ -44,6 +43,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from benchmarks.run_info import RESULTS_ROOT, device_slug, results_dir, run_metadata, timing_stats
 from benchmarks.models import (
     get_available_models,
     get_model,
@@ -84,7 +84,7 @@ QUICK_BATCH_SIZES = [32, 256]
 CROSSOVER_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
 # Path to CPU benchmark JSON (written by collect_data.py).
-_CPU_DATA_FILE = Path(__file__).parent / "results" / "benchmark_data.json"
+_CPU_DATA_FILE = RESULTS_ROOT / "benchmark_data.json"  # replaced in main() by the host's results dir
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +124,12 @@ class BenchRecord:
     peak_allocated_bytes: int | None = None
     peak_reserved_bytes: int | None = None
     memory_overhead_ratio: float | None = None
+    latency_min_ms: float | None = None
+    relative_spread: float | None = None
+    calls_per_sample: int = 1
+    sync_overhead_us: float | None = None
+    trace_device_ms: float | None = None
+    git_commit: str | None = None
     theoretical_min_bytes: int | None = None
     theoretical_conservative_bytes: int | None = None
 
@@ -208,6 +214,11 @@ def _make_gpu_bench_record(
         peak_allocated_bytes=peak_alloc,
         peak_reserved_bytes=peak_res,
         memory_overhead_ratio=ratio,
+        latency_min_ms=st.get("min"),
+        relative_spread=st.get("relative_spread"),
+        calls_per_sample=st.get("calls_per_sample", 1),
+        sync_overhead_us=st.get("sync_overhead_us"),
+        trace_device_ms=st.get("trace_device_ms"),
         theoretical_min_bytes=theo_min,
         theoretical_conservative_bytes=theo_cons,
     )
@@ -218,192 +229,22 @@ def _make_gpu_bench_record(
 # ---------------------------------------------------------------------------
 
 
-def _cuda_event_block(
-    fn: Callable,
-    args: tuple,
-    warmup: int,
-    repeats: int,
-    device: Any,
-) -> tuple[list[float], int | None, int | None]:
-    """Use CUDA events for sub-millisecond GPU kernel timing and collect allocator telemetry."""
-    import torch
-
-    # Reset peak stats before run
-    torch.cuda.reset_peak_memory_stats(device)
-    # Warmup — lets CUDA driver warm up and torch.compile finish tracing.
-    for _ in range(warmup):
-        fn(*args)
-    torch.cuda.synchronize(device)
-
-    samples: list[float] = []
-    for _ in range(repeats):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn(*args)
-        end.record()
-        torch.cuda.synchronize(device)
-        samples.append(start.elapsed_time(end))  # milliseconds
-
-    peak_allocated = int(torch.cuda.max_memory_allocated(device))
-    peak_reserved = int(torch.cuda.max_memory_reserved(device))
-    return samples, peak_allocated, peak_reserved
+def _torch_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``TorchAdapter.benchmark``."""
+    return TorchAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _mps_block(
-    fn: Callable,
-    args: tuple,
-    warmup: int,
-    repeats: int,
-) -> tuple[list[float], int | None, int | None]:
-    """Apple MPS has no CUDA events — use perf_counter with MPS sync and allocator telemetry."""
-    import torch
-
-    for _ in range(warmup):
-        fn(*args)
-    torch.mps.synchronize()
-
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        torch.mps.synchronize()
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = int(torch.mps.current_allocated_memory())
-    peak_reserved = int(torch.mps.driver_allocated_memory())
-    return samples, peak_allocated, peak_reserved
+def _jax_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``JaxAdapter.benchmark``."""
+    return JaxAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _cpu_block(
-    fn: Callable,
-    args: tuple,
-    warmup: int,
-    repeats: int,
-) -> tuple[list[float], int | None, int | None]:
-    import torch
-
-    for _ in range(warmup):
-        fn(*args)
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    try:
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU],
-            profile_memory=True,
-        ) as prof:
-            fn(*args)
-        events = prof.events()
-        act_allocs = [e.cpu_memory_usage for e in events if e.cpu_memory_usage > 0]
-        param_bytes = 0
-        if hasattr(fn, "parameters") and callable(fn.parameters):
-            param_bytes = sum(p.numel() * p.element_size() for p in fn.parameters())
-        peak_allocated = int(param_bytes + sum(act_allocs))
-        peak_reserved = peak_allocated
-    except Exception:
-        peak_allocated = None
-        peak_reserved = None
-    return samples, peak_allocated, peak_reserved
+def _tf_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``TensorFlowAdapter.benchmark``."""
+    return TensorFlowAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
-def _jax_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import jax
-
-    def wait(v: Any) -> None:
-        for leaf in jax.tree.leaves(v):
-            if hasattr(leaf, "block_until_ready"):
-                leaf.block_until_ready()
-
-    for _ in range(warmup):
-        wait(fn(*args))
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        wait(fn(*args))
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = None
-    peak_reserved = None
-    try:
-        devices = jax.devices()
-        if devices and hasattr(devices[0], "memory_stats"):
-            stats = devices[0].memory_stats()
-            if stats:
-                peak_allocated = stats.get("peak_bytes_in_use") or stats.get("bytes_in_use")
-                peak_reserved = stats.get("bytes_limit") or stats.get("bytes_reserved")
-    except Exception:
-        pass
-    if peak_allocated is None:
-        try:
-            total_nbytes = sum(getattr(leaf, "nbytes", 0) for leaf in jax.tree.leaves(args))
-            if total_nbytes > 0:
-                peak_allocated = int(total_nbytes)
-                peak_reserved = peak_allocated
-        except Exception:
-            pass
-    return samples, peak_allocated, peak_reserved
-
-
-def _tf_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import tensorflow as tf
-
-    async_wait = getattr(tf.experimental, "async_wait", None)
-
-    def wait():
-        if async_wait:
-            async_wait()
-
-    for _ in range(warmup):
-        fn(*args)
-        wait()
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        wait()
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = None
-    peak_reserved = None
-    try:
-        gpus = tf.config.list_logical_devices("GPU")
-        if gpus:
-            info = tf.config.experimental.get_memory_info("GPU:0")
-            peak_allocated = info.get("peak")
-            peak_reserved = info.get("current") or peak_allocated
-    except Exception:
-        pass
-    if peak_allocated is None:
-        try:
-            total_bytes = 0
-            for a in args:
-                if hasattr(a, "numpy"):
-                    total_bytes += a.numpy().nbytes
-            if total_bytes > 0:
-                peak_allocated = int(total_bytes)
-                peak_reserved = peak_allocated
-        except Exception:
-            pass
-    return samples, peak_allocated, peak_reserved
-
-
-def _stats(samples: list[float]) -> dict[str, float]:
-    s = sorted(samples)
-    n = len(s)
-    med = median(s)
-    mn = mean(s)
-    sd = stdev(s) if n > 1 else 0.0
-    cv = 100 * sd / mn if mn > 0 else 0.0
-    p95 = s[min(int(0.95 * n), n - 1)]
-    return dict(median=med, mean=mn, stddev=sd, cv=cv, p95=p95)
+_stats = timing_stats
 
 
 # ---------------------------------------------------------------------------
@@ -878,26 +719,14 @@ def _detect_tf_gpu() -> tuple[str, str]:
 
 def _make_gap(
     cost: Any,
-    st: dict,
+    meas: Measurement,
     hardware: HardwareSpec,
     operations: Any = None,
     peak_alloc: int | None = None,
     peak_res: int | None = None,
 ) -> Any:
-    """Build a measurement object compatible with analyze_gap."""
-    meas = Measurement(
-        median_seconds=st["median"] / 1e3,
-        samples_seconds=tuple(s / 1e3 for s in [st["median"]] * 2),
-        peak_memory_bytes=peak_alloc,
-        allocated_memory_bytes=peak_alloc,
-        reserved_memory_bytes=peak_res,
-    )
-    return analyze_gap(
-        cost,
-        meas,
-        hardware,
-        operations=operations,
-    )
+    """Gap analysis of a real ``Measurement`` (peak arguments kept for call-site symmetry)."""
+    return analyze_gap(cost, meas, hardware, operations=operations)
 
 
 def eval_torch_gpu(
@@ -945,22 +774,15 @@ def eval_torch_gpu(
             except Exception:
                 continue
 
-            def _time(fn: Callable, args: tuple) -> tuple[list[float], int | None, int | None]:
-                if is_cuda:
-                    return _cuda_event_block(fn, args, warmup, repeats, torch_device)
-                elif is_mps:
-                    return _mps_block(fn, args, warmup, repeats)
-                else:
-                    return _cpu_block(fn, args, warmup, repeats)
-
 
             # Baseline (eager GPU)
             try:
-                samp, peak_alloc, peak_res = _time(model, inputs)
-                st = _stats(samp)
+                meas = _torch_block(model, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -998,11 +820,12 @@ def eval_torch_gpu(
                 else:
                     for _ in range(max(3, warmup)):
                         compiled(*inputs)
-                samp, peak_alloc, peak_res = _time(compiled, inputs)
-                st = _stats(samp)
+                meas = _torch_block(compiled, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1068,11 +891,12 @@ def eval_jax_gpu(
 
             # Baseline (eager on GPU device)
             try:
-                samp, peak_alloc, peak_res = _jax_block(model, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _jax_block(model, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1105,11 +929,12 @@ def eval_jax_gpu(
                     if hasattr(leaf, "block_until_ready")
                 ]
                 wait(jit_model(*inputs))
-                samp, peak_alloc, peak_res = _jax_block(jit_model, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _jax_block(jit_model, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1162,11 +987,12 @@ def eval_tensorflow_gpu(
 
             # Baseline (eager GPU)
             try:
-                samp, peak_alloc, peak_res = _tf_block(fn, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _tf_block(fn, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1195,11 +1021,12 @@ def eval_tensorflow_gpu(
                 tf_fn = tf.function(fn, jit_compile=True)
                 for _ in range(3):
                     tf_fn(*inputs)
-                samp, peak_alloc, peak_res = _tf_block(tf_fn, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _tf_block(tf_fn, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1225,11 +1052,12 @@ def eval_tensorflow_gpu(
                     tf_fn = tf.function(fn, jit_compile=False)
                     for _ in range(3):
                         tf_fn(*inputs)
-                    samp, peak_alloc, peak_res = _tf_block(tf_fn, inputs, warmup, repeats)
-                    st = _stats(samp)
+                    meas = _tf_block(tf_fn, inputs, warmup, repeats)
+                    st = _stats(meas)
+                    peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                     gap = _make_gap(
                         cost,
-                        st,
+                        meas,
                         hardware,
                         operations=prof.operations,
                         peak_alloc=peak_alloc,
@@ -1481,7 +1309,7 @@ def main() -> None:
         help=(
             "Sweep a fine batch-size grid (1..1024) to find where each architecture "
             "first runs faster on GPU than on CPU.  Reads CPU baseline from "
-            "benchmarks/results/benchmark_data.json if present."
+            "benchmarks/results/<host cpu>/benchmark_data.json if present."
         ),
     )
     parser.add_argument(
@@ -1512,6 +1340,12 @@ def main() -> None:
         "--no-fx",
         action="store_true",
         help="Disable PyTorch FX graph tracing fallback",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: benchmarks/results/<device>/)",
     )
     args = parser.parse_args()
 
@@ -1544,19 +1378,16 @@ def main() -> None:
 
         torch_dev, torch_label = _detect_torch_device(args.device)
         if str(torch_dev).startswith("cuda") and torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(torch_dev)
-            gpu_name = props.name
-            # SM count × 128 CUDA cores/SM (Ampere) × 2 FP32 ops/clock × clock Hz
-            # This is an approximation; --peak-flops can override.
-            clock_hz = props.max_clock_rate * 1000  # kHz → Hz
-            n_sm = props.multi_processor_count
-            peak_flops = n_sm * 128 * 2 * clock_hz
-            mem_bw = props.memory_bandwidth  # bytes/s (PyTorch 2.x)
+            # The library's NVIDIA spec table (datasheet FP32 peak and bandwidth);
+            # an SM-count estimate is wrong for any architecture without 128
+            # FP32 lanes per SM (a T4 would read 2x too fast).
+            gpu_spec, _ = detect_hardware(device=torch_dev)
+            gpu_name = torch.cuda.get_device_name(torch_dev)
+            peak_flops, mem_bw = gpu_spec.peak_flops, gpu_spec.memory_bandwidth
             print(f"  GPU detected: {gpu_name}")
             print(
-                f"  SMs={n_sm}  clock={clock_hz / 1e9:.2f} GHz  "
-                f"est. peak={peak_flops / 1e12:.1f} TFLOP/s  "
-                f"bw={mem_bw / 1e9:.0f} GB/s"
+                f"  peak={peak_flops / 1e12:.1f} TFLOP/s  bw={mem_bw / 1e9:.0f} GB/s"
+                "  (override with --peak-flops / --memory-bandwidth)"
             )
             _configure_cuda_for_benchmark(torch_dev)
         elif str(torch_dev) == "mps":
@@ -1676,9 +1507,15 @@ def main() -> None:
     elif run_tf:
         print("[skip] TensorFlow not installed")
 
-    out_dir = Path(__file__).parent / "results"
-    out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "benchmark_gpu_data.json"
+    # A CUDA card gets its own directory; Apple GPUs share the chip's (the CPU
+    # results for the same chip live there too, which --crossover reads).
+    is_cuda = torch_dev is not None and str(torch_dev).startswith("cuda")
+    run = run_metadata(gpu_name if is_cuda else hardware.name, script="collect_gpu_data.py", torch_device=torch_label)
+    out_path = results_dir(run["device"], args.results_dir) / "benchmark_gpu_data.json"
+    global _CPU_DATA_FILE
+    _CPU_DATA_FILE = RESULTS_ROOT / device_slug(hardware.name) / "benchmark_data.json"
+    for r in all_records:
+        r.git_commit = run["git_commit"]
 
     records_to_save: list[dict] = []
     if args.append and out_path.exists():
@@ -1710,7 +1547,7 @@ def main() -> None:
     else:
         records_to_save = [asdict(r) for r in all_records]
 
-    payload: dict = {"hardware": hw_meta, "records": records_to_save}
+    payload: dict = {"run": run, "hardware": hw_meta, "records": records_to_save}
 
     # ------------------------------------------------------------------
     # Crossover analysis: compare GPU latencies to CPU baseline

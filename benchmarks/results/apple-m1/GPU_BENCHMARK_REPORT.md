@@ -56,7 +56,7 @@ force command buffer flushing and device retirement to eliminate host scheduling
 
 Each point represents one architecture × framework combination (optimised variant).
 
-![GPU Roofline](benchmarks/results/figures/gpu_fig1_roofline.png)
+![GPU Roofline](figures/gpu_fig1_roofline.png)
 
 **Key observations:**
 - **Hardware Ridge Point (38.1 FLOP/B):** The M1 GPU's ridge point is much higher than typical CPUs (5–10 FLOP/B). Workloads with arithmetic intensity below 38.1 FLOP/B are fundamentally memory-bandwidth bound.
@@ -72,7 +72,7 @@ Each point represents one architecture × framework combination (optimised varia
 
 Error bars show ±1σ across timed iterations.
 
-![GPU Latency bars](benchmarks/results/figures/gpu_fig2_latency_bars.png)
+![GPU Latency bars](figures/gpu_fig2_latency_bars.png)
 
 **Key observations:**
 - **Modern Vision Workloads:** Handling full $224 \times 224$ images at batch=32:
@@ -85,7 +85,7 @@ Error bars show ±1σ across timed iterations.
 
 ## Figure GPU-3 — Roofline Efficiency Heatmap (batch=32)
 
-![GPU Efficiency heatmap](benchmarks/results/figures/gpu_fig3_efficiency_heatmap.png)
+![GPU Efficiency heatmap](figures/gpu_fig3_efficiency_heatmap.png)
 
 **Key observations:**
 - **Peak Utilization in Attention & Dense Convolutions:** ViT reaches the highest roofline efficiency (**46.3%** in JAX JIT, **43.2%** in PyTorch compiled at batch=32, reaching **49.9%** at batch=256). Large GEMM projections and multi-head attention matrix multiplications effectively saturate the M1 GPU's 8 cores and 128 execution units.
@@ -96,7 +96,7 @@ Error bars show ±1σ across timed iterations.
 
 ## Figure GPU-4 — Latency Scaling with Batch Size
 
-![GPU Batch scaling](benchmarks/results/figures/gpu_fig4_batch_scaling.png)
+![GPU Batch scaling](figures/gpu_fig4_batch_scaling.png)
 
 **Key observations:**
 - **Sub-linear Scaling at Small Batches ($B < 32$):** Latency grows sub-linearly because constant kernel launch costs and weight memory fetch are amortized across batch items.
@@ -111,7 +111,7 @@ Error bars show ±1σ across timed iterations.
 
 Speedup ratio = eager latency / optimised latency. Higher is better.
 
-![GPU Speedup](benchmarks/results/figures/gpu_fig5_speedup.png)
+![GPU Speedup](figures/gpu_fig5_speedup.png)
 
 **Key observations:**
 - **JAX JIT Loop Fusion:** JAX JIT yields massive speedups on sequential models: **50.3× on LSTM** (201.8 ms → 4.01 ms) and **40.8× on RNN** (68.5 ms → 1.68 ms), plus **4.17× on ViT** (89.8 ms → 21.5 ms) and **2.85× on ConvNeXt** (138.7 ms → 48.7 ms).
@@ -124,7 +124,7 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 Direct speedup of JAX (JIT) over PyTorch (Compiled): $T_{\text{PyTorch}} / T_{\text{JAX}}$. Values > 1.0× indicate JAX is faster.
 
-![JAX vs PyTorch Speedup](benchmarks/results/figures/gpu_fig10_framework_comparison.png)
+![JAX vs PyTorch Speedup](figures/gpu_fig10_framework_comparison.png)
 
 **Key observations:**
 - **Modern Vision Dominance:** JAX JIT outperforms PyTorch on both modern vision architectures: **8.4× faster on ConvNeXt** (48.7 ms vs 406.7 ms) and **6.1× faster on ViT** (21.5 ms vs 132.3 ms).
@@ -135,7 +135,7 @@ Direct speedup of JAX (JIT) over PyTorch (Compiled): $T_{\text{PyTorch}} / T_{\t
 
 ## Figure GPU-6 — Achieved Throughput (GFLOP/s, batch=32)
 
-![GPU Throughput](benchmarks/results/figures/gpu_fig6_throughput.png)
+![GPU Throughput](figures/gpu_fig6_throughput.png)
 
 **Key observations:**
 - **Hardware Ceiling:** M1 GPU theoretical peak FP32 throughput is 2,600 GFLOP/s.
@@ -146,7 +146,7 @@ Direct speedup of JAX (JIT) over PyTorch (Compiled): $T_{\text{PyTorch}} / T_{\t
 
 ## Figure GPU-7 — Throughput Scaling with Batch Size
 
-![GPU Throughput scaling](benchmarks/results/figures/gpu_fig7_throughput_scaling.png)
+![GPU Throughput scaling](figures/gpu_fig7_throughput_scaling.png)
 
 **Key observations:**
 - **Throughput Saturation Plateau:** Throughput rises steeply between batch=1 and batch=32 as execution units fill, then asymptotes between batch=32 and batch=256. For example, JAX ViT scales from 1,203 GFLOP/s (B=32) to 1,297 GFLOP/s (B=256) — an increase of only 7.8% despite an 8× increase in batch size.
@@ -182,7 +182,7 @@ The data and computer architecture principles show definitively that **linear pe
 
 ### Visualizing the Saturation Floor: Latency per Sample
 
-![Latency per Sample](benchmarks/results/figures/gpu_fig9_per_sample_latency.png)
+![Latency per Sample](figures/gpu_fig9_per_sample_latency.png)
 
 **Key takeaways from per-sample latency ($T(B) / B$):**
 - **Saturation Floor on Modern Models:** For JAX ViT, per-sample latency is **0.673 ms/sample at $B=32$** and **0.624 ms/sample at $B=256$** — an 8× batch increase yielded only a 7.2% reduction in time-per-sample. For ConvNeXt, per-sample cost dropped from **1.52 ms/sample ($B=32$) to 1.46 ms/sample ($B=256$)**, a mere 3.9% gain.
@@ -383,7 +383,7 @@ python benchmarks/collect_gpu_data.py --crossover
 
 Empirical memory telemetry measured from framework device allocators compared against theoretical tensor bounds calculated by `neural_cost.profile_model` and `neural_cost.analyze_memory_gap`.
 
-![GPU Memory](benchmarks/results/figures/gpu_fig_memory.png)
+![GPU Memory](figures/gpu_fig_memory.png)
 
 ### Memory Telemetry and Allocator Fragmentation Table (batch=32)
 
