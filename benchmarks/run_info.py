@@ -93,8 +93,13 @@ def _version(distribution: str) -> str | None:
 
 
 def neural_cost_version() -> str:
-    from neural_cost import __version__
-
+    try:
+        from neural_cost import __version__
+    except ImportError:
+        # An editable install made in an already-running interpreter (a
+        # notebook kernel) has not put src/ on the path yet; the package then
+        # resolves to the namespace left by its force-included skill file.
+        return _version("neural-cost") or "unknown"
     return __version__
 
 
