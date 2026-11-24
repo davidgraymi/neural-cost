@@ -146,10 +146,19 @@ def torch_workloads(device: str, quick: bool) -> list[Workload]:
 
 
 def jax_workloads(quick: bool, device=None) -> list[Workload]:
+    """JAX workloads whose inputs are committed to ``device``.
+
+    ``jax.default_device`` alone makes *uncommitted* arrays, which a later jit
+    call (outside the context) moves to the default device: on a CUDA host the
+    jax-cpu section would time the GPU.  ``device_put`` commits them.
+    """
     import jax
 
     with jax.default_device(device):
-        return _jax_workloads(quick)
+        workloads = _jax_workloads(quick)
+    if device is None:
+        return workloads
+    return [replace(w, inputs=tuple(jax.device_put(w.inputs, device))) for w in workloads]
 
 
 def _jax_workloads(quick: bool) -> list[Workload]:

@@ -33,3 +33,11 @@ def test_jax_gpu_backend_is_listed_when_jax_has_a_gpu(monkeypatch):
         validate, "_jax_device", lambda platform: gpu if platform == "gpu" else None
     )
     assert "jax-gpu" in validate.available_backends()
+
+
+def test_jax_workloads_run_on_the_requested_device():
+    jax = pytest.importorskip("jax")
+    cpu = jax.devices("cpu")[0]
+    workload = validate.jax_workloads(True, cpu)[-1]
+    assert all(x.committed and x.devices() == {cpu} for x in workload.inputs)
+    assert workload.runner(*workload.inputs).devices() == {cpu}
