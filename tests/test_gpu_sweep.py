@@ -57,3 +57,10 @@ def test_apple_sweep_keeps_cpu_fallback(monkeypatch):
     monkeypatch.setitem(sys.modules, "jax", _fake_jax({"cpu": [CPU0]}))
     dev, label = collect_gpu_data._detect_jax_gpu()
     assert dev is CPU0 and label == "cpu:0 (cpu)"
+
+
+def test_metal_advice_is_not_printed_off_macos(monkeypatch, capsys):
+    monkeypatch.setattr(collect_gpu_data.sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "jax", _fake_jax({"cpu": [CPU0]}))
+    collect_gpu_data._check_jax_mps_driver()
+    assert "MPS/Metal" not in capsys.readouterr().out

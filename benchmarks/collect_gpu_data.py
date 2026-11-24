@@ -1221,8 +1221,11 @@ def _check_jax_mps_driver() -> None:
 
     Without a plugin, JAX silently runs on CPU even on MPS-capable machines.
     This function prints a diagnostic so the benchmark output is honest about
-    which device JAX is actually using.
+    which device JAX is actually using.  Off macOS it says nothing: a CUDA
+    sweep skips JAX instead of falling back (see _detect_jax_gpu).
     """
+    if sys.platform != "darwin":
+        return
     try:
         import importlib
 
