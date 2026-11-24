@@ -261,7 +261,8 @@ def _report_missing_device_time(framework: str, recs: list[BenchRecord]) -> None
     if missing:
         print(
             f"  [warn] {framework}: no device busy time in {len(missing)}/{len(on_device)} records "
-            "(device tracing failed; trace_device_ms is empty)"
+            "(device tracing failed; trace_device_ms is empty). On CUDA, CUPTI allows one "
+            "profiler per process: run one framework per process with --framework"
         )
 
 
