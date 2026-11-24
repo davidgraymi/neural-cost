@@ -64,3 +64,49 @@ def test_metal_advice_is_not_printed_off_macos(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "jax", _fake_jax({"cpu": [CPU0]}))
     collect_gpu_data._check_jax_mps_driver()
     assert "MPS/Metal" not in capsys.readouterr().out
+
+
+# Issue #94: results are saved as the sweep goes, so a crash keeps them.
+
+
+def test_checkpointed_reports_after_each_item():
+    records: list[str] = []
+    seen: list[list[str]] = []
+    for item in collect_gpu_data._checkpointed(["a", "b"], records, lambda r: seen.append(list(r))):
+        records.append(item)  # noqa: PERF402 - the generator reads records as it grows
+    assert seen == [["a"], ["a", "b"]]
+
+
+def test_checkpoint_survives_a_crash_mid_section():
+    records: list[str] = []
+    seen: list[list[str]] = []
+    with pytest.raises(MemoryError):
+        for item in collect_gpu_data._checkpointed(
+            ["a", "b"], records, lambda r: seen.append(list(r))
+        ):
+            if item == "b":
+                raise MemoryError
+            records.append(item)
+    assert seen == [["a"]]
+
+
+def test_merge_records_replaces_matching_configurations():
+    old = [
+        {"framework": "JAX", "variant": "jit", "architecture": "CNN", "batch": 8, "latency": 1},
+        {"framework": "JAX", "variant": "jit", "architecture": "CNN", "batch": 32, "latency": 2},
+    ]
+    new = [{"framework": "JAX", "variant": "jit", "architecture": "CNN", "batch": 8, "latency": 3}]
+    merged = collect_gpu_data._merge_records(old, new)
+    assert sorted(r["latency"] for r in merged) == [2, 3]
+
+
+def test_write_json_atomic(tmp_path):
+    import json
+
+    path = tmp_path / "out" / "benchmark_gpu_data.json"
+    collect_gpu_data._write_json_atomic(path, {"complete": False, "records": [1]})
+    collect_gpu_data._write_json_atomic(path, {"complete": True, "records": [1, 2]})
+    assert json.loads(path.read_text()) == {"complete": True, "records": [1, 2]}
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+    assert collect_gpu_data._previous_records(path) == [1, 2]
+    assert collect_gpu_data._previous_records(tmp_path / "missing.json") == []
