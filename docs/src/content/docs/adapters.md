@@ -24,8 +24,9 @@ no profiler attached, then (unless `use_profiler=False`) runs a separate
 `torch.profiler` pass for event counts, per-op self time and CPU peak memory.
 CUDA reports allocator peak, current and reserved bytes; MPS reports GPU time
 from `torch.mps.Event` pairs and current/driver memory (it has no peak counter).
-`TensorFlowAdapter` captures the equivalent Keras layers and returns supported
-TensorFlow GPU allocator statistics.  `JaxAdapter` traces `dot_general`,
+`TensorFlowAdapter` captures the equivalent Keras layers, waits for every
+device after each benchmark call (`tf.test.experimental.sync_devices`), and
+returns peak and current allocator bytes for the GPU holding the inputs.  `JaxAdapter` traces `dot_general`,
 `conv_general_dilated`, elementwise, comparison and reduction primitives, and
 indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
 `dynamic_update_slice`), and waits for asynchronous device work during

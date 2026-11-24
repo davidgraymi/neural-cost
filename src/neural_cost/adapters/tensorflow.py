@@ -478,7 +478,14 @@ class TensorFlowAdapter(FrameworkAdapter):
     def benchmark(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
     ) -> Measurement:
-        """Benchmark eager TensorFlow and collect supported GPU allocator telemetry."""
+        """Benchmark TensorFlow and collect GPU allocator telemetry.
+
+        Eager GPU ops return as soon as their kernels are queued, so every
+        sample waits for the devices with ``tf.test.experimental.sync_devices``
+        (TensorFlow 2.13+), falling back to waiting on the outputs.  The
+        allocator peak is reset after warmup, on the GPU holding the inputs.
+        TensorFlow exposes no CPU allocator statistics.
+        """
         try:
             import tensorflow as tf
         except ImportError as error:  # pragma: no cover - optional package
@@ -486,27 +493,19 @@ class TensorFlowAdapter(FrameworkAdapter):
         if warmup < 0 or repeats < 1:
             raise ValueError("warmup must be non-negative and repeats must be at least one")
 
-        gpus = tf.config.list_logical_devices("GPU")
-        memory_device = "GPU:0" if gpus else None
-
-        def wait() -> None:
-            async_wait = getattr(tf.experimental, "async_wait", None)
-            if async_wait is not None:
-                async_wait()
-
+        memory_device = _input_gpu(tf, args, kwargs)
+        sync = _device_sync(tf)
+        for _ in range(warmup):
+            sync(function(*args, **kwargs))
         if memory_device is not None:
             try:
                 tf.config.experimental.reset_memory_stats(memory_device)
             except (RuntimeError, ValueError):
                 memory_device = None
-        for _ in range(warmup):
-            function(*args, **kwargs)
-        wait()
         samples: list[float] = []
         for _ in range(repeats):
             start = perf_counter_ns()
-            function(*args, **kwargs)
-            wait()
+            sync(function(*args, **kwargs))
             samples.append((perf_counter_ns() - start) / 1_000_000_000)
         info: dict[str, int] = {}
         if memory_device is not None:
@@ -518,6 +517,36 @@ class TensorFlowAdapter(FrameworkAdapter):
             median(samples),
             tuple(samples),
             info.get("peak"),
-            gpus[0].name if gpus else "cpu",
+            memory_device or "cpu",
             info.get("current"),
         )
+
+
+def _device_sync(tf: Any) -> Any:
+    """A function that returns once all work behind ``outputs`` has finished."""
+    sync_devices = getattr(getattr(tf.test, "experimental", None), "sync_devices", None)
+    if callable(sync_devices):
+        return lambda outputs: sync_devices()
+
+    def wait_outputs(outputs: Any) -> None:
+        # Reading one element of each output waits for the kernels that produced it.
+        for value in tf.nest.flatten(outputs):
+            if isinstance(value, tf.Tensor) and value.shape.num_elements():
+                tf.reshape(value, [-1])[:1].numpy()
+
+    return wait_outputs
+
+
+def _input_gpu(tf: Any, args: Sequence[Any], kwargs: dict[str, Any]) -> str | None:
+    """``"GPU:n"`` for the GPU holding the first input tensor, else the first GPU."""
+    gpus = tf.config.list_logical_devices("GPU")
+    if not gpus:
+        return None
+    for value in tf.nest.flatten((list(args), kwargs)):
+        name = getattr(value, "device", "") or ""
+        marker = name.upper().rfind("GPU:")
+        if marker >= 0:
+            return name[marker:].upper()
+        if "CPU:" in name.upper():
+            return None
+    return "GPU:0"
