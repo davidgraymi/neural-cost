@@ -23,7 +23,7 @@ components that sum exactly to the median:
 from neural_cost import attribute_gap, detect_hardware
 from neural_cost.adapters import TorchAdapter
 
-adapter = TorchAdapter(use_profiler=False)            # no profiler overhead in timings
+adapter = TorchAdapter(use_profiler=False)            # skip the extra profiled pass
 hardware, _ = detect_hardware()
 calibration = adapter.calibrate("mps")                 # size-dependent FLOP/s + bandwidth curves,
                                                        # dispatch and sync latency

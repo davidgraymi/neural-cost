@@ -168,9 +168,10 @@ class KernelRecord:
 class TorchAdapter(FrameworkAdapter):
     """Capture Linear and Conv2d module calls through forward hooks.
 
-    ``use_profiler=False`` makes :meth:`benchmark` time without ``torch.profiler``.
-    The profiler adds per-operator overhead, so use it for validation and
-    gap attribution where the wall-clock time itself is the measurement.
+    :meth:`benchmark` always times a loop with no profiler attached.  With
+    ``use_profiler=True`` (the default) it then runs a separate profiled pass
+    for trace statistics and CPU peak memory; ``use_profiler=False`` skips
+    that pass and halves the benchmark's run time.
     """
 
     name = "pytorch"
@@ -701,50 +702,98 @@ class TorchAdapter(FrameworkAdapter):
     def benchmark(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
     ) -> Measurement:
-        """Benchmark execution and capture CUDA allocator statistics when present."""
+        """Time ``function`` and collect device memory and profiler telemetry.
+
+        The timed samples always come from a loop with no profiler attached:
+        ``torch.profiler`` adds per-operator overhead (15-20 % on small models)
+        that would otherwise inflate the latency.  With ``use_profiler=True``
+        a second, separate profiled pass of ``repeats`` iterations fills in
+        ``trace_event_count``, ``trace_device_time_seconds`` and, on CPU, the
+        peak memory.
+        """
+        from dataclasses import replace
+
+        timed = self._time(function, *args, warmup=warmup, repeats=repeats, **kwargs)
         if not getattr(self, "use_profiler", True):
-            return self._time(function, *args, warmup=warmup, repeats=repeats, **kwargs)
-        return self.trace(function, *args, warmup=warmup, repeats=repeats, **kwargs)
+            return timed
+        traced = self.trace(function, *args, warmup=0, repeats=repeats, **kwargs)
+        return replace(
+            timed,
+            peak_memory_bytes=_first(timed.peak_memory_bytes, traced.peak_memory_bytes),
+            allocated_memory_bytes=_first(
+                timed.allocated_memory_bytes, traced.allocated_memory_bytes
+            ),
+            reserved_memory_bytes=_first(timed.reserved_memory_bytes, traced.reserved_memory_bytes),
+            trace_event_count=traced.trace_event_count,
+            trace_device_time_seconds=_first(
+                traced.trace_device_time_seconds, timed.trace_device_time_seconds
+            ),
+        )
 
     def _time(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
     ) -> Measurement:
-        """Synchronized wall-clock timing with no profiler attached."""
+        """Synchronized wall-clock timing with no profiler attached.
+
+        CUDA reports allocator counters reset before the run.  MPS reports
+        the GPU time of each iteration from ``torch.mps.Event`` pairs; it has
+        no peak counter, so only current and driver memory are reported.
+        """
         import torch
 
         if warmup < 0 or repeats < 1:
             raise ValueError("warmup must be non-negative and repeats must be at least one")
-        device = next((arg.device for arg in args if isinstance(arg, torch.Tensor)), None)
+        device = _tensor_device(torch, args, kwargs)
         kind = device.type if device is not None else "cpu"
+        sync = _synchronizer(torch, device)
 
-        def sync() -> None:
-            if kind == "cuda":
-                torch.cuda.synchronize(device)
-            elif kind == "mps":
-                torch.mps.synchronize()
-
-        if kind == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
         for _ in range(warmup):
             function(*args, **kwargs)
         sync()
-        samples = []
+        if kind == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        samples: list[float] = []
+        device_seconds = 0.0
+        timer = _MpsTimer(torch) if kind == "mps" else None
         for _ in range(repeats):
+            if timer is not None:
+                timer.start()
             start = perf_counter_ns()
             function(*args, **kwargs)
+            if timer is not None:
+                timer.stop()
             sync()
             samples.append((perf_counter_ns() - start) / 1_000_000_000)
-        peak = torch.cuda.max_memory_allocated(device) if kind == "cuda" else None
-        return Measurement(median(samples), tuple(samples), peak, str(device or "cpu"))
+            if timer is not None:
+                device_seconds += timer.seconds()
+        peak = allocated = reserved = None
+        if kind == "cuda":
+            peak = torch.cuda.max_memory_allocated(device)
+            allocated = torch.cuda.memory_allocated(device)
+            reserved = torch.cuda.max_memory_reserved(device)
+        elif kind == "mps":
+            allocated = torch.mps.current_allocated_memory()
+            reserved = torch.mps.driver_allocated_memory()
+        return Measurement(
+            median(samples),
+            tuple(samples),
+            peak,
+            str(device or "cpu"),
+            allocated,
+            reserved,
+            trace_device_time_seconds=device_seconds if timer is not None else None,
+        )
 
     def trace(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
     ) -> Measurement:
-        """Profile PyTorch events and CUDA memory for a representative workload.
+        """Profile ``repeats`` iterations with ``torch.profiler``.
 
-        The trace is aggregated over ``repeats`` iterations.  CUDA timings are
-        synchronized before every sample, and CUDA allocator counters are
-        reported separately from the static tensor-memory estimate.
+        The returned samples include profiler overhead; :meth:`benchmark`
+        times a separate, unprofiled loop.  Device time is the self time of
+        each op, so nested ops are counted once.  CPU peak memory is the
+        high-water mark of the profiler's allocation timeline on top of the
+        parameters and inputs that were live before the first iteration.
         """
         try:
             import torch
@@ -752,55 +801,43 @@ class TorchAdapter(FrameworkAdapter):
             raise ImportError("Install neural-cost[torch] to use TorchAdapter") from error
         if warmup < 0 or repeats < 1:
             raise ValueError("warmup must be non-negative and repeats must be at least one")
-        device = next((arg.device for arg in args if isinstance(arg, torch.Tensor)), None)
-        is_cuda = device is not None and device.type == "cuda"
-        is_mps = device is not None and device.type == "mps"
-        if is_cuda:
-            torch.cuda.reset_peak_memory_stats(device)
-        elif is_mps:
-            torch.mps.synchronize()
+        device = _tensor_device(torch, args, kwargs)
+        kind = device.type if device is not None else "cpu"
+        sync = _synchronizer(torch, device)
         for _ in range(warmup):
             function(*args, **kwargs)
-        if is_cuda:
-            torch.cuda.synchronize(device)
-        elif is_mps:
-            torch.mps.synchronize()
+        sync()
+        if kind == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         activities = [torch.profiler.ProfilerActivity.CPU]
-        if is_cuda:
+        if kind == "cuda":
             activities.append(torch.profiler.ProfilerActivity.CUDA)
         samples: list[float] = []
         with torch.profiler.profile(
-            activities=activities,
-            profile_memory=is_cuda or (device is None or device.type == "cpu"),
+            activities=activities, profile_memory=kind in {"cuda", "cpu"}
         ) as trace:
             for _ in range(repeats):
                 start = perf_counter_ns()
                 function(*args, **kwargs)
-                if is_cuda:
-                    torch.cuda.synchronize(device)
-                elif is_mps:
-                    torch.mps.synchronize()
+                sync()
                 samples.append((perf_counter_ns() - start) / 1_000_000_000)
         events = trace.events()
-        if is_cuda:
+        peak = allocated = reserved = None
+        if kind == "cuda":
             peak = torch.cuda.max_memory_allocated(device)
             allocated = torch.cuda.memory_allocated(device)
             reserved = torch.cuda.max_memory_reserved(device)
             device_time, event_count = _trace_device_totals(events)
-        elif is_mps:
-            peak = torch.mps.current_allocated_memory()
-            allocated = peak
+        elif kind == "mps":
+            allocated = torch.mps.current_allocated_memory()
             reserved = torch.mps.driver_allocated_memory()
-            device_time = _trace_cpu_seconds(events)
+            device_time = _trace_cpu_seconds(events)  # host-side op time; benchmark() uses GPU time
             event_count = len(events)
         else:
-            cpu_allocs = [e.cpu_memory_usage for e in events if e.cpu_memory_usage > 0]
-            param_bytes = 0
-            if hasattr(function, "parameters") and callable(function.parameters):
-                param_bytes = sum(p.numel() * p.element_size() for p in function.parameters())
-            peak = (param_bytes + sum(cpu_allocs)) if cpu_allocs else None
-            allocated = peak
-            reserved = peak
+            high_water = _cpu_allocation_high_water(trace)
+            if high_water is not None:
+                peak = _live_bytes(torch, function, args, kwargs) + high_water
+            allocated = reserved = peak
             device_time = _trace_cpu_seconds(events)
             event_count = len(events)
         return Measurement(
@@ -813,6 +850,107 @@ class TorchAdapter(FrameworkAdapter):
             event_count,
             device_time,
         )
+
+
+def _first(*values: Any) -> Any:
+    """The first value that is not ``None``."""
+    return next((value for value in values if value is not None), None)
+
+
+def _tensor_device(torch: Any, args: Sequence[Any], kwargs: dict[str, Any]) -> Any:
+    """Device of the first tensor among the arguments, searching nested containers."""
+    stack = list(args) + list(kwargs.values())
+    while stack:
+        value = stack.pop(0)
+        if isinstance(value, torch.Tensor):
+            return value.device
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            stack.extend(value)
+    return None
+
+
+def _synchronizer(torch: Any, device: Any) -> Any:
+    """A function that waits for all queued work on ``device``."""
+    kind = device.type if device is not None else "cpu"
+    if kind == "cuda":
+        return lambda: torch.cuda.synchronize(device)
+    if kind == "mps":
+        return torch.mps.synchronize
+    return lambda: None
+
+
+class _MpsTimer:
+    """GPU time of one iteration from a pair of ``torch.mps.Event`` markers."""
+
+    def __init__(self, torch: Any) -> None:
+        self._begin = torch.mps.Event(enable_timing=True)
+        self._end = torch.mps.Event(enable_timing=True)
+
+    def start(self) -> None:
+        self._begin.record()
+
+    def stop(self) -> None:
+        self._end.record()
+
+    def seconds(self) -> float:
+        self._end.synchronize()
+        return self._begin.elapsed_time(self._end) / 1_000
+
+
+def _cpu_allocation_high_water(trace: Any) -> int | None:
+    """Largest net CPU allocation reached during a ``profile_memory`` trace.
+
+    The profiler records every allocation and free as a ``[memory]`` event
+    with a signed byte count.  Walking them in time order gives the bytes
+    live at each moment relative to the start of the trace.
+    """
+    try:
+        raw = trace.profiler.kineto_results.events()
+    except AttributeError:  # pragma: no cover - very old torch
+        return None
+    deltas = sorted(
+        (event.start_ns(), event.nbytes())
+        for event in raw
+        if event.name() == "[memory]" and str(event.device_type()).endswith("CPU")
+    )
+    if not deltas:
+        return None
+    live = high = 0
+    for _, nbytes in deltas:
+        live += nbytes
+        high = max(high, live)
+    return high
+
+
+def _live_bytes(torch: Any, function: Any, args: Sequence[Any], kwargs: dict[str, Any]) -> int:
+    """Bytes held by parameters, buffers and tensor arguments before a run."""
+    seen: set[int] = set()
+    total = 0
+
+    def add(tensor: Any) -> None:
+        nonlocal total
+        key = tensor.untyped_storage().data_ptr()
+        if key not in seen:
+            seen.add(key)
+            total += tensor.untyped_storage().nbytes()
+
+    for name in ("parameters", "buffers"):
+        method = getattr(function, name, None)
+        if callable(method):
+            for tensor in method():
+                add(tensor)
+    stack = list(args) + list(kwargs.values())
+    while stack:
+        value = stack.pop()
+        if isinstance(value, torch.Tensor):
+            add(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            stack.extend(value)
+    return total
 
 
 def _trace_cpu_seconds(events: Any) -> float:
