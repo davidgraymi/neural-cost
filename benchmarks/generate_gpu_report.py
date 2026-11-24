@@ -114,6 +114,51 @@ VAR_ALPHA = {
 # Data helpers
 # ---------------------------------------------------------------------------
 
+def gpu_backend(hw: dict) -> str:
+    """The run's GPU backend: ``"cuda"``, ``"mps"`` or ``"cpu"`` (no GPU found)."""
+    label = str(hw.get("torch_device") or hw.get("timing_device") or "").lower()
+    if label.startswith("cuda"):
+        return "cuda"
+    if label.startswith("mps"):
+        return "mps"
+    if label.startswith("cpu"):
+        return "cpu"
+    name = str(hw.get("name", "")).lower()
+    if "apple" in name:
+        return "mps"
+    return "cuda" if any(t in name for t in ("nvidia", "tesla", "geforce", "rtx")) else "cpu"
+
+
+# Per-backend wording of the methodology section: (sync note, variants table, warmup note).
+_BACKEND_METHODOLOGY: dict[str, tuple[str, str, str]] = {
+    "cuda": (
+        "On CUDA, each sample waits for the device (`torch.cuda.synchronize()`, "
+        "`jax.Array.block_until_ready()`, TensorFlow's device sync) so the host clock covers "
+        "all queued kernels.",
+        "| **PyTorch** | Eager GPU (`cuda`) | `torch.compile()` | PyTorch CUDA backend with Inductor compilation |\n"
+        "| **JAX** | Eager XLA GPU (`cuda`) | `jax.jit()` | JAX CUDA plugin (`jax-cuda*-plugin`) with whole-graph XLA JIT |\n"
+        "| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow CUDA graph execution with XLA compilation |",
+        "full compilation, cache warm, CUDA context and cuDNN/cuBLAS autotuning",
+    ),
+    "mps": (
+        "On Apple Silicon MPS, synchronous timing barriers (`torch.mps.synchronize()`, "
+        "`jax.block_until_ready()`, and `tf.experimental.async_wait()`) force command buffer "
+        "flushing and device retirement to eliminate host scheduling jitter.",
+        "| **PyTorch** | Eager GPU (`mps`) | `torch.compile()` | PyTorch MPS backend with Inductor compilation |\n"
+        "| **JAX** | Eager XLA GPU (`mps`) | `jax.jit()` | `jax-mps` MLX-backed Metal plugin with whole-graph XLA JIT |\n"
+        "| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |",
+        "full compilation, cache warm, Metal kernel pipeline initialization",
+    ),
+    "cpu": (
+        "No GPU was found, so every framework ran on the CPU; synchronisation barriers are no-ops.",
+        "| **PyTorch** | Eager (`cpu`) | `torch.compile()` | PyTorch CPU backend with Inductor compilation |\n"
+        "| **JAX** | Eager XLA (`cpu`) | `jax.jit()` | XLA CPU backend with whole-graph JIT |\n"
+        "| **TensorFlow** | Eager | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |",
+        "full compilation and cache warm",
+    ),
+}
+
+
 def load(path: Path) -> tuple[dict, list[dict]]:
     raw = json.loads(path.read_text())
     return raw["hardware"], raw["records"]
@@ -572,7 +617,7 @@ def fig_framework_comparison(hw: dict, records: list[dict]) -> Path:
     ax.set_xticklabels(ARCHS)
     ax.set_ylabel("Speedup over PyTorch (T_PyTorch / T_JAX)")
     ax.set_title(
-        f"JAX (JIT) vs PyTorch (Compiled) Head-to-Head Speedup on Apple Silicon GPU\n{hw['name']}  ·  batch={ref_batch}  (Values > 1.0× indicate JAX is faster)",
+        f"JAX (JIT) vs PyTorch (Compiled) Head-to-Head Speedup\n{hw['name']}  ·  batch={ref_batch}  (Values > 1.0× indicate JAX is faster)",
         fontweight="bold",
     )
     legend_elements = [
@@ -932,6 +977,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
 
     ridge = hw["ridge_point"]
     tf_device = hw.get("torch_device", hw["name"])
+    sync_note, variants_table, warmup_note = _BACKEND_METHODOLOGY[gpu_backend(hw)]
 
     md = f"""# Neural-Cost GPU Benchmark Report
 
@@ -953,9 +999,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
 | **JAX** | `time.perf_counter_ns` | `jax.Array.block_until_ready()` |
 | **TensorFlow** | `time.perf_counter_ns` | `tf.experimental.async_wait()` |
 
-CUDA event timing measures only GPU kernel execution time on CUDA devices. On Apple Silicon MPS,
-synchronous timing barriers (`torch.mps.synchronize()`, `jax.block_until_ready()`, and `tf.experimental.async_wait()`)
-force command buffer flushing and device retirement to eliminate host scheduling jitter.
+{sync_note}
 
 ### Architectures under test
 
@@ -965,13 +1009,11 @@ force command buffer flushing and device retirement to eliminate host scheduling
 
 | Framework | Baseline | Optimised | Notes |
 |---|---|---|---|
-| **PyTorch** | Eager GPU (`mps`) | `torch.compile()` | PyTorch MPS backend with Inductor compilation |
-| **JAX** | Eager XLA GPU (`mps`) | `jax.jit()` | `jax-mps` MLX-backed Metal plugin with whole-graph XLA JIT |
-| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |
+{variants_table}
 
 ### Measurement protocol
 
-- **Warmup:** {hw.get('warmup', 15)} iterations (full compilation, cache warm, Metal kernel pipeline initialization)
+- **Warmup:** {hw.get('warmup', 15)} iterations ({warmup_note})
 - **Timed repeats:** {hw.get('repeats', 40)} samples per configuration
 - **Statistics reported:** median, mean, σ (stddev), CV%, p95
 - **Roofline efficiency:** `min(1, lower_bound / observed)`
