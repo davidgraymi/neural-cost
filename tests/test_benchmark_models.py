@@ -178,3 +178,56 @@ def test_generate_report_dynamic_batch(tmp_path, monkeypatch):
 
     p2 = generate_report.fig_cv_heatmap(hw, records, batch=ref_b)
     assert p2.exists()
+
+
+# ---------------------------------------------------------------------------
+# Cross-framework agreement (#86): every framework builds the same network.
+# ---------------------------------------------------------------------------
+
+# JAX counts LayerNorm and GELU as their primitive ops, which costs a few
+# percent more than the fused counts on micro models; JAX also counts the ViT
+# position embedding as a parameter.  Anything larger means the models differ.
+FLOP_TOLERANCE = 0.05
+PARAM_TOLERANCE = 0.03
+
+
+def _profile(arch: str, framework: str):
+    from neural_cost import profile_model
+    from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchFxAdapter
+
+    adapter = {
+        "torch": TorchFxAdapter,
+        "jax": JaxAdapter,
+        "tensorflow": TensorFlowAdapter,
+    }[framework]()
+    model, inputs = get_model(arch, framework=framework, scale="micro", batch=2)
+    prof = profile_model(model, inputs, adapter)
+    return prof.cost.flops, prof.memory.parameter_bytes
+
+
+@pytest.mark.parametrize("arch", ["FF DNN", "ConvNeXt", "ViT", "Transformer"])
+@pytest.mark.parametrize("framework", ["jax", "tensorflow"])
+def test_flops_and_params_match_pytorch(arch, framework):
+    pytest.importorskip("torch")
+    pytest.importorskip(framework)
+    ref_flops, ref_params = _profile(arch, "torch")
+    flops, params = _profile(arch, framework)
+    assert flops == pytest.approx(ref_flops, rel=FLOP_TOLERANCE), (arch, framework)
+    assert params == pytest.approx(ref_params, rel=PARAM_TOLERANCE), (arch, framework)
+
+
+@pytest.mark.parametrize(
+    ("arch", "shape"),
+    [("ConvNeXt", (3, 32, 32, 3)), ("ViT", (3, 32, 32, 3))],
+)
+def test_tensorflow_vision_models_run(arch, shape):
+    pytest.importorskip("tensorflow")
+    model, inputs = get_model(arch, framework="tensorflow", scale="micro", batch=3)
+    assert tuple(inputs[0].shape) == shape
+    assert tuple(model(*inputs, training=False).shape) == (3, 10)
+
+
+def test_unknown_tensorflow_architecture_raises():
+    pytest.importorskip("tensorflow")
+    with pytest.raises(KeyError):
+        get_model("resnet", framework="tensorflow", scale="micro")

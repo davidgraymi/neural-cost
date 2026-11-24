@@ -9,220 +9,245 @@ import jax.lax as lax
 import jax.nn as jnn
 import jax.numpy as jnp
 
+from .configs import (
+    CONVNEXT,
+    DEEP_DNN,
+    IN_CHANNELS,
+    NUM_CLASSES,
+    TRANSFORMER,
+    VIT,
+    VIT_MLP_RATIO,
+    scale_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# Building blocks.  Each mirrors the PyTorch module of the same name in
+# torch_models.py: same layers, biases and LayerNorms, NCHW images.
+# ---------------------------------------------------------------------------
+
+_DN = ("NCHW", "OIHW", "NCHW")
+
+
+class _Init:
+    """Deterministic small random weights (all-ones weights overflow deep stacks)."""
+
+    def __init__(self, seed: int = 0) -> None:
+        self.key = jax.random.PRNGKey(seed)
+
+    def __call__(self, shape: tuple[int, ...], std: float = 0.02) -> Any:
+        self.key, sub = jax.random.split(self.key)
+        return std * jax.random.normal(sub, shape, dtype=jnp.float32)
+
+
+def _linear_params(init: _Init, d_in: int, d_out: int) -> dict[str, Any]:
+    return {"w": init((d_in, d_out)), "b": jnp.zeros((d_out,))}
+
+
+def _norm_params(dim: int) -> dict[str, Any]:
+    return {"g": jnp.ones((dim,)), "b": jnp.zeros((dim,))}
+
+
+def _conv_params(init: _Init, c_in: int, c_out: int, k: int, groups: int = 1) -> dict[str, Any]:
+    return {"w": init((c_out, c_in // groups, k, k)), "b": jnp.zeros((c_out,))}
+
+
+def _linear(x: Any, p: dict[str, Any]) -> Any:
+    return x @ p["w"] + p["b"]
+
+
+def _layer_norm(x: Any, p: dict[str, Any], eps: float = 1e-5, axis: int = -1) -> Any:
+    mean = x.mean(axis=axis, keepdims=True)
+    var = jnp.square(x - mean).mean(axis=axis, keepdims=True)
+    shape = [1] * x.ndim
+    shape[axis] = -1
+    return (x - mean) * lax.rsqrt(var + eps) * p["g"].reshape(shape) + p["b"].reshape(shape)
+
+
+def _conv(x: Any, p: dict[str, Any], stride: int, padding: Any, groups: int = 1) -> Any:
+    y = lax.conv_general_dilated(
+        x, p["w"], (stride, stride), padding, feature_group_count=groups, dimension_numbers=_DN
+    )
+    return y + p["b"].reshape((1, -1, 1, 1))
+
+
+def _gelu(x: Any) -> Any:
+    # nn.GELU() in PyTorch is the exact (erf) form.
+    return jnn.gelu(x, approximate=False)
+
+
+def _attention_params(init: _Init, dim: int) -> dict[str, Any]:
+    return {name: _linear_params(init, dim, dim) for name in ("q", "k", "v", "o")}
+
+
+def _attention(x: Any, p: dict[str, Any], num_heads: int) -> Any:
+    b, l, d = x.shape
+    head_dim = d // num_heads
+    q = _linear(x, p["q"]).reshape((b, l, num_heads, head_dim))
+    k = _linear(x, p["k"]).reshape((b, l, num_heads, head_dim))
+    v = _linear(x, p["v"]).reshape((b, l, num_heads, head_dim))
+    return _linear(jax.nn.dot_product_attention(q, k, v).reshape((b, l, d)), p["o"])
+
+
+def _mlp_params(init: _Init, dim: int, hidden: int) -> dict[str, Any]:
+    return {"fc1": _linear_params(init, dim, hidden), "fc2": _linear_params(init, hidden, dim)}
+
+
+def _mlp(x: Any, p: dict[str, Any]) -> Any:
+    return _linear(_gelu(_linear(x, p["fc1"])), p["fc2"])
+
+
+def _encoder_block_params(init: _Init, dim: int, hidden: int) -> dict[str, Any]:
+    return {
+        "norm1": _norm_params(dim),
+        "attn": _attention_params(init, dim),
+        "norm2": _norm_params(dim),
+        "mlp": _mlp_params(init, dim, hidden),
+    }
+
+
+def _encoder_block(x: Any, p: dict[str, Any], num_heads: int) -> Any:
+    """Pre-norm encoder block, as ViTBlock / TransformerBlock in PyTorch."""
+    x = x + _attention(_layer_norm(x, p["norm1"]), p["attn"], num_heads)
+    return x + _mlp(_layer_norm(x, p["norm2"]), p["mlp"])
+
+
+# ---------------------------------------------------------------------------
+# Modern architectures
+# ---------------------------------------------------------------------------
+
 
 def build_jax_convnext(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[Any, tuple[Any, ...]]:
-    if scale == "micro":
-        img_size = 32
-        dims = [32, 64]
-        stem_k, stem_s = 2, 2
-    elif scale == "standard":
-        img_size = 224
-        dims = [96, 192]
-        stem_k, stem_s = 4, 4
-    else:  # production
-        img_size = 224
-        dims = [128, 256]
-        stem_k, stem_s = 4, 4
+    cfg = scale_config(CONVNEXT, scale)
+    depths, dims, stem = cfg["depths"], cfg["dims"], cfg["stem"]
+    init = _Init()
+    params: dict[str, Any] = {
+        "stem": _conv_params(init, IN_CHANNELS, dims[0], stem),
+        "stem_norm": _norm_params(dims[0]),
+        "stages": [
+            [
+                {
+                    "dw": _conv_params(init, dim, dim, 7, groups=dim),
+                    "norm": _norm_params(dim),
+                    "pw1": _conv_params(init, dim, 4 * dim, 1),
+                    "pw2": _conv_params(init, 4 * dim, dim, 1),
+                }
+                for _ in range(depth)
+            ]
+            for depth, dim in zip(depths, dims, strict=True)
+        ],
+        "down": [
+            {"norm": _norm_params(dims[i]), "conv": _conv_params(init, dims[i], dims[i + 1], 2)}
+            for i in range(len(dims) - 1)
+        ],
+        "head_norm": _norm_params(dims[-1]),
+        "head": _linear_params(init, dims[-1], NUM_CLASSES),
+    }
 
-    w_stem = jnp.ones((dims[0], 3, stem_k, stem_k))
-    w_dw1 = jnp.ones((dims[0], 1, 7, 7))
-    w_pw1_1 = jnp.ones((dims[0] * 4, dims[0], 1, 1))
-    w_pw1_2 = jnp.ones((dims[0], dims[0] * 4, 1, 1))
+    def model(x: Any, p: dict[str, Any]) -> Any:
+        h = _conv(x, p["stem"], stem, "VALID")
+        h = _layer_norm(h, p["stem_norm"], eps=1e-6, axis=1)
+        for i, (blocks, dim) in enumerate(zip(p["stages"], dims, strict=True)):
+            for blk in blocks:
+                res = h
+                h = _conv(h, blk["dw"], 1, ((3, 3), (3, 3)), groups=dim)
+                h = _layer_norm(h, blk["norm"], eps=1e-6, axis=1)
+                h = _conv(h, blk["pw1"], 1, "VALID")
+                h = _gelu(h)
+                h = _conv(h, blk["pw2"], 1, "VALID")
+                h = res + h
+            if i < len(p["down"]):
+                h = _layer_norm(h, p["down"][i]["norm"], eps=1e-6, axis=1)
+                h = _conv(h, p["down"][i]["conv"], 2, "VALID")
+        h = h.mean(axis=(2, 3))
+        return _linear(_layer_norm(h, p["head_norm"]), p["head"])
 
-    w_down = jnp.ones((dims[1], dims[0], 2, 2))
-    w_dw2 = jnp.ones((dims[1], 1, 7, 7))
-    w_pw2_1 = jnp.ones((dims[1] * 4, dims[1], 1, 1))
-    w_pw2_2 = jnp.ones((dims[1], dims[1] * 4, 1, 1))
-    w_fc = jnp.ones((dims[1], 10))
-
-    def model(
-        x,
-        _w_stem=w_stem,
-        _w_dw1=w_dw1,
-        _w_pw1_1=w_pw1_1,
-        _w_pw1_2=w_pw1_2,
-        _w_down=w_down,
-        _w_dw2=w_dw2,
-        _w_pw2_1=w_pw2_1,
-        _w_pw2_2=w_pw2_2,
-        _w_fc=w_fc,
-    ):
-        # Stem
-        h = lax.conv_general_dilated(
-            x, _w_stem, (stem_s, stem_s), "VALID", dimension_numbers=("NCHW", "OIHW", "NCHW")
-        )
-        # Block 1
-        res = h
-        h = lax.conv_general_dilated(
-            h,
-            _w_dw1,
-            (1, 1),
-            "SAME",
-            feature_group_count=dims[0],
-            dimension_numbers=("NCHW", "OIHW", "NCHW"),
-        )
-        h = lax.conv_general_dilated(
-            h, _w_pw1_1, (1, 1), "SAME", dimension_numbers=("NCHW", "OIHW", "NCHW")
-        )
-        h = jnn.gelu(h)
-        h = lax.conv_general_dilated(
-            h, _w_pw1_2, (1, 1), "SAME", dimension_numbers=("NCHW", "OIHW", "NCHW")
-        )
-        h = res + h
-
-        # Downsample
-        h = lax.conv_general_dilated(
-            h, _w_down, (2, 2), "VALID", dimension_numbers=("NCHW", "OIHW", "NCHW")
-        )
-
-        # Block 2
-        res = h
-        h = lax.conv_general_dilated(
-            h,
-            _w_dw2,
-            (1, 1),
-            "SAME",
-            feature_group_count=dims[1],
-            dimension_numbers=("NCHW", "OIHW", "NCHW"),
-        )
-        h = lax.conv_general_dilated(
-            h, _w_pw2_1, (1, 1), "SAME", dimension_numbers=("NCHW", "OIHW", "NCHW")
-        )
-        h = jnn.gelu(h)
-        h = lax.conv_general_dilated(
-            h, _w_pw2_2, (1, 1), "SAME", dimension_numbers=("NCHW", "OIHW", "NCHW")
-        )
-        h = res + h
-
-        return h.mean(axis=(2, 3)) @ _w_fc
-
-    x = jnp.ones((batch, 3, img_size, img_size))
-    return model, (x, w_stem, w_dw1, w_pw1_1, w_pw1_2, w_down, w_dw2, w_pw2_1, w_pw2_2, w_fc)
+    x = jnp.ones((batch, IN_CHANNELS, cfg["img_size"], cfg["img_size"]))
+    return model, (x, params)
 
 
 def build_jax_vit(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[Any, tuple[Any, ...]]:
-    if scale == "micro":
-        img_size, patch_size, embed_dim, num_heads = 32, 4, 128, 4
-    elif scale == "standard":
-        img_size, patch_size, embed_dim, num_heads = 224, 16, 384, 6
-    else:  # production
-        img_size, patch_size, embed_dim, num_heads = 224, 16, 768, 12
+    cfg = scale_config(VIT, scale)
+    dim, heads, patch = cfg["embed_dim"], cfg["num_heads"], cfg["patch_size"]
+    num_patches = (cfg["img_size"] // patch) ** 2
+    init = _Init()
+    params: dict[str, Any] = {
+        "patch": _conv_params(init, IN_CHANNELS, dim, patch),
+        "pos": jnp.zeros((1, num_patches, dim)),
+        "blocks": [
+            _encoder_block_params(init, dim, dim * VIT_MLP_RATIO) for _ in range(cfg["depth"])
+        ],
+        "norm": _norm_params(dim),
+        "head": _linear_params(init, dim, NUM_CLASSES),
+    }
 
-    head_dim = embed_dim // num_heads
-    num_patches = (img_size // patch_size) ** 2
-    w_patch = jnp.ones((embed_dim, 3, patch_size, patch_size))
-    w_pos = jnp.ones((1, num_patches, embed_dim))
-
-    wq = jnp.ones((embed_dim, embed_dim))
-    wk = jnp.ones((embed_dim, embed_dim))
-    wv = jnp.ones((embed_dim, embed_dim))
-    wo = jnp.ones((embed_dim, embed_dim))
-    w_mlp1 = jnp.ones((embed_dim, embed_dim * 4))
-    w_mlp2 = jnp.ones((embed_dim * 4, embed_dim))
-    w_head = jnp.ones((embed_dim, 10))
-
-    def model(
-        x,
-        _w_patch=w_patch,
-        _w_pos=w_pos,
-        _wq=wq,
-        _wk=wk,
-        _wv=wv,
-        _wo=wo,
-        _w_mlp1=w_mlp1,
-        _w_mlp2=w_mlp2,
-        _w_head=w_head,
-    ):
-        # Patch embedding
-        h = lax.conv_general_dilated(
-            x,
-            _w_patch,
-            (patch_size, patch_size),
-            "VALID",
-            dimension_numbers=("NCHW", "OIHW", "NCHW"),
-        )
+    def model(x: Any, p: dict[str, Any]) -> Any:
+        h = _conv(x, p["patch"], patch, "VALID")
         b, d, gh, gw = h.shape
-        h = h.reshape((b, d, gh * gw)).transpose((0, 2, 1))
-        h = h + _w_pos
+        h = h.reshape((b, d, gh * gw)).transpose((0, 2, 1)) + p["pos"]
+        for blk in p["blocks"]:
+            h = _encoder_block(h, blk, heads)
+        h = _layer_norm(h, p["norm"])
+        return _linear(h.mean(axis=1), p["head"])
 
-        # Self-attention
-        q = (h @ _wq).reshape((b, num_patches, num_heads, head_dim))
-        k = (h @ _wk).reshape((b, num_patches, num_heads, head_dim))
-        v = (h @ _wv).reshape((b, num_patches, num_heads, head_dim))
-        attn_out = jax.nn.dot_product_attention(q, k, v).reshape((b, num_patches, embed_dim)) @ _wo
-        h = h + attn_out
-
-        # MLP
-        mlp_out = jnn.gelu(h @ _w_mlp1) @ _w_mlp2
-        h = h + mlp_out
-
-        return h.mean(axis=1) @ _w_head
-
-    x = jnp.ones((batch, 3, img_size, img_size))
-    return model, (x, w_patch, w_pos, wq, wk, wv, wo, w_mlp1, w_mlp2, w_head)
+    x = jnp.ones((batch, IN_CHANNELS, cfg["img_size"], cfg["img_size"]))
+    return model, (x, params)
 
 
 def build_jax_deep_dnn(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[Any, tuple[Any, ...]]:
-    if scale == "micro":
-        in_dim, hidden_dim, out_dim = 784, 128, 128
-    elif scale == "standard":
-        in_dim, hidden_dim, out_dim = 1024, 4096, 1024
-    else:  # production
-        in_dim, hidden_dim, out_dim = 2048, 8192, 2048
+    cfg = scale_config(DEEP_DNN, scale)
+    d_in, hidden, d_out = cfg["in_features"], cfg["hidden_features"], cfg["out_features"]
+    init = _Init()
+    params: dict[str, Any] = {
+        "layers": [
+            {"fc": _linear_params(init, a, b), "norm": _norm_params(b)}
+            for a, b in ((d_in, hidden), (hidden, hidden), (hidden, d_out))
+        ],
+        "head": _linear_params(init, d_out, NUM_CLASSES),
+    }
 
-    w1 = jnp.ones((in_dim, hidden_dim))
-    w2 = jnp.ones((hidden_dim, hidden_dim))
-    w3 = jnp.ones((hidden_dim, out_dim))
-    w_head = jnp.ones((out_dim, 10))
+    def model(x: Any, p: dict[str, Any]) -> Any:
+        for layer in p["layers"]:
+            x = _layer_norm(_gelu(_linear(x, layer["fc"])), layer["norm"])
+        return _linear(x, p["head"])
 
-    def model(x, _w1=w1, _w2=w2, _w3=w3, _w_head=w_head):
-        x = jnn.gelu(x @ _w1)
-        x = jnn.gelu(x @ _w2)
-        x = jnn.gelu(x @ _w3)
-        return x @ _w_head
-
-    x = jnp.ones((batch, in_dim))
-    return model, (x, w1, w2, w3, w_head)
+    x = jnp.ones((batch, d_in))
+    return model, (x, params)
 
 
 def build_jax_transformer(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[Any, tuple[Any, ...]]:
-    if scale == "micro":
-        seq_len, embed_dim, num_heads = 32, 128, 4
-    elif scale == "standard":
-        seq_len, embed_dim, num_heads = 512, 768, 12
-    else:  # production
-        seq_len, embed_dim, num_heads = 1024, 1024, 16
+    cfg = scale_config(TRANSFORMER, scale)
+    dim, heads = cfg["embed_dim"], cfg["num_heads"]
+    init = _Init()
+    params: dict[str, Any] = {
+        "blocks": [
+            _encoder_block_params(init, dim, cfg["ffn_dim"]) for _ in range(cfg["num_layers"])
+        ],
+        "norm": _norm_params(dim),
+        "head": _linear_params(init, dim, NUM_CLASSES),
+    }
 
-    head_dim = embed_dim // num_heads
-    wq = jnp.ones((embed_dim, embed_dim))
-    wk = jnp.ones((embed_dim, embed_dim))
-    wv = jnp.ones((embed_dim, embed_dim))
-    wo = jnp.ones((embed_dim, embed_dim))
-    w_mlp1 = jnp.ones((embed_dim, embed_dim * 4))
-    w_mlp2 = jnp.ones((embed_dim * 4, embed_dim))
-    w_head = jnp.ones((embed_dim, 10))
+    def model(x: Any, p: dict[str, Any]) -> Any:
+        for blk in p["blocks"]:
+            x = _encoder_block(x, blk, heads)
+        x = _layer_norm(x, p["norm"])
+        return _linear(x.mean(axis=1), p["head"])
 
-    def model(x, _wq=wq, _wk=wk, _wv=wv, _wo=wo, _w_mlp1=w_mlp1, _w_mlp2=w_mlp2, _w_head=w_head):
-        b, l, d = x.shape
-        q = (x @ _wq).reshape((b, l, num_heads, head_dim))
-        k = (x @ _wk).reshape((b, l, num_heads, head_dim))
-        v = (x @ _wv).reshape((b, l, num_heads, head_dim))
-        attn_out = jax.nn.dot_product_attention(q, k, v).reshape((b, l, d)) @ _wo
-        x = x + attn_out
-        mlp_out = jnn.gelu(x @ _w_mlp1) @ _w_mlp2
-        x = x + mlp_out
-        return x.mean(axis=1) @ _w_head
+    x = jnp.ones((batch, cfg["seq_len"], dim))
+    return model, (x, params)
 
-    x = jnp.ones((batch, seq_len, embed_dim))
-    return model, (x, wq, wk, wv, wo, w_mlp1, w_mlp2, w_head)
+
+# ---------------------------------------------------------------------------
+# Legacy architectures
+# ---------------------------------------------------------------------------
 
 
 def build_jax_cnn(

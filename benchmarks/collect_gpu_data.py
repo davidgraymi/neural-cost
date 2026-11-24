@@ -792,8 +792,24 @@ def _tf_transformer_gpu(batch: int, tf_device: str):
     return m, (xi,)
 
 
+def _tf_convnext_gpu(batch: int, tf_device: str):
+    import tensorflow as tf
+
+    with tf.device(tf_device):
+        return get_model("ConvNeXt", framework="tensorflow", batch=batch)
+
+
+def _tf_vit_gpu(batch: int, tf_device: str):
+    import tensorflow as tf
+
+    with tf.device(tf_device):
+        return get_model("ViT", framework="tensorflow", batch=batch)
+
+
 TF_GPU_BUILDERS = {
     "FF DNN": _tf_ff_dnn_gpu,
+    "ConvNeXt": _tf_convnext_gpu,
+    "ViT": _tf_vit_gpu,
     "CNN": _tf_cnn_gpu,
     "RNN": _tf_rnn_gpu,
     "LSTM": _tf_lstm_gpu,
@@ -893,6 +909,7 @@ def eval_torch_gpu(
 
     for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in TORCH_GPU_BUILDERS:
+            print(f"  [skip] PyTorch GPU {arch}: no GPU model for this architecture")
             continue
         for batch in batches:
             print(f"  PyTorch GPU {arch} B={batch}…", flush=True)
@@ -907,7 +924,8 @@ def eval_torch_gpu(
                 cpu_model, cpu_inputs = TORCH_GPU_BUILDERS[arch](batch, torch.device("cpu"))
                 prof = profile_model(cpu_model, cpu_inputs, adapter)
                 cost = prof.cost
-            except Exception:
+            except Exception as exc:
+                print(f"  [skip] GPU profile {arch} B={batch}: {exc}")
                 continue
             need_gib = _exceeds_budget(prof, memory_budget)
             if need_gib is not None:
@@ -1029,6 +1047,7 @@ def eval_jax_gpu(
 
     for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in JAX_GPU_BUILDERS:
+            print(f"  [skip] JAX GPU {arch}: no GPU model for this architecture")
             continue
         for batch in batches:
             print(f"  JAX GPU {arch} B={batch}…", flush=True)
@@ -1045,7 +1064,8 @@ def eval_jax_gpu(
                 cpu_model, cpu_inputs = JAX_GPU_BUILDERS[arch](batch, jax.devices("cpu")[0])
                 prof = profile_model(cpu_model, cpu_inputs, adapter)
                 cost = prof.cost
-            except Exception:
+            except Exception as exc:
+                print(f"  [skip] GPU profile {arch} B={batch}: {exc}")
                 continue
             need_gib = _exceeds_budget(prof, memory_budget)
             if need_gib is not None:
@@ -1147,6 +1167,7 @@ def eval_tensorflow_gpu(
 
     for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in TF_GPU_BUILDERS:
+            print(f"  [skip] TF GPU {arch}: no GPU model for this architecture")
             continue
         for batch in batches:
             try:
@@ -1158,7 +1179,8 @@ def eval_tensorflow_gpu(
             try:
                 prof = profile_model(model, inputs, adapter)
                 cost = prof.cost
-            except Exception:
+            except Exception as exc:
+                print(f"  [skip] TF GPU profile {arch} B={batch}: {exc}")
                 continue
 
             fn = lambda *a: model(*a, training=False)

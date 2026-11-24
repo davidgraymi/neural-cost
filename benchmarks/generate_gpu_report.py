@@ -58,6 +58,16 @@ def provenance(path: Path) -> str:
 
     return f"> **Run:** {describe_run(json.loads(path.read_text()).get('run'))}\n"
 
+
+def describe_architecture(arch: str, scale: str) -> str | None:
+    """Description of ``arch`` at ``scale`` from the shared model configs."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks.models.configs import describe
+
+    return describe(arch, scale)
+
 # ---------------------------------------------------------------------------
 # Style
 # ---------------------------------------------------------------------------
@@ -80,8 +90,6 @@ ARCHS     = ["FF DNN", "CNN", "RNN", "LSTM", "Transformer", "ConvNeXt", "ViT"]
 FRAMEWORKS = ["PyTorch", "JAX", "TensorFlow"]
 
 ARCH_DESCRIPTIONS = {
-    "ConvNeXt": "ConvNeXt-Tiny 4-stage hierarchy (7×7 depthwise conv, 1×1 pointwise inverted bottleneck, LayerNorm, GELU, input 224×224×3)",
-    "ViT": "Vision Transformer Tiny (16×16 patch embedding, 4-layer Transformer encoder with 4 heads, MLP ratio 4, seq_len 197, input 224×224×3)",
     "Transformer": "2-layer encoder (MHA h=4 + FFN×4 + LayerNorm), embed=128, seq=32",
     "CNN": "Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3",
     "FF DNN": "784 → 128 → 128 → 10, ReLU + LayerNorm",
@@ -988,7 +996,11 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
         "|---|---|---|",
     ]
     for arch in ARCHS:
-        desc = ARCH_DESCRIPTIONS.get(arch, "Neural network architecture under test")
+        desc = (
+            describe_architecture(arch, "standard")
+            if arch in {"ConvNeXt", "ViT"}
+            else ARCH_DESCRIPTIONS.get(arch, "Neural network architecture under test")
+        )
         cat = "Modern Vision" if arch in ("ConvNeXt", "ViT") else "Core / Legacy"
         arch_rows.append(f"| **{arch}** | {cat} | {desc} |")
     arch_table_md = "\n".join(arch_rows)

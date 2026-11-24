@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .configs import CONVNEXT, DEEP_DNN, TRANSFORMER, VIT, VIT_MLP_RATIO, scale_config
+
 # ---------------------------------------------------------------------------
 # Common Sub-modules
 # ---------------------------------------------------------------------------
@@ -364,104 +366,53 @@ class LegacyLSTM(nn.Module):
 def build_torch_convnext(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[nn.Module, tuple[torch.Tensor]]:
-    if scale == "micro":
-        model = ConvNeXt(
-            depths=[1, 1],
-            dims=[32, 64],
-            stem_kernel=2,
-            stem_stride=2,
-        ).eval()
-        x = torch.randn(batch, 3, 32, 32)
-    elif scale == "standard":
-        model = ConvNeXt(
-            depths=[3, 3, 9, 3],
-            dims=[96, 192, 384, 768],
-            stem_kernel=4,
-            stem_stride=4,
-        ).eval()
-        x = torch.randn(batch, 3, 224, 224)
-    elif scale == "production":
-        model = ConvNeXt(
-            depths=[3, 3, 27, 3],
-            dims=[128, 256, 512, 1024],
-            stem_kernel=4,
-            stem_stride=4,
-        ).eval()
-        x = torch.randn(batch, 3, 224, 224)
-    else:
-        raise ValueError(f"Unknown scale: {scale}")
+    cfg = scale_config(CONVNEXT, scale)
+    model = ConvNeXt(
+        depths=cfg["depths"],
+        dims=cfg["dims"],
+        stem_kernel=cfg["stem"],
+        stem_stride=cfg["stem"],
+    ).eval()
+    x = torch.randn(batch, 3, cfg["img_size"], cfg["img_size"])
     return model, (x,)
 
 
 def build_torch_vit(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[nn.Module, tuple[torch.Tensor]]:
-    if scale == "micro":
-        model = ViT(
-            img_size=32,
-            patch_size=4,
-            embed_dim=128,
-            num_heads=4,
-            depth=2,
-            mlp_ratio=4.0,
-        ).eval()
-        x = torch.randn(batch, 3, 32, 32)
-    elif scale == "standard":
-        model = ViT(
-            img_size=224,
-            patch_size=16,
-            embed_dim=384,
-            num_heads=6,
-            depth=6,
-            mlp_ratio=4.0,
-        ).eval()
-        x = torch.randn(batch, 3, 224, 224)
-    elif scale == "production":
-        model = ViT(
-            img_size=224,
-            patch_size=16,
-            embed_dim=768,
-            num_heads=12,
-            depth=12,
-            mlp_ratio=4.0,
-        ).eval()
-        x = torch.randn(batch, 3, 224, 224)
-    else:
-        raise ValueError(f"Unknown scale: {scale}")
+    cfg = scale_config(VIT, scale)
+    model = ViT(
+        img_size=cfg["img_size"],
+        patch_size=cfg["patch_size"],
+        embed_dim=cfg["embed_dim"],
+        num_heads=cfg["num_heads"],
+        depth=cfg["depth"],
+        mlp_ratio=float(VIT_MLP_RATIO),
+    ).eval()
+    x = torch.randn(batch, 3, cfg["img_size"], cfg["img_size"])
     return model, (x,)
 
 
 def build_torch_deep_dnn(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[nn.Module, tuple[torch.Tensor]]:
-    if scale == "micro":
-        model = DeepDNN(in_features=784, hidden_features=128, out_features=128).eval()
-        x = torch.randn(batch, 784)
-    elif scale == "standard":
-        model = DeepDNN(in_features=1024, hidden_features=4096, out_features=1024).eval()
-        x = torch.randn(batch, 1024)
-    elif scale == "production":
-        model = DeepDNN(in_features=2048, hidden_features=8192, out_features=2048).eval()
-        x = torch.randn(batch, 2048)
-    else:
-        raise ValueError(f"Unknown scale: {scale}")
+    cfg = scale_config(DEEP_DNN, scale)
+    model = DeepDNN(**cfg).eval()
+    x = torch.randn(batch, cfg["in_features"])
     return model, (x,)
 
 
 def build_torch_transformer(
     scale: str = "standard", batch: int = 1, **kwargs: Any
 ) -> tuple[nn.Module, tuple[torch.Tensor]]:
-    if scale == "micro":
-        model = Transformer(embed_dim=128, num_heads=4, num_layers=2, ffn_dim=512).eval()
-        x = torch.randn(batch, 32, 128)
-    elif scale == "standard":
-        model = Transformer(embed_dim=768, num_heads=12, num_layers=6, ffn_dim=3072).eval()
-        x = torch.randn(batch, 512, 768)
-    elif scale == "production":
-        model = Transformer(embed_dim=1024, num_heads=16, num_layers=12, ffn_dim=4096).eval()
-        x = torch.randn(batch, 1024, 1024)
-    else:
-        raise ValueError(f"Unknown scale: {scale}")
+    cfg = scale_config(TRANSFORMER, scale)
+    model = Transformer(
+        embed_dim=cfg["embed_dim"],
+        num_heads=cfg["num_heads"],
+        num_layers=cfg["num_layers"],
+        ffn_dim=cfg["ffn_dim"],
+    ).eval()
+    x = torch.randn(batch, cfg["seq_len"], cfg["embed_dim"])
     return model, (x,)
 
 
