@@ -47,6 +47,47 @@ def _median_ms(fn: Any, warmup: int, repeats: int) -> float:
     return measurement.median_seconds * 1e3
 
 
+def _sdpa_layers(
+    batch: int,
+    heads: int,
+    q_len: int,
+    kv_len: int,
+    head_dim: int,
+    num_layers: int,
+    kv_heads: int | None = None,
+) -> tuple[Any, int]:
+    """Build ``num_layers`` independent attention calls and the bytes they move.
+
+    The timed workload is exactly ``num_layers`` ``scaled_dot_product_attention``
+    calls (separate q/k/v per layer, so layers do not reuse one cached tensor).
+    Weights and projections are NOT executed, so they are not counted. Returns
+    ``(callable, bytes)`` where bytes = q + k + v reads + output write at the
+    actual (fp32) element size, summed over layers.
+    """
+    import torch
+
+    kv_heads = heads if kv_heads is None else kv_heads
+    layers = [
+        (
+            torch.randn(batch, heads, q_len, head_dim),
+            torch.randn(batch, kv_heads, kv_len, head_dim),
+            torch.randn(batch, kv_heads, kv_len, head_dim),
+        )
+        for _ in range(num_layers)
+    ]
+    gqa = kv_heads != heads
+
+    def run() -> Any:
+        out = None
+        for q, k, v in layers:
+            out = torch.nn.functional.scaled_dot_product_attention(q, k, v, enable_gqa=gqa)
+        return out
+
+    q0, k0, v0 = layers[0]
+    per_layer = (q0.numel() * 2 + k0.numel() + v0.numel()) * q0.element_size()  # q + out + k + v
+    return run, per_layer * num_layers
+
+
 @dataclass
 class PrefillMetrics:
     """Performance metrics for prompt prefill phase."""
@@ -110,23 +151,16 @@ def benchmark_llm_prefill(
 
     head_dim = embed_dim // num_heads
 
-    # Synthetic or provided attention / transformer block
-    q = torch.randn(batch_size, num_heads, prompt_len, head_dim)
-    k = torch.randn(batch_size, num_heads, prompt_len, head_dim)
-    v = torch.randn(batch_size, num_heads, prompt_len, head_dim)
-
-    latency_ms = _median_ms(
-        lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v), warmup, repeats
+    # Timed workload: num_layers attention calls. Projections are not run, so
+    # their FLOPs are not counted (attention-only: 4 * B * L^2 * D per layer).
+    run, mem_traffic = _sdpa_layers(
+        batch_size, num_heads, prompt_len, prompt_len, head_dim, num_layers
     )
-
-    # FLOPs: 4 * B * L^2 * D + projections for each layer
-    attn_flops = 4 * batch_size * (prompt_len**2) * embed_dim * num_layers
-    proj_flops = 8 * batch_size * prompt_len * (embed_dim**2) * num_layers
-    total_flops = attn_flops + proj_flops
+    latency_ms = _median_ms(run, warmup, repeats)
+    total_flops = 4 * batch_size * (prompt_len**2) * embed_dim * num_layers
     achieved_gflops = (total_flops / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
 
     throughput_tokens_s = (batch_size * prompt_len) / (latency_ms / 1e3) if latency_ms > 0 else 0.0
-    mem_traffic = 2 * batch_size * prompt_len * embed_dim * 2 * num_layers
 
     return PrefillMetrics(
         prompt_len=prompt_len,
@@ -157,25 +191,22 @@ def benchmark_llm_decode(
 
     head_dim = embed_dim // num_heads
 
-    # Warmup KV cache and single token step
-    q = torch.randn(batch_size, num_heads, 1, head_dim)
-    k_cache = torch.randn(batch_size, num_heads, prompt_len, head_dim)
-    v_cache = torch.randn(batch_size, num_heads, prompt_len, head_dim)
+    # Timed workload: one decode step = attention over the KV cache for each of
+    # num_layers layers, repeated gen_tokens times. Weights are not read, so the
+    # traffic is q + k_cache + v_cache + output at the actual (fp32) dtype.
+    step, step_traffic = _sdpa_layers(batch_size, num_heads, 1, prompt_len, head_dim, num_layers)
 
     def generate() -> Any:
         out = None
         for _ in range(gen_tokens):
-            out = torch.nn.functional.scaled_dot_product_attention(q, k_cache, v_cache)
+            out = step()
         return out
 
     latency_ms = _median_ms(generate, warmup, repeats) / gen_tokens
     tokens_per_sec = batch_size * 1e3 / latency_ms if latency_ms > 0 else 0.0
 
-    # KV cache bytes at starting prompt length
-    kv_cache_bytes = 2 * batch_size * prompt_len * embed_dim * 2 * num_layers
-    step_traffic = estimate_llm_decode_step_bytes(
-        batch_size, prompt_len, embed_dim, num_layers=num_layers, dtype_bytes=2
-    )
+    # KV cache bytes at starting prompt length (fp32 tensors actually allocated)
+    kv_cache_bytes = 2 * batch_size * prompt_len * embed_dim * 4 * num_layers
     achieved_gbw = (step_traffic / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
 
     if hardware is None:
@@ -418,17 +449,10 @@ def benchmark_paged_attention(
     head_dim = embed_dim // num_heads
     kv_heads = num_heads if num_kv_heads is None else int(num_kv_heads)
 
-    q = torch.randn(batch_size, num_heads, 1, head_dim)
-    k_cache = torch.randn(batch_size, kv_heads, context_len, head_dim)
-    v_cache = torch.randn(batch_size, kv_heads, context_len, head_dim)
-
-    latency_ms = _median_ms(
-        lambda: torch.nn.functional.scaled_dot_product_attention(
-            q, k_cache, v_cache, enable_gqa=(kv_heads != num_heads)
-        ),
-        warmup,
-        repeats,
+    run, kernel_bytes = _sdpa_layers(
+        batch_size, num_heads, 1, context_len, head_dim, num_layers, kv_heads=kv_heads
     )
+    latency_ms = _median_ms(run, warmup, repeats)
 
     paged_est = estimate_paged_attention(
         batch_size=batch_size,
@@ -441,7 +465,9 @@ def benchmark_paged_attention(
         dtype_bytes=4,
     )
 
-    achieved_gbw = (paged_est.total_bytes / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
+    # Bandwidth uses bytes the timed dense kernel moves; paged_est describes
+    # the paged layout (allocated blocks, fragmentation) and is reported as such.
+    achieved_gbw = (kernel_bytes / (latency_ms / 1e3)) / 1e9 if latency_ms > 0 else 0.0
     if hardware is None:
         hardware, _ = detect_hardware()
     bw_util = (
