@@ -716,48 +716,114 @@ class JaxAdapter(FrameworkAdapter):
     def benchmark(
         self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
     ) -> Measurement:
-        """Benchmark a JAX function while waiting for dispatched device work."""
+        """Benchmark a JAX function while waiting for dispatched device work.
+
+        Every sample blocks on all output leaves, so asynchronous dispatch
+        cannot end the clock early.  Memory comes from the device allocator
+        when it exposes statistics (GPU, TPU).  Its peak counter cannot be
+        reset, so it is reported only when the timed run raised it; otherwise,
+        and on backends without statistics (CPU), the peak of a jitted
+        function is taken from XLA's compiled memory plan.
+        """
         try:
             import jax
         except ImportError as error:  # pragma: no cover - optional package
             raise ImportError("Install neural-cost[jax] to use JaxAdapter") from error
 
-        def wait(value: Any) -> None:
-            for leaf in jax.tree.leaves(value):
-                if hasattr(leaf, "block_until_ready"):
-                    leaf.block_until_ready()
-
         if warmup < 0 or repeats < 1:
             raise ValueError("warmup must be non-negative and repeats must be at least one")
+        output = None
         for _ in range(warmup):
-            wait(function(*args, **kwargs))
+            output = _block(jax, function(*args, **kwargs))
+        dev = _first_device(jax, (args, kwargs)) or _first_device(jax, output)
+        before = _allocator_stats(dev)
         samples = []
         for _ in range(repeats):
             start = perf_counter_ns()
-            wait(function(*args, **kwargs))
+            output = _block(jax, function(*args, **kwargs))
             samples.append((perf_counter_ns() - start) / 1_000_000_000)
-        # The first array leaf in the arguments (e.g. inside a Flax variables dict).
-        first = next((leaf for leaf in jax.tree.leaves(args) if hasattr(leaf, "device")), None)
-        device = str(first.device) if first is not None else None
-        peak = None
-        allocated = None
-        reserved = None
-        if first is not None:
-            dev = first.device
-            if hasattr(dev, "memory_stats") and callable(dev.memory_stats):
-                try:
-                    stats = dev.memory_stats()
-                    if stats:
-                        peak = stats.get("peak_bytes_in_use")
-                        allocated = stats.get("bytes_in_use")
-                        reserved = stats.get("bytes_limit") or stats.get("bytes_reserved")
-                except (AttributeError, RuntimeError, ValueError):
-                    stats = None
+        if dev is None:
+            dev = _first_device(jax, output)
+        after = _allocator_stats(dev)
+        peak = allocated = reserved = None
+        if after:
+            allocated = after.get("bytes_in_use")
+            # Memory the allocator holds from the device, not its capacity limit.
+            reserved = _first_stat(after, "pool_bytes", "bytes_reserved")
+            raised = (before or {}).get("peak_bytes_in_use", -1) < after.get(
+                "peak_bytes_in_use", -1
+            )
+            if raised:
+                peak = after.get("peak_bytes_in_use")
+        if peak is None:
+            peak = compiled_peak_bytes(function, *args, **kwargs)
         return Measurement(
             median(samples),
             tuple(samples),
             peak_memory_bytes=peak,
-            device=device,
+            device=str(dev) if dev is not None else None,
             allocated_memory_bytes=allocated,
             reserved_memory_bytes=reserved,
         )
+
+
+def _block(jax: Any, value: Any) -> Any:
+    """Wait for every array in ``value`` to finish computing."""
+    for leaf in jax.tree.leaves(value):
+        if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
+    return value
+
+
+def _first_device(jax: Any, tree: Any) -> Any:
+    """Device of the first single-device array in ``tree`` (e.g. inside a Flax dict)."""
+    for leaf in jax.tree.leaves(tree):
+        devices = getattr(leaf, "devices", None)
+        if callable(devices):
+            try:
+                found = devices()
+            except (AttributeError, RuntimeError, ValueError):
+                continue
+            if len(found) == 1:
+                return next(iter(found))
+    return None
+
+
+def _allocator_stats(device: Any) -> dict[str, int] | None:
+    """The device allocator's counters, or ``None`` where the backend has none."""
+    stats_method = getattr(device, "memory_stats", None)
+    if not callable(stats_method):
+        return None
+    try:
+        return stats_method() or None
+    except (AttributeError, RuntimeError, ValueError, NotImplementedError):
+        return None
+
+
+def _first_stat(stats: dict[str, int], *keys: str) -> int | None:
+    return next((stats[key] for key in keys if stats.get(key) is not None), None)
+
+
+def compiled_peak_bytes(function: Any, *args: Any, **kwargs: Any) -> int | None:
+    """Peak device bytes XLA plans for one call of a jitted ``function``.
+
+    Sums the compiled program's arguments, outputs and temporaries, minus
+    outputs that alias (donate) an argument buffer.  Returns ``None`` when
+    ``function`` is not jitted or the backend gives no memory analysis.
+    """
+    lower = getattr(function, "lower", None)
+    if not callable(lower):
+        return None
+    try:
+        stats = lower(*args, **kwargs).compile().memory_analysis()
+    except Exception:  # noqa: BLE001 - any lowering/compile failure means "unknown"
+        return None
+    if stats is None:
+        return None
+    total = (
+        stats.argument_size_in_bytes
+        + stats.output_size_in_bytes
+        + stats.temp_size_in_bytes
+        - stats.alias_size_in_bytes
+    )
+    return int(total) if total > 0 else None

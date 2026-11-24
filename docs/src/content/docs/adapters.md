@@ -29,7 +29,9 @@ TensorFlow GPU allocator statistics.  `JaxAdapter` traces `dot_general`,
 `conv_general_dilated`, elementwise, comparison and reduction primitives, and
 indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
 `dynamic_update_slice`), and waits for asynchronous device work during
-benchmarks.  All adapters are optional imports:
+benchmarks.  Its peak memory is the allocator peak when the timed run raised
+it, otherwise (and on CPU) the peak of XLA's compiled memory plan for jitted
+functions; reserved memory is the allocator pool, never its capacity limit.  All adapters are optional imports:
 
 ```python
 from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchAdapter
