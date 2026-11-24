@@ -755,23 +755,30 @@ TF_GPU_BUILDERS = {
 # ---------------------------------------------------------------------------
 
 
-def _detect_jax_gpu() -> tuple[Any | None, str]:
-    """Return (jax.Device, label) for the first available GPU/accelerator."""
+def _detect_jax_gpu(cuda: bool = False) -> tuple[Any | None, str]:
+    """Return (jax.Device, label) for the first available GPU/accelerator.
+
+    Off CUDA, JAX falls back to the CPU (Apple Silicon without a Metal plugin,
+    flagged by _check_jax_mps_driver).  With ``cuda=True`` (a CUDA sweep) it
+    never does: CPU timings bounded by the GPU spec would land in the GPU
+    results, so the device is ``None`` and the label carries the error.
+    """
     try:
         import jax
-
-        # Try GPU/accelerators first: "gpu", "mps", "tpu", fall back to CPU
-        for backend in ("gpu", "mps", "tpu", "cpu"):
-            try:
-                devs = jax.devices(backend)
-                if devs:
-                    dev = devs[0]
-                    return dev, f"{backend}:{dev.id} ({dev.device_kind})"
-            except (RuntimeError, ValueError):
-                pass
-        return None, "cpu-fallback"
     except ImportError:
         return None, "jax-not-installed"
+    backends = ("gpu",) if cuda else ("gpu", "mps", "tpu", "cpu")
+    error = "no devices"
+    for backend in backends:
+        try:
+            devs = jax.devices(backend)
+        except (RuntimeError, ValueError) as exc:
+            error = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            continue
+        if devs:
+            dev = devs[0]
+            return dev, f"{backend}:{dev.id} ({dev.device_kind})"
+    return None, error if cuda else "cpu-fallback"
 
 
 def _detect_tf_gpu() -> tuple[str, str]:
@@ -1214,8 +1221,11 @@ def _check_jax_mps_driver() -> None:
 
     Without a plugin, JAX silently runs on CPU even on MPS-capable machines.
     This function prints a diagnostic so the benchmark output is honest about
-    which device JAX is actually using.
+    which device JAX is actually using.  Off macOS it says nothing: a CUDA
+    sweep skips JAX instead of falling back (see _detect_jax_gpu).
     """
+    if sys.platform != "darwin":
+        return
     try:
         import importlib
 
@@ -1597,8 +1607,13 @@ def main() -> None:
 
     # JAX GPU
     if run_jax and importlib.util.find_spec("jax") is not None:
-        jax_dev, jax_label = _detect_jax_gpu()
-        if jax_dev is not None:
+        cuda_run = (torch_dev is not None and str(torch_dev).startswith("cuda")) or str(
+            args.device or ""
+        ).startswith("cuda")
+        jax_dev, jax_label = _detect_jax_gpu(cuda=cuda_run)
+        if jax_dev is None and cuda_run:
+            print(f"[skip] JAX: no CUDA device ({jax_label})")
+        elif jax_dev is not None:
             print(f"── JAX ({jax_label}) ─────────────────────────────────")
             recs = eval_jax_gpu(
                 gpu_hardware,
