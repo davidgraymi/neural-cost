@@ -20,17 +20,15 @@
 | **JAX** | `time.perf_counter_ns` | `jax.Array.block_until_ready()` |
 | **TensorFlow** | `time.perf_counter_ns` | `tf.experimental.async_wait()` |
 
-CUDA event timing measures only GPU kernel execution time on CUDA devices. On Apple Silicon MPS,
-synchronous timing barriers (`torch.mps.synchronize()`, `jax.block_until_ready()`, and `tf.experimental.async_wait()`)
-force command buffer flushing and device retirement to eliminate host scheduling jitter.
+On Apple Silicon MPS, synchronous timing barriers (`torch.mps.synchronize()`, `jax.block_until_ready()`, and `tf.experimental.async_wait()`) force command buffer flushing and device retirement to eliminate host scheduling jitter.
 
 ### Architectures under test
 
 | Architecture | Category | Description |
 |---|---|---|
 | **FF DNN** | Core / Legacy | 784 → 128 → 128 → 10, ReLU + LayerNorm |
-| **ConvNeXt** | Modern Vision | ConvNeXt-Tiny 4-stage hierarchy (7×7 depthwise conv, 1×1 pointwise inverted bottleneck, LayerNorm, GELU, input 224×224×3) |
-| **ViT** | Modern Vision | Vision Transformer Tiny (16×16 patch embedding, 4-layer Transformer encoder with 4 heads, MLP ratio 4, seq_len 197, input 224×224×3) |
+| **ConvNeXt** | Modern Vision | 4-stage ConvNeXt, depths [3, 3, 9, 3], dims [96, 192, 384, 768] (4×4 stem; 7×7 depthwise → LayerNorm → 1×1 (dim×4) → GELU → 1×1), input 224×224×3 |
+| **ViT** | Modern Vision | 6-block pre-norm ViT, 16×16 patches, embed 384, 6 heads, MLP×4, input 224×224×3 |
 | **Transformer** | Core / Legacy | 2-layer encoder (MHA h=4 + FFN×4 + LayerNorm), embed=128, seq=32 |
 
 ### Frameworks and optimisation variants
@@ -57,14 +55,6 @@ Each point represents one architecture × framework combination (optimised varia
 
 ![GPU Roofline](figures/gpu_fig1_roofline.png)
 
-**Key observations:**
-- **Hardware Ridge Point (36.0 FLOP/B):** The M1 GPU's ridge point is much higher than typical CPUs (5–10 FLOP/B). Workloads with arithmetic intensity below 36.0 FLOP/B are fundamentally memory-bandwidth bound.
-- **Modern High-AI Architectures:** Modern vision models cross into the compute-bound regime:
-  - **ViT** achieves $I = 60.3$ to $89.0$ FLOP/B, well past the ridge point, attaining up to **1,297.5 GFLOP/s** (~50.0% of theoretical peak) in JAX JIT.
-  - **ConvNeXt** sits right on the ridge point ($I = 35.5$ to $38.3$ FLOP/B), delivering **732.6–763.2 GFLOP/s** in JAX JIT and **738.3 GFLOP/s** in PyTorch.
-- **Memory-Bound Legacy Workloads:** Small models like FF DNN ($I = 6.1$ to $21.6$ FLOP/B) and recurrent nets (RNN/LSTM, $I = 2.9$ to $11.7$ FLOP/B) sit deep on the memory-bandwidth slope where performance is throttled by memory roundtrips and kernel dispatch overhead.
-- **XLA and Compiler Fusion:** Whole-graph compilation (`jax.jit()` and `torch.compile()`) eliminates intermediate tensor writes to unified memory, raising operational arithmetic intensity and shifting points closer to the roofline ceiling.
-
 ---
 
 ## Figure GPU-2 — Inference Latency by Architecture (batch=32)
@@ -73,36 +63,17 @@ Error bars show ±1σ across timed iterations.
 
 ![GPU Latency bars](figures/gpu_fig2_latency_bars.png)
 
-**Key observations:**
-- **Modern Vision Workloads:** Handling full $224 \times 224$ images at batch=32:
-  - **ConvNeXt:** JAX JIT finishes in **48.7 ms** vs PyTorch baseline at **387.3 ms** (and PyTorch compiled at 406.7 ms).
-  - **ViT:** JAX JIT completes in **21.5 ms** (1,203 GFLOP/s) vs PyTorch compiled at **132.3 ms** and PyTorch baseline at **232.9 ms**.
-- **Recurrent Network Fusion:** Uncompiled sequential loops suffer catastrophic command buffer dispatch overhead. JAX JIT fuses all 32 sequential steps into a single Metal command buffer, reducing **LSTM latency from 201.8 ms to 4.01 ms** (50.3× speedup) and **RNN from 68.5 ms to 1.68 ms** (40.8× speedup).
-- **Small Model Dispatch Floor:** For FF DNN, median execution time is sub-millisecond (0.23–0.58 ms across frameworks). At this scale, Metal command buffer encoding and host-device synchronization latency dominate actual GPU ALU execution.
-
 ---
 
 ## Figure GPU-3 — Roofline Efficiency Heatmap (batch=32)
 
 ![GPU Efficiency heatmap](figures/gpu_fig3_efficiency_heatmap.png)
 
-**Key observations:**
-- **Peak Utilization in Attention & Dense Convolutions:** ViT reaches the highest roofline efficiency (**46.3%** in JAX JIT, **43.2%** in PyTorch compiled at batch=32, reaching **49.9%** at batch=256). Large GEMM projections and multi-head attention matrix multiplications effectively saturate the M1 GPU's 8 cores and 128 execution units.
-- **ConvNeXt Efficiency:** ConvNeXt achieves **30.3%** efficiency in JAX JIT and **28.4%** in PyTorch baseline. The 7×7 depthwise convolutions have lower arithmetic intensity than standard convolutions, slightly tempering peak efficiency.
-- **Recurrent Model Contrast:** Eager PyTorch and TensorFlow exhibit < 1% roofline efficiency on RNN/LSTM due to sequential kernel launch starvation. JAX JIT elevates LSTM to **23.0%** efficiency at batch=32.
-
 ---
 
 ## Figure GPU-4 — Latency Scaling with Batch Size
 
 ![GPU Batch scaling](figures/gpu_fig4_batch_scaling.png)
-
-**Key observations:**
-- **Sub-linear Scaling at Small Batches ($B < 32$):** Latency grows sub-linearly because constant kernel launch costs and weight memory fetch are amortized across batch items.
-- **Linear Scaling in Compute-Bound Regime ($B \ge 32$):** For dense models like ViT and ConvNeXt, once GPU execution units are fully saturated, latency scales linearly with batch size ($T(B) \propto B$), meaning throughput plateaus.
-- **Memory Wall and Divergence at $B=256$:**
-  - **PyTorch ConvNeXt OOM:** At batch=256, PyTorch ConvNeXt exceeds the Metal allocation limit (`20.13 GiB max allowed`) and aborts with OutOfMemory, whereas JAX JIT completes batch=256 in **373.7 ms** with predictable memory allocation.
-  - **PyTorch ViT Swapping:** PyTorch ViT latency degrades from 232.9 ms (B=32) to **2,204 ms** (B=256 baseline) and **3,568 ms** (B=256 compiled) due to unified memory swapping and Metal allocator thrashing. Meanwhile, JAX JIT scales gracefully to **159.7 ms** (1,297.5 GFLOP/s).
 
 ---
 
@@ -112,11 +83,6 @@ Speedup ratio = eager latency / optimised latency. Higher is better.
 
 ![GPU Speedup](figures/gpu_fig5_speedup.png)
 
-**Key observations:**
-- **JAX JIT Loop Fusion:** JAX JIT yields massive speedups on sequential models: **50.3× on LSTM** (201.8 ms → 4.01 ms) and **40.8× on RNN** (68.5 ms → 1.68 ms), plus **4.17× on ViT** (89.8 ms → 21.5 ms) and **2.85× on ConvNeXt** (138.7 ms → 48.7 ms).
-- **PyTorch Inductor on MPS:** `torch.compile()` provides a **1.76× speedup on ViT** (232.9 ms → 132.3 ms) and **1.58× on Transformer** (3.66 ms → 2.32 ms) through operator fusion and pointwise kernel codegen. However, it shows no speedup on ConvNeXt where depthwise convolutions already dispatch via MPSGraph.
-- **TensorFlow XLA:** `tf.function(jit_compile=True)` achieves **13.5× on FF DNN** (3.07 ms → 0.23 ms) and **7.8×–12.0× on recurrent models**, eliminating Python graph traversal overhead.
-
 ---
 
 ## Figure GPU-5b — JAX vs PyTorch Head-to-Head Speedup (batch=32)
@@ -125,21 +91,11 @@ Direct speedup of JAX (JIT) over PyTorch (Compiled): $T_{\text{PyTorch}} / T_{\t
 
 ![JAX vs PyTorch Speedup](figures/gpu_fig10_framework_comparison.png)
 
-**Key observations:**
-- **Modern Vision Dominance:** JAX JIT outperforms PyTorch on both modern vision architectures: **8.4× faster on ConvNeXt** (48.7 ms vs 406.7 ms) and **6.1× faster on ViT** (21.5 ms vs 132.3 ms).
-- **Core Models:** JAX leads on Transformer (**2.2× faster**) and CNN (**1.7× faster**), and achieves **2.6× faster** execution on vanilla RNN.
-- **PyTorch Strengths:** PyTorch compiled retains a slight lead on LSTM (**1.48× faster** than JAX) and FF DNN (**1.5× faster**), where PyTorch's native C++ MPS kernels avoid JIT graph compilation overhead for small tensors.
-
 ---
 
 ## Figure GPU-6 — Achieved Throughput (GFLOP/s, batch=32)
 
 ![GPU Throughput](figures/gpu_fig6_throughput.png)
-
-**Key observations:**
-- **Hardware Ceiling:** M1 GPU theoretical peak FP32 throughput is 2,600 GFLOP/s.
-- **Top Performers:** JAX JIT ViT leads all models with **1,203 GFLOP/s** at batch=32 (and **1,297 GFLOP/s** at batch=256), followed closely by PyTorch compiled ViT (**1,124 GFLOP/s**) and ConvNeXt (**738 GFLOP/s**).
-- **Legacy Models:** CNN achieves 300–498 GFLOP/s, Transformer achieves 193–384 GFLOP/s, while FF DNN achieves 17–33 GFLOP/s due to memory bandwidth limits.
 
 ---
 
@@ -147,49 +103,11 @@ Direct speedup of JAX (JIT) over PyTorch (Compiled): $T_{\text{PyTorch}} / T_{\t
 
 ![GPU Throughput scaling](figures/gpu_fig7_throughput_scaling.png)
 
-**Key observations:**
-- **Throughput Saturation Plateau:** Throughput rises steeply between batch=1 and batch=32 as execution units fill, then asymptotes between batch=32 and batch=256. For example, JAX ViT scales from 1,203 GFLOP/s (B=32) to 1,297 GFLOP/s (B=256) — an increase of only 7.8% despite an 8× increase in batch size.
-- **Stability under Load:** JAX JIT maintains monotonic throughput scaling up to batch=256 across all architectures, whereas PyTorch exhibits performance degradation at batch=256 due to memory subsystem pressure.
-
 ---
 
-## Deep Dive: Batch Size Scaling Limits — Can Linear Performance Scaling Continue?
-
-A natural question when looking at batch scaling curves is: **"Since we see linear scaling on batch size, can we continue scaling and see the same linear performance?"**
-
-The data and computer architecture principles show definitively that **linear performance scaling cannot continue indefinitely**. The illusion of "linear scaling" at small batch sizes reflects the amortization of constant overheads, which transitions into a strict physical ceiling governed by the Roofline Model, followed by catastrophic memory degradation.
-
-1. **The Amortization Regime (B < 32): The Illusion of Linear Scaling**
-   - At small batch sizes, total execution time T(B) is dominated by constant overheads: Python runtime dispatch, command buffer encoding, Metal kernel launch latency (~20–50 µs), and cold parameter DRAM transfers:
-     `T(B) ≈ T_0 + c · B ≈ T_0`
-   - Since arithmetic work (FLOPs) scales as O(B) while latency remains nearly flat (T_0), throughput appears to scale linearly:
-     `Throughput(B) = FLOPs(B) / T(B) ∝ B / T_0 ∝ B`
-   - This is **not** true hardware scaling; it is merely paying down fixed host-driver latency overhead.
-
-2. **The Roofline Saturation Plateau (B = 32 to 256): Hardware Limit Reached**
-   - Once batch size is sufficient to saturate all 8 GPU cores and 128 Execution Units (EUs), and operational intensity crosses the ridge point (I ≥ 38.2 FLOP/B), the GPU enters the **compute-bound plateau**.
-   - In this regime, execution time scales directly with batch size (T(B) ∝ B).
-   - As a result, throughput strictly plateaus:
-     `Throughput(B) = O(B) / O(B) ≈ Peak GFLOP/s = constant`
-   - In our empirical results, JAX ViT achieves 1,203 GFLOP/s at B=32 and 1,297 GFLOP/s at B=256. An **8× increase in batch size** yielded only a **1.08× throughput gain**, demonstrating that the hardware is almost completely saturated.
-
-3. **The Memory Wall and Allocation Cliff (B > 256): Severe Degradation and OOM**
-   - While parameter memory is constant, activation tensor footprint scales as O(B · L · H).
-   - **Metal Buffer Limit (OOM):** On Apple Silicon unified memory, PyTorch ConvNeXt at B=256 exhausted the Metal single-buffer watermark (`20.13 GiB max allowed`), causing a hard OutOfMemory crash.
-   - **Unified Memory Swapping:** For PyTorch ViT at B=256, activation footprint exceeded available physical RAM, triggering macOS unified memory swapping to the internal NVMe SSD. Latency exploded from **232.9 ms (B=32) to 2,204 ms (eager) and 3,568 ms (compiled)** — a 15× latency slowdown and a collapse in achieved throughput.
-   - **Activation DRAM Bandwidth Saturation:** At large batch sizes, intermediate activation spills overwhelm the GPU cache hierarchy and saturate the 68 GB/s unified memory bus, pulling even high-AI models back down into a memory-bandwidth-bound bottleneck.
-
-### Visualizing the Saturation Floor: Latency per Sample
+## Latency per Sample
 
 ![Latency per Sample](figures/gpu_fig9_per_sample_latency.png)
-
-**Key takeaways from per-sample latency ($T(B) / B$):**
-- **Saturation Floor on Modern Models:** For JAX ViT, per-sample latency is **0.673 ms/sample at $B=32$** and **0.624 ms/sample at $B=256$** — an 8× batch increase yielded only a 7.2% reduction in time-per-sample. For ConvNeXt, per-sample cost dropped from **1.52 ms/sample ($B=32$) to 1.46 ms/sample ($B=256$)**, a mere 3.9% gain.
-- **The Memory Cliff for PyTorch ViT:** For PyTorch ViT, per-sample cost actually **regressed from 4.13 ms/sample at $B=32$ to 8.61 ms/sample (baseline) and 13.94 ms/sample (compiled) at $B=256$**, proving that scaling batch size past physical RAM capacity severely degrades throughput.
-
-**Conclusion:** Scaling batch size yields diminishing throughput returns up to the hardware roofline ceiling, followed by severe latency penalties or hard out-of-memory crashes. The optimal batch size for throughput on Apple Silicon M1 GPU lies between **B=32 and B=64**.
-
----
 
 ---
 
@@ -308,10 +226,6 @@ JAX GPU support on Apple Silicon is fully functional using the modern `jax-mps` 
 1. **Plugin Ecosystem & Root Cause of Prior Absence:**
    - Apple's legacy `jax-metal==0.1.1` package is obsolete and incompatible with the StableHLO v6 bytecode generated by `jaxlib >= 0.4.30` (triggering compilation crashes: `unknown attribute code: 22`).
    - By removing `jax-metal` and utilizing `jax-mps==0.11.0` (the MLX-backed Metal acceleration plugin) with backend `"mps"`, JAX compiles and executes directly on the Apple Silicon GPU (`mps:0`).
-2. **Key Performance Findings:**
-   - **Peak Throughput on ViT:** JAX JIT achieved **1,203.1 GFLOP/s** at batch=32 and **1,297.5 GFLOP/s** at batch=256 (**49.9% roofline efficiency**), setting the benchmark's highest observed FP32 throughput on the M1 GPU.
-   - **Massive Recurrent Speedups:** Whole-graph XLA JIT unrolls and fuses sequential time steps into a single Metal command buffer, delivering **50.3× speedup on LSTM** (201.8 ms → 4.01 ms) and **40.8× on RNN** (68.5 ms → 1.68 ms).
-   - **Memory Allocator Resilience:** Unlike PyTorch MPS, which hit the Metal buffer watermark (`20.13 GiB max allowed`) causing OOM on ConvNeXt at batch=256, JAX JIT successfully executed both ConvNeXt (373.7 ms) and ViT (159.7 ms) without memory fragmentation or swapping.
 
 ---
 
@@ -355,11 +269,5 @@ Empirical memory telemetry measured from framework device allocators compared ag
 | Transformer | JAX | baseline | 2,821.0 | 10,026.2 | — | 7,483,806.3 | — | — |
 | Transformer | JAX | jit | 2,821.0 | 10,026.2 | — | 7,490,462.3 | — | — |
 
-**Key observations & Telemetry Analysis:**
-- **Dynamic Overhead Ratio & Driver Caching:** Observed device memory exceeds theoretical minimum tensor storage due to kernel scratchpads, GEMM workspaces, activation retention, and framework runtime contexts.
-- **JAX MPS Process Watermark Anomaly:** JAX MPS telemetry via `jax.devices()[0].memory_stats()` reports a monotonic process-lifetime peak (`peak_bytes_in_use`). When ConvNeXt at $B=256$ ran early in the suite, it set a 4.01 GB process watermark. Because `jax-mps` currently lacks a `reset_peak_memory_stats()` API, subsequently benchmarked models inherited this 4.01 GB value, resulting in artificially high overhead ratios (e.g. 1,388× on Transformer) that reflect process history rather than isolated tensor memory.
-- **PyTorch MPS Post-Execution Sampling:** `torch.mps.current_allocated_memory()` measures live allocations after `torch.mps.synchronize()`, by which time intermediate activations are freed. For compiled CNN and Transformer, only persistent weights and output tensors remained active, yielding overhead ratios < 0.1× relative to theoretical inference memory.
-- **TensorFlow Metal Static Reporting:** TensorFlow on Apple Silicon exposes static scratchpads (384–512 KB), which under-reports actual framework footprint.
-- **Allocator Fragmentation at Scale:** PyTorch MPS aggressively pools allocations to amortize Metal command buffer allocation costs. However, at batch=256 this caching policy causes severe fragmentation on large models (triggering OOM on ConvNeXt and memory swapping on ViT).
 
 *Generated by `benchmarks/generate_gpu_report.py` using [neural-cost](https://github.com/davidgraymi/neural-cost)*
