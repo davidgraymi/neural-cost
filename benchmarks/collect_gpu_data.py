@@ -266,6 +266,57 @@ def _report_missing_device_time(framework: str, recs: list[BenchRecord]) -> None
         )
 
 
+def _checkpointed(
+    items: list[str],
+    records: list[BenchRecord],
+    on_progress: Callable[[list[BenchRecord]], None] | None,
+):
+    """Yield ``items``, calling ``on_progress(records)`` after each one finishes."""
+    for item in items:
+        yield item
+        if on_progress is not None:
+            on_progress(records)
+
+
+def _record_key(record: dict) -> tuple:
+    return (
+        record.get("framework"),
+        record.get("variant"),
+        record.get("architecture"),
+        record.get("batch"),
+        record.get("scale", "standard"),
+    )
+
+
+def _previous_records(path: Path) -> list[dict]:
+    """Records already saved at ``path`` (for ``--append``), or none."""
+    try:
+        return list(json.loads(path.read_text()).get("records", []))
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _merge_records(previous: list[dict], new: list[dict]) -> list[dict]:
+    """``previous`` with each configuration in ``new`` added or replaced."""
+    merged = {_record_key(r): r for r in previous}
+    for r in new:
+        merged[_record_key(r)] = r
+    return list(merged.values())
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """Write ``payload`` to a temporary file and rename it over ``path``.
+
+    A crash or kill mid-write leaves the previous file intact.
+    """
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, path)
+
+
 def _is_out_of_memory(exc: BaseException) -> bool:
     """True for a device allocation failure (PyTorch CUDA/MPS, XLA)."""
     text = str(exc).lower()
@@ -821,6 +872,7 @@ def eval_torch_gpu(
     use_fx: bool = True,
     architectures: list[str] | None = None,
     memory_budget: int | None = None,
+    on_progress: Callable[[list[BenchRecord]], None] | None = None,
 ) -> list[BenchRecord]:
     import torch
 
@@ -839,7 +891,7 @@ def eval_torch_gpu(
 
     active_archs = architectures if architectures is not None else list(TORCH_GPU_BUILDERS.keys())
 
-    for arch in active_archs:
+    for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in TORCH_GPU_BUILDERS:
             continue
         for batch in batches:
@@ -964,6 +1016,7 @@ def eval_jax_gpu(
     device_label: str,
     architectures: list[str] | None = None,
     memory_budget: int | None = None,
+    on_progress: Callable[[list[BenchRecord]], None] | None = None,
 ) -> list[BenchRecord]:
     import jax
 
@@ -974,7 +1027,7 @@ def eval_jax_gpu(
 
     active_archs = architectures if architectures is not None else list(JAX_GPU_BUILDERS.keys())
 
-    for arch in active_archs:
+    for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in JAX_GPU_BUILDERS:
             continue
         for batch in batches:
@@ -1083,6 +1136,7 @@ def eval_tensorflow_gpu(
     tf_device: str,
     device_label: str,
     architectures: list[str] | None = None,
+    on_progress: Callable[[list[BenchRecord]], None] | None = None,
 ) -> list[BenchRecord]:
     import tensorflow as tf
 
@@ -1091,7 +1145,7 @@ def eval_tensorflow_gpu(
 
     active_archs = architectures if architectures is not None else list(TF_GPU_BUILDERS.keys())
 
-    for arch in active_archs:
+    for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in TF_GPU_BUILDERS:
             continue
         for batch in batches:
@@ -1580,6 +1634,31 @@ def main() -> None:
     if memory_budget is not None:
         print(f"  memory budget {memory_budget / 2**30:.1f} GiB (larger configurations are skipped)")
 
+    # A CUDA card gets its own directory; Apple GPUs share the chip's (the CPU
+    # results for the same chip live there too, which --crossover reads).
+    is_cuda = torch_dev is not None and str(torch_dev).startswith("cuda")
+    run = run_metadata(gpu_name if is_cuda else hardware.name, script="collect_gpu_data.py", torch_device=torch_label)
+    out_path = results_dir(run["device"], args.results_dir) / "benchmark_gpu_data.json"
+    global _CPU_DATA_FILE
+    _CPU_DATA_FILE = RESULTS_ROOT / device_slug(hardware.name) / "benchmark_data.json"
+    # Read before the first partial save overwrites the file.
+    previous = _previous_records(out_path) if args.append else []
+
+    def save(complete: bool, in_progress: list[BenchRecord] = ()) -> dict:
+        """Write every record so far; ``complete`` stays False until the sweep ends.
+
+        Called after each architecture (with the running section's records as
+        ``in_progress``) and each framework, so a crash or an out-of-memory
+        kill loses at most the architecture being measured.
+        """
+        finished = [*all_records, *in_progress]
+        for r in finished:
+            r.git_commit = run["git_commit"]
+        records = _merge_records(previous, [asdict(r) for r in finished])
+        payload = {"run": run, "hardware": hw_meta, "complete": complete, "records": records}
+        _write_json_atomic(out_path, payload)
+        return payload
+
     run_torch = args.framework in ("all", "torch")
     run_jax = args.framework in ("all", "jax")
     run_tf = args.framework in ("all", "tensorflow")
@@ -1597,11 +1676,13 @@ def main() -> None:
             use_fx=not args.no_fx,
             architectures=active_archs,
             memory_budget=memory_budget,
+            on_progress=lambda recs: save(complete=False, in_progress=recs),
         )
         all_records.extend(recs)
         _print_recs(recs)
         _report_missing_device_time("PyTorch", recs)
         print()
+        save(complete=False)
     elif run_torch:
         print("[skip] PyTorch not installed or device unavailable")
 
@@ -1624,12 +1705,14 @@ def main() -> None:
                 jax_label,
                 architectures=active_archs,
                 memory_budget=memory_budget,
+                on_progress=lambda recs: save(complete=False, in_progress=recs),
             )
             all_records.extend(recs)
             _print_recs(recs)
             if jax_dev.platform != "mps":  # jax-mps is never traced
                 _report_missing_device_time("JAX", recs)
             print()
+            save(complete=False)
         else:
             print("[skip] JAX: no GPU/accelerator device available")
     elif run_jax:
@@ -1652,55 +1735,19 @@ def main() -> None:
                 tf_dev,
                 tf_label,
                 architectures=active_archs,
+                on_progress=lambda recs: save(complete=False, in_progress=recs),
             )
             all_records.extend(recs)
             _print_recs(recs)
             _report_missing_device_time("TensorFlow", recs)
             print()
+            save(complete=False)
     elif run_tf:
         print("[skip] TensorFlow not installed")
 
-    # A CUDA card gets its own directory; Apple GPUs share the chip's (the CPU
-    # results for the same chip live there too, which --crossover reads).
-    is_cuda = torch_dev is not None and str(torch_dev).startswith("cuda")
-    run = run_metadata(gpu_name if is_cuda else hardware.name, script="collect_gpu_data.py", torch_device=torch_label)
-    out_path = results_dir(run["device"], args.results_dir) / "benchmark_gpu_data.json"
-    global _CPU_DATA_FILE
-    _CPU_DATA_FILE = RESULTS_ROOT / device_slug(hardware.name) / "benchmark_data.json"
-    for r in all_records:
-        r.git_commit = run["git_commit"]
-
-    records_to_save: list[dict] = []
-    if args.append and out_path.exists():
-        try:
-            old_payload = json.loads(out_path.read_text())
-            record_map = {
-                (
-                    r.get("framework"),
-                    r.get("variant"),
-                    r.get("architecture"),
-                    r.get("batch"),
-                    r.get("scale", "standard"),
-                ): r
-                for r in old_payload.get("records", [])
-            }
-            for r in all_records:
-                d = asdict(r)
-                k = (
-                    d.get("framework"),
-                    d.get("variant"),
-                    d.get("architecture"),
-                    d.get("batch"),
-                    d.get("scale", "standard"),
-                )
-                record_map[k] = d
-            records_to_save = list(record_map.values())
-        except Exception:
-            records_to_save = [asdict(r) for r in all_records]
-    else:
-        records_to_save = [asdict(r) for r in all_records]
-
-    payload: dict = {"run": run, "hardware": hw_meta, "records": records_to_save}
+    payload = save(complete=False)
+    payload["complete"] = True
+    records_to_save = payload["records"]
 
     # ------------------------------------------------------------------
     # Crossover analysis: compare GPU latencies to CPU baseline
@@ -1717,7 +1764,7 @@ def main() -> None:
                 "  Run `python benchmarks/collect_data.py` first to generate it.\n"
             )
 
-    out_path.write_text(json.dumps(payload, indent=2))
+    _write_json_atomic(out_path, payload)
     print(f"\nSaved {len(records_to_save)} records → {out_path}")
 
 

@@ -159,6 +159,24 @@ _BACKEND_METHODOLOGY: dict[str, tuple[str, str, str]] = {
 }
 
 
+def partial_run_warning(payload: dict) -> str:
+    """A warning block for a sweep that stopped before it finished, else ``""``.
+
+    ``collect_gpu_data.py`` saves after every architecture with
+    ``"complete": false`` and sets it to true only at the end; files written
+    before that flag existed have no key and count as complete.
+    """
+    if payload.get("complete", True):
+        return ""
+    frameworks = sorted({r.get("framework", "?") for r in payload.get("records", [])})
+    return (
+        "> [!WARNING]\n"
+        "> **Partial run:** the sweep stopped before it finished (crash, kill or out of memory). "
+        f"This report covers only the {len(payload.get('records', []))} configurations saved "
+        f"before that ({', '.join(frameworks) or 'none'}).\n\n"
+    )
+
+
 def load(path: Path) -> tuple[dict, list[dict]]:
     raw = json.loads(path.read_text())
     return raw["hardware"], raw["records"]
@@ -1356,7 +1374,9 @@ def main() -> None:
     print("Building GPU report…")
     report = build_report(hw, records, fig_paths, crossover=crossover)
     title, _, body = report.partition("\n")
-    REPORT_FILE.write_text(f"{title}\n\n{provenance(DATA_FILE)}{body}")
+    REPORT_FILE.write_text(
+        f"{title}\n\n{partial_run_warning(raw_json)}{provenance(DATA_FILE)}{body}"
+    )
     print(f"  Report written → {REPORT_FILE}")
 
 

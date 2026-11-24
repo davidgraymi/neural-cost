@@ -1,4 +1,4 @@
-"""generate_gpu_report: methodology wording follows the run's backend (issue #91)."""
+"""generate_gpu_report: methodology wording (issue #91) and partial-run warning (#94)."""
 
 from __future__ import annotations
 
@@ -64,3 +64,12 @@ def test_cuda_report_does_not_describe_metal():
     assert "jax-mps" not in text
     mps_text = _methodology(hw, records)
     assert "Eager GPU (`mps`)" in mps_text and "Metal" in mps_text
+
+
+def test_partial_run_warning():
+    assert report.partial_run_warning({"records": []}) == ""
+    assert report.partial_run_warning({"complete": True, "records": []}) == ""
+    text = report.partial_run_warning(
+        {"complete": False, "records": [{"framework": "PyTorch"}, {"framework": "PyTorch"}]}
+    )
+    assert "Partial run" in text and "2 configurations" in text and "PyTorch" in text
