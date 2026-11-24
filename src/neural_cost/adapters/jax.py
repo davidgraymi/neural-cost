@@ -330,6 +330,10 @@ class JaxAdapter(FrameworkAdapter):
     ``parameter_argnums`` selects which positional arguments hold weights.
     By default every argument after the first is treated as a parameter,
     together with any arrays closed over by the traced function.
+
+    On accelerators :meth:`benchmark` runs a second, separate pass under
+    ``jax.profiler`` to report device busy time; ``trace_device_time=False``
+    skips it.
     """
 
     name = "jax"
@@ -340,7 +344,9 @@ class JaxAdapter(FrameworkAdapter):
         *,
         trip_counts: Mapping[int, int] | None = None,
         default_trip_count: int | None = None,
+        trace_device_time: bool = True,
     ) -> None:
+        self.trace_device_time = trace_device_time
         self.parameter_argnums = tuple(parameter_argnums) if parameter_argnums is not None else None
         self.trip_counts = dict(trip_counts or {})
         if any(count < 0 for count in self.trip_counts.values()):
@@ -757,6 +763,10 @@ class JaxAdapter(FrameworkAdapter):
                 peak = after.get("peak_bytes_in_use")
         if peak is None:
             peak = compiled_peak_bytes(function, *args, **kwargs)
+        traced = None
+        platform = str(getattr(dev, "platform", "cpu")).lower()
+        if getattr(self, "trace_device_time", True) and platform != "cpu":
+            traced = _profile_device_time(jax, function, args, kwargs, repeats)
         return Measurement(
             median(samples),
             tuple(samples),
@@ -764,6 +774,8 @@ class JaxAdapter(FrameworkAdapter):
             device=str(dev) if dev is not None else None,
             allocated_memory_bytes=allocated,
             reserved_memory_bytes=reserved,
+            trace_event_count=traced.event_count if traced else None,
+            trace_device_time_seconds=traced.total_seconds if traced else None,
         )
 
 
@@ -827,3 +839,26 @@ def compiled_peak_bytes(function: Any, *args: Any, **kwargs: Any) -> int | None:
         - stats.alias_size_in_bytes
     )
     return int(total) if total > 0 else None
+
+
+def _profile_device_time(
+    jax: Any, function: Any, args: Sequence[Any], kwargs: dict[str, Any], repeats: int
+) -> Any:
+    """Device busy time over ``repeats`` calls, from a ``jax.profiler`` trace.
+
+    Runs after the timed loop so profiler overhead never reaches the samples.
+    Returns ``None`` when tracing fails (for example another trace is active)
+    or the trace has no accelerator timeline.
+    """
+    import tempfile
+
+    from ..xspace import read_trace_dir
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        try:
+            with jax.profiler.trace(log_dir):
+                for _ in range(repeats):
+                    _block(jax, function(*args, **kwargs))
+        except (RuntimeError, ValueError):
+            return None
+        return read_trace_dir(log_dir, parser="jax")
