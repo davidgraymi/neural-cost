@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate neural-cost predictions against measured runtimes on this machine.
 
-For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit on CPU / MPS,
-TensorFlow graph on CPU) this:
+For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit on CPU /
+CUDA / MPS, TensorFlow graph on CPU / GPU) this:
 
 1. calibrates achievable FLOP/s, bandwidth and dispatch overhead with
    microbenchmarks that never touch the evaluated models;
@@ -224,23 +224,34 @@ def _jax_workloads(quick: bool) -> list[Workload]:
 # -------------------------------------------------------------- tensorflow models
 
 
-def tf_workloads(quick: bool) -> list[Workload]:
-    """Keras models run as ``tf.function`` graphs on the CPU (no Metal plugin)."""
+def tf_workloads(quick: bool, device: str = "/CPU:0") -> list[Workload]:
+    """Keras models run as ``tf.function`` graphs on ``device`` (``"/CPU:0"`` or ``"/GPU:0"``).
+
+    Weights, inputs and every op are pinned to ``device``: without a scope TF
+    places ops on a visible GPU, so a CPU section on a CUDA host would time the GPU.
+    """
     import tensorflow as tf
 
     keras = tf.keras
     tf.random.set_seed(0)
     out: list[Workload] = []
 
-    def add(name: str, model, x, **meta) -> None:
-        graph = tf.function(lambda inp, _m=model: _m(inp, training=False))
-        out.append(Workload(name, model, (x,), runner=graph, metadata=meta))
+    def add(name: str, build, shape, **meta) -> None:
+        with tf.device(device):
+            model = build()
+            x = tf.random.normal(shape)
+
+        def run(inp, _m=model):
+            with tf.device(device):
+                return _m(inp, training=False)
+
+        out.append(Workload(name, model, (x,), runner=tf.function(run), metadata=meta))
 
     widths = (256, 1024) if quick else (256, 1024, 4096)
     batches = (1, 64) if quick else (1, 16, 128)
     for w in widths:
         for b in batches:
-            mlp = keras.Sequential(
+            mlp = lambda w=w: keras.Sequential(  # noqa: E731
                 [
                     keras.Input((w,)),
                     keras.layers.Dense(w, activation="gelu"),
@@ -248,11 +259,11 @@ def tf_workloads(quick: bool) -> list[Workload]:
                     keras.layers.Dense(10),
                 ]
             )
-            add(f"mlp w={w} b={b}", mlp, tf.random.normal((b, w)), family="mlp")
+            add(f"mlp w={w} b={b}", mlp, (b, w), family="mlp")
 
     for img in (32,) if quick else (32, 64):
         for b in (1, 16) if quick else (1, 8, 32):
-            cnn = keras.Sequential(
+            cnn = lambda img=img: keras.Sequential(  # noqa: E731
                 [
                     keras.Input((img, img, 3)),
                     keras.layers.Conv2D(32, 3, padding="same", activation="relu"),
@@ -262,11 +273,11 @@ def tf_workloads(quick: bool) -> list[Workload]:
                     keras.layers.Dense(10),
                 ]
             )
-            add(f"cnn {img}px b={b}", cnn, tf.random.normal((b, img, img, 3)), family="cnn")
+            add(f"cnn {img}px b={b}", cnn, (b, img, img, 3), family="cnn")
 
     for d in (128,) if quick else (128, 256):
         for b in (1, 16):
-            lstm = keras.Sequential(
+            lstm = lambda d=d: keras.Sequential(  # noqa: E731
                 [
                     keras.Input((32, d)),
                     keras.layers.LSTM(d, return_sequences=True),
@@ -274,7 +285,7 @@ def tf_workloads(quick: bool) -> list[Workload]:
                     keras.layers.Dense(10),
                 ]
             )
-            add(f"lstm d={d} b={b}", lstm, tf.random.normal((b, 32, d)), family="lstm")
+            add(f"lstm d={d} b={b}", lstm, (b, 32, d), family="lstm")
 
     def block(t: int, d: int = 256, h: int = 8):
         x = inp = keras.Input((t, d))
@@ -288,8 +299,8 @@ def tf_workloads(quick: bool) -> list[Workload]:
         for b in (1, 8):
             add(
                 f"transformer d=256 T={t} b={b}",
-                block(t),
-                tf.random.normal((b, t, 256)),
+                lambda t=t: block(t),
+                (b, t, 256),
                 family="transformer",
             )
     return out
@@ -343,10 +354,17 @@ def available_backends() -> list[str]:
         import jax
 
         found.append("jax-cpu")
+        if _jax_device("gpu") is not None:
+            found.append("jax-gpu")
         if _jax_device("mps") is not None:
             found.append("jax-mps")
     if importlib.util.find_spec("tensorflow"):
+        import tensorflow as tf
+
         found.append("tf-cpu")
+        # Not on Apple Silicon: tensorflow-metal is unmaintained.
+        if tf.config.list_physical_devices("GPU") and sys.platform != "darwin":
+            found.append("tf-gpu")
     return found
 
 
@@ -356,7 +374,7 @@ def _jax_device(platform: str):
 
     try:
         return jax.devices(platform)[0]
-    except RuntimeError:
+    except (RuntimeError, ValueError, IndexError):
         return None
 
 
@@ -400,7 +418,7 @@ def main() -> None:
             calibration = adapter.calibrate(device)
             workloads = torch_workloads(device, args.quick)
             title = f"PyTorch eager ({device})"
-        elif backend == "tf-cpu":
+        elif backend in ("tf-cpu", "tf-gpu"):
             from neural_cost.adapters import TensorFlowAdapter
 
             # TensorFlow has no calibration microbenchmarks: its section reports
@@ -408,15 +426,24 @@ def main() -> None:
             # gap attribution.
             adapter = TensorFlowAdapter(trace_device_time=False)
             calibration = None
-            workloads = tf_workloads(args.quick)
-            title = "TensorFlow graph (cpu)"
+            tf_device = "/GPU:0" if backend == "tf-gpu" else "/CPU:0"
+            if backend == "tf-gpu":
+                import tensorflow as tf
+
+                if not tf.config.list_physical_devices("GPU"):
+                    print(f"\n[skip] {backend}: TensorFlow sees no GPU")
+                    continue
+            workloads = tf_workloads(args.quick, tf_device)
+            title = f"TensorFlow graph ({backend.split('-', 1)[1]})"
         else:
             from neural_cost.adapters import JaxAdapter
 
             jax_platform = backend.split("-", 1)[1]
             device = _jax_device(jax_platform)
             if device is None:
-                raise SystemExit(f"{backend}: JAX has no {jax_platform} device")
+                # Skip rather than abort: the sections already measured still get written.
+                print(f"\n[skip] {backend}: JAX has no {jax_platform} device")
+                continue
             adapter = JaxAdapter(trace_device_time=False)  # as for torch: no profiler
             calibration = adapter.calibrate(device=device)
             workloads = jax_workloads(args.quick, device)
