@@ -1209,7 +1209,13 @@ def _check_jax_mps_driver() -> None:
 
         import jax
 
-        platforms = [d.platform for d in jax.devices()]
+        try:
+            platforms = [d.platform for d in jax.devices()]
+        except RuntimeError as exc:
+            # A broken plugin (e.g. one built for another jaxlib) fails backend
+            # start-up; report it and let the other frameworks run.
+            print(f"\n  WARNING: JAX could not start its default backend: {exc}\n")
+            return
         if any(p in ("gpu", "tpu", "metal", "mps") for p in platforms):
             return  # JAX has a real accelerator — nothing to do
 
