@@ -1,6 +1,7 @@
 """GPU benchmark: collect performance data across architectures × frameworks × batch sizes on GPU.
 
-Writes results/benchmark_gpu_data.json when complete.
+Writes results/<device>/benchmark_gpu_data.json when complete, stamped with the
+neural-cost version, git commit and framework versions (see run_info.py).
 
 Key differences vs collect_data.py (CPU):
   - PyTorch: tensors/model moved to CUDA; CUDA events used for precise kernel timing
@@ -12,7 +13,7 @@ Key differences vs collect_data.py (CPU):
 
 New in v0.3.0:
   - --crossover: sweeps a fine batch-size grid (1..1024) to find where GPU first beats CPU.
-    Reads the CPU baseline from benchmarks/results/benchmark_data.json if present.
+    Reads the CPU baseline from benchmarks/results/<host cpu>/benchmark_data.json if present.
   - JAX MPS driver check: detects whether jax-metal or jax-mps is installed and warns
     clearly if JAX falls back to CPU on Apple Silicon.
   - CUDA quality-of-life: enables TF32 matmul and cuDNN benchmark mode on Ampere+ GPUs.
@@ -30,11 +31,9 @@ import argparse
 import importlib.util
 import json
 import sys
-import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import mean, median, stdev
 from typing import Any
 
 # Ensure repo root and src/ are importable when run from any directory
@@ -44,6 +43,7 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from benchmarks.run_info import RESULTS_ROOT, device_slug, results_dir, run_metadata, timing_stats
 from benchmarks.models import (
     get_available_models,
     get_model,
@@ -84,7 +84,7 @@ QUICK_BATCH_SIZES = [32, 256]
 CROSSOVER_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
 # Path to CPU benchmark JSON (written by collect_data.py).
-_CPU_DATA_FILE = Path(__file__).parent / "results" / "benchmark_data.json"
+_CPU_DATA_FILE = RESULTS_ROOT / "benchmark_data.json"  # replaced in main() by the host's results dir
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +124,12 @@ class BenchRecord:
     peak_allocated_bytes: int | None = None
     peak_reserved_bytes: int | None = None
     memory_overhead_ratio: float | None = None
+    latency_min_ms: float | None = None
+    relative_spread: float | None = None
+    calls_per_sample: int = 1
+    sync_overhead_us: float | None = None
+    trace_device_ms: float | None = None
+    git_commit: str | None = None
     theoretical_min_bytes: int | None = None
     theoretical_conservative_bytes: int | None = None
 
@@ -208,6 +214,11 @@ def _make_gpu_bench_record(
         peak_allocated_bytes=peak_alloc,
         peak_reserved_bytes=peak_res,
         memory_overhead_ratio=ratio,
+        latency_min_ms=st.get("min"),
+        relative_spread=st.get("relative_spread"),
+        calls_per_sample=st.get("calls_per_sample", 1),
+        sync_overhead_us=st.get("sync_overhead_us"),
+        trace_device_ms=st.get("trace_device_ms"),
         theoretical_min_bytes=theo_min,
         theoretical_conservative_bytes=theo_cons,
     )
@@ -218,192 +229,148 @@ def _make_gpu_bench_record(
 # ---------------------------------------------------------------------------
 
 
-def _cuda_event_block(
-    fn: Callable,
-    args: tuple,
-    warmup: int,
-    repeats: int,
-    device: Any,
-) -> tuple[list[float], int | None, int | None]:
-    """Use CUDA events for sub-millisecond GPU kernel timing and collect allocator telemetry."""
-    import torch
-
-    # Reset peak stats before run
-    torch.cuda.reset_peak_memory_stats(device)
-    # Warmup — lets CUDA driver warm up and torch.compile finish tracing.
-    for _ in range(warmup):
-        fn(*args)
-    torch.cuda.synchronize(device)
-
-    samples: list[float] = []
-    for _ in range(repeats):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn(*args)
-        end.record()
-        torch.cuda.synchronize(device)
-        samples.append(start.elapsed_time(end))  # milliseconds
-
-    peak_allocated = int(torch.cuda.max_memory_allocated(device))
-    peak_reserved = int(torch.cuda.max_memory_reserved(device))
-    return samples, peak_allocated, peak_reserved
-
-
-def _mps_block(
-    fn: Callable,
-    args: tuple,
-    warmup: int,
-    repeats: int,
-) -> tuple[list[float], int | None, int | None]:
-    """Apple MPS has no CUDA events — use perf_counter with MPS sync and allocator telemetry."""
-    import torch
-
-    for _ in range(warmup):
-        fn(*args)
-    torch.mps.synchronize()
-
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        torch.mps.synchronize()
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = int(torch.mps.current_allocated_memory())
-    peak_reserved = int(torch.mps.driver_allocated_memory())
-    return samples, peak_allocated, peak_reserved
-
-
-def _cpu_block(
-    fn: Callable,
-    args: tuple,
-    warmup: int,
-    repeats: int,
-) -> tuple[list[float], int | None, int | None]:
-    import torch
-
-    for _ in range(warmup):
-        fn(*args)
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    try:
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU],
-            profile_memory=True,
-        ) as prof:
-            fn(*args)
-        events = prof.events()
-        act_allocs = [e.cpu_memory_usage for e in events if e.cpu_memory_usage > 0]
-        param_bytes = 0
-        if hasattr(fn, "parameters") and callable(fn.parameters):
-            param_bytes = sum(p.numel() * p.element_size() for p in fn.parameters())
-        peak_allocated = int(param_bytes + sum(act_allocs))
-        peak_reserved = peak_allocated
-    except Exception:
-        peak_allocated = None
-        peak_reserved = None
-    return samples, peak_allocated, peak_reserved
+def _torch_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``TorchAdapter.benchmark``."""
+    return TorchAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
 
 def _jax_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import jax
+    fn: Callable, args: tuple, warmup: int, repeats: int, trace_device_time: bool = True
+) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``JaxAdapter.benchmark``.
 
-    def wait(v: Any) -> None:
-        for leaf in jax.tree.leaves(v):
-            if hasattr(leaf, "block_until_ready"):
-                leaf.block_until_ready()
+    ``trace_device_time=False`` skips the profiler pass, which jax-mps does not
+    support (every attempt logs an error and leaks memory).
+    """
+    adapter = JaxAdapter(trace_device_time=trace_device_time)
+    return adapter.benchmark(fn, *args, warmup=warmup, repeats=repeats)
 
-    for _ in range(warmup):
-        wait(fn(*args))
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        wait(fn(*args))
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
 
-    peak_allocated = None
-    peak_reserved = None
+def _tf_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measurement:
+    """Time ``fn`` exactly as users do: through ``TensorFlowAdapter.benchmark``."""
+    return TensorFlowAdapter().benchmark(fn, *args, warmup=warmup, repeats=repeats)
+
+
+_stats = timing_stats
+
+
+def _report_missing_device_time(framework: str, recs: list[BenchRecord]) -> None:
+    """One line when a GPU section recorded no device busy time (issue #92)."""
+    on_device = [r for r in recs if not str(r.device).lower().startswith("cpu")]
+    missing = [r for r in on_device if r.trace_device_ms is None]
+    if missing:
+        print(
+            f"  [warn] {framework}: no device busy time in {len(missing)}/{len(on_device)} records "
+            "(device tracing failed; trace_device_ms is empty). On CUDA, CUPTI allows one "
+            "profiler per process: run one framework per process with --framework"
+        )
+
+
+def _checkpointed(
+    items: list[str],
+    records: list[BenchRecord],
+    on_progress: Callable[[list[BenchRecord]], None] | None,
+):
+    """Yield ``items``, calling ``on_progress(records)`` after each one finishes."""
+    for item in items:
+        yield item
+        if on_progress is not None:
+            on_progress(records)
+
+
+def _record_key(record: dict) -> tuple:
+    return (
+        record.get("framework"),
+        record.get("variant"),
+        record.get("architecture"),
+        record.get("batch"),
+        record.get("scale", "standard"),
+    )
+
+
+def _previous_records(path: Path) -> list[dict]:
+    """Records already saved at ``path`` (for ``--append``), or none."""
     try:
-        devices = jax.devices()
-        if devices and hasattr(devices[0], "memory_stats"):
-            stats = devices[0].memory_stats()
-            if stats:
-                peak_allocated = stats.get("peak_bytes_in_use") or stats.get("bytes_in_use")
-                peak_reserved = stats.get("bytes_limit") or stats.get("bytes_reserved")
-    except Exception:
-        pass
-    if peak_allocated is None:
-        try:
-            total_nbytes = sum(getattr(leaf, "nbytes", 0) for leaf in jax.tree.leaves(args))
-            if total_nbytes > 0:
-                peak_allocated = int(total_nbytes)
-                peak_reserved = peak_allocated
-        except Exception:
-            pass
-    return samples, peak_allocated, peak_reserved
+        return list(json.loads(path.read_text()).get("records", []))
+    except (OSError, ValueError, AttributeError):
+        return []
 
 
-def _tf_block(
-    fn: Callable, args: tuple, warmup: int, repeats: int
-) -> tuple[list[float], int | None, int | None]:
-    import tensorflow as tf
-
-    async_wait = getattr(tf.experimental, "async_wait", None)
-
-    def wait():
-        if async_wait:
-            async_wait()
-
-    for _ in range(warmup):
-        fn(*args)
-        wait()
-    samples: list[float] = []
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        fn(*args)
-        wait()
-        samples.append((time.perf_counter_ns() - t0) / 1e6)
-
-    peak_allocated = None
-    peak_reserved = None
-    try:
-        gpus = tf.config.list_logical_devices("GPU")
-        if gpus:
-            info = tf.config.experimental.get_memory_info("GPU:0")
-            peak_allocated = info.get("peak")
-            peak_reserved = info.get("current") or peak_allocated
-    except Exception:
-        pass
-    if peak_allocated is None:
-        try:
-            total_bytes = 0
-            for a in args:
-                if hasattr(a, "numpy"):
-                    total_bytes += a.numpy().nbytes
-            if total_bytes > 0:
-                peak_allocated = int(total_bytes)
-                peak_reserved = peak_allocated
-        except Exception:
-            pass
-    return samples, peak_allocated, peak_reserved
+def _merge_records(previous: list[dict], new: list[dict]) -> list[dict]:
+    """``previous`` with each configuration in ``new`` added or replaced."""
+    merged = {_record_key(r): r for r in previous}
+    for r in new:
+        merged[_record_key(r)] = r
+    return list(merged.values())
 
 
-def _stats(samples: list[float]) -> dict[str, float]:
-    s = sorted(samples)
-    n = len(s)
-    med = median(s)
-    mn = mean(s)
-    sd = stdev(s) if n > 1 else 0.0
-    cv = 100 * sd / mn if mn > 0 else 0.0
-    p95 = s[min(int(0.95 * n), n - 1)]
-    return dict(median=med, mean=mn, stddev=sd, cv=cv, p95=p95)
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """Write ``payload`` to a temporary file and rename it over ``path``.
+
+    A crash or kill mid-write leaves the previous file intact.
+    """
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, path)
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """True for a device allocation failure (PyTorch CUDA/MPS, XLA)."""
+    text = str(exc).lower()
+    return "out of memory" in text or "resource_exhausted" in text or "resource exhausted" in text
+
+
+# Framework allocators hold roughly three times the estimated peak activation
+# footprint (measured: ConvNeXt B=32 holds 6.2 GiB on MPS for a 2.1 GiB estimate).
+_ALLOCATOR_OVERHEAD = 3.0
+
+
+def _device_memory_budget(torch_device: Any) -> int | None:
+    """Bytes a single process can safely allocate on the accelerator, or None."""
+    if importlib.util.find_spec("torch") is None or torch_device is None:
+        return None
+    import torch
+
+    if str(torch_device).startswith("cuda"):
+        return int(torch.cuda.get_device_properties(torch_device).total_memory)
+    if str(torch_device) == "mps":
+        return int(torch.mps.recommended_max_memory())
+    return None
+
+
+def _exceeds_budget(prof: Any, budget: int | None) -> float | None:
+    """Estimated footprint in GiB when it would not fit ``budget``, else None.
+
+    jax-mps never raises an out-of-memory error: an oversized configuration
+    swaps until the OS kills the process, so it has to be skipped up front.
+    """
+    if budget is None or prof.memory is None:
+        return None
+    need = prof.memory.parameter_bytes + prof.memory.conservative_peak_activation_bytes
+    return need / 2**30 if need * _ALLOCATOR_OVERHEAD > budget else None
+
+
+def _release_device_memory() -> None:
+    """Free cached device memory between configurations.
+
+    Without this, the allocator pools of earlier (smaller) configurations stay
+    resident on unified-memory Macs, and the OS kills the process before the
+    framework can raise an out-of-memory error.
+    """
+    import gc
+
+    gc.collect()
+    torch = sys.modules.get("torch")  # only a framework already in use
+    if torch is not None:
+
+        torch._dynamo.reset()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -839,23 +806,30 @@ TF_GPU_BUILDERS = {
 # ---------------------------------------------------------------------------
 
 
-def _detect_jax_gpu() -> tuple[Any | None, str]:
-    """Return (jax.Device, label) for the first available GPU/accelerator."""
+def _detect_jax_gpu(cuda: bool = False) -> tuple[Any | None, str]:
+    """Return (jax.Device, label) for the first available GPU/accelerator.
+
+    Off CUDA, JAX falls back to the CPU (Apple Silicon without a Metal plugin,
+    flagged by _check_jax_mps_driver).  With ``cuda=True`` (a CUDA sweep) it
+    never does: CPU timings bounded by the GPU spec would land in the GPU
+    results, so the device is ``None`` and the label carries the error.
+    """
     try:
         import jax
-
-        # Try GPU/accelerators first: "gpu", "mps", "tpu", fall back to CPU
-        for backend in ("gpu", "mps", "tpu", "cpu"):
-            try:
-                devs = jax.devices(backend)
-                if devs:
-                    dev = devs[0]
-                    return dev, f"{backend}:{dev.id} ({dev.device_kind})"
-            except (RuntimeError, ValueError):
-                pass
-        return None, "cpu-fallback"
     except ImportError:
         return None, "jax-not-installed"
+    backends = ("gpu",) if cuda else ("gpu", "mps", "tpu", "cpu")
+    error = "no devices"
+    for backend in backends:
+        try:
+            devs = jax.devices(backend)
+        except (RuntimeError, ValueError) as exc:
+            error = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            continue
+        if devs:
+            dev = devs[0]
+            return dev, f"{backend}:{dev.id} ({dev.device_kind})"
+    return None, error if cuda else "cpu-fallback"
 
 
 def _detect_tf_gpu() -> tuple[str, str]:
@@ -878,26 +852,14 @@ def _detect_tf_gpu() -> tuple[str, str]:
 
 def _make_gap(
     cost: Any,
-    st: dict,
+    meas: Measurement,
     hardware: HardwareSpec,
     operations: Any = None,
     peak_alloc: int | None = None,
     peak_res: int | None = None,
 ) -> Any:
-    """Build a measurement object compatible with analyze_gap."""
-    meas = Measurement(
-        median_seconds=st["median"] / 1e3,
-        samples_seconds=tuple(s / 1e3 for s in [st["median"]] * 2),
-        peak_memory_bytes=peak_alloc,
-        allocated_memory_bytes=peak_alloc,
-        reserved_memory_bytes=peak_res,
-    )
-    return analyze_gap(
-        cost,
-        meas,
-        hardware,
-        operations=operations,
-    )
+    """Gap analysis of a real ``Measurement`` (peak arguments kept for call-site symmetry)."""
+    return analyze_gap(cost, meas, hardware, operations=operations)
 
 
 def eval_torch_gpu(
@@ -909,6 +871,8 @@ def eval_torch_gpu(
     device_label: str,
     use_fx: bool = True,
     architectures: list[str] | None = None,
+    memory_budget: int | None = None,
+    on_progress: Callable[[list[BenchRecord]], None] | None = None,
 ) -> list[BenchRecord]:
     import torch
 
@@ -927,10 +891,11 @@ def eval_torch_gpu(
 
     active_archs = architectures if architectures is not None else list(TORCH_GPU_BUILDERS.keys())
 
-    for arch in active_archs:
+    for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in TORCH_GPU_BUILDERS:
             continue
         for batch in batches:
+            print(f"  PyTorch GPU {arch} B={batch}…", flush=True)
             try:
                 model, inputs = TORCH_GPU_BUILDERS[arch](batch, torch_device)
             except Exception as exc:
@@ -944,23 +909,24 @@ def eval_torch_gpu(
                 cost = prof.cost
             except Exception:
                 continue
-
-            def _time(fn: Callable, args: tuple) -> tuple[list[float], int | None, int | None]:
-                if is_cuda:
-                    return _cuda_event_block(fn, args, warmup, repeats, torch_device)
-                elif is_mps:
-                    return _mps_block(fn, args, warmup, repeats)
-                else:
-                    return _cpu_block(fn, args, warmup, repeats)
+            need_gib = _exceeds_budget(prof, memory_budget)
+            if need_gib is not None:
+                print(
+                    f"  PyTorch GPU {arch}: skipping B>={batch} "
+                    f"(needs ~{need_gib:.1f} GiB, budget {memory_budget / 2**30:.1f} GiB)"
+                )
+                del model, inputs
+                break
 
 
             # Baseline (eager GPU)
             try:
-                samp, peak_alloc, peak_res = _time(model, inputs)
-                st = _stats(samp)
+                meas = _torch_block(model, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -982,6 +948,11 @@ def eval_torch_gpu(
                 )
             except Exception as exc:
                 print(f"  PyTorch GPU baseline {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  PyTorch GPU {arch}: skipping batches above {batch} (out of memory)")
+                    del model, inputs
+                    _release_device_memory()
+                    break
 
             # Optimised: torch.compile (Inductor backend, GPU)
             try:
@@ -998,11 +969,12 @@ def eval_torch_gpu(
                 else:
                     for _ in range(max(3, warmup)):
                         compiled(*inputs)
-                samp, peak_alloc, peak_res = _time(compiled, inputs)
-                st = _stats(samp)
+                meas = _torch_block(compiled, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1024,6 +996,13 @@ def eval_torch_gpu(
                 )
             except Exception as exc:
                 print(f"  PyTorch GPU compiled {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  PyTorch GPU {arch}: skipping batches above {batch} (out of memory)")
+                    del model, inputs
+                    _release_device_memory()
+                    break
+            del model, inputs
+            _release_device_memory()
 
     return records
 
@@ -1036,18 +1015,23 @@ def eval_jax_gpu(
     jax_device: Any,
     device_label: str,
     architectures: list[str] | None = None,
+    memory_budget: int | None = None,
+    on_progress: Callable[[list[BenchRecord]], None] | None = None,
 ) -> list[BenchRecord]:
     import jax
 
     adapter = JaxAdapter()
     records: list[BenchRecord] = []
+    # jax-mps has no profiler plugin; tracing it only logs errors.
+    trace = getattr(jax_device, "platform", "") != "mps"
 
     active_archs = architectures if architectures is not None else list(JAX_GPU_BUILDERS.keys())
 
-    for arch in active_archs:
+    for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in JAX_GPU_BUILDERS:
             continue
         for batch in batches:
+            print(f"  JAX GPU {arch} B={batch}…", flush=True)
             try:
                 model, inputs = JAX_GPU_BUILDERS[arch](batch, jax_device)
             except Exception as exc:
@@ -1061,18 +1045,26 @@ def eval_jax_gpu(
                 cpu_model, cpu_inputs = JAX_GPU_BUILDERS[arch](batch, jax.devices("cpu")[0])
                 prof = profile_model(cpu_model, cpu_inputs, adapter)
                 cost = prof.cost
-                mem = prof.memory
             except Exception:
                 continue
+            need_gib = _exceeds_budget(prof, memory_budget)
+            if need_gib is not None:
+                print(
+                    f"  JAX GPU {arch}: skipping B>={batch} "
+                    f"(needs ~{need_gib:.1f} GiB, budget {memory_budget / 2**30:.1f} GiB)"
+                )
+                del model, inputs
+                break
 
 
             # Baseline (eager on GPU device)
             try:
-                samp, peak_alloc, peak_res = _jax_block(model, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _jax_block(model, inputs, warmup, repeats, trace_device_time=trace)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1094,6 +1086,9 @@ def eval_jax_gpu(
                 )
             except Exception as exc:
                 print(f"  JAX GPU baseline {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  JAX GPU {arch}: skipping batches above {batch} (out of memory)")
+                    break
 
             # Optimised: jax.jit
             try:
@@ -1105,11 +1100,12 @@ def eval_jax_gpu(
                     if hasattr(leaf, "block_until_ready")
                 ]
                 wait(jit_model(*inputs))
-                samp, peak_alloc, peak_res = _jax_block(jit_model, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _jax_block(jit_model, inputs, warmup, repeats, trace_device_time=trace)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1122,6 +1118,12 @@ def eval_jax_gpu(
                 )
             except Exception as exc:
                 print(f"  JAX GPU jit {arch} B={batch}: {exc}")
+                if _is_out_of_memory(exc):
+                    print(f"  JAX GPU {arch}: skipping batches above {batch} (out of memory)")
+                    break
+            del model, inputs
+            jax.clear_caches()
+            _release_device_memory()
 
     return records
 
@@ -1134,6 +1136,7 @@ def eval_tensorflow_gpu(
     tf_device: str,
     device_label: str,
     architectures: list[str] | None = None,
+    on_progress: Callable[[list[BenchRecord]], None] | None = None,
 ) -> list[BenchRecord]:
     import tensorflow as tf
 
@@ -1142,7 +1145,7 @@ def eval_tensorflow_gpu(
 
     active_archs = architectures if architectures is not None else list(TF_GPU_BUILDERS.keys())
 
-    for arch in active_archs:
+    for arch in _checkpointed(active_archs, records, on_progress):
         if arch not in TF_GPU_BUILDERS:
             continue
         for batch in batches:
@@ -1162,11 +1165,12 @@ def eval_tensorflow_gpu(
 
             # Baseline (eager GPU)
             try:
-                samp, peak_alloc, peak_res = _tf_block(fn, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _tf_block(fn, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1195,11 +1199,12 @@ def eval_tensorflow_gpu(
                 tf_fn = tf.function(fn, jit_compile=True)
                 for _ in range(3):
                     tf_fn(*inputs)
-                samp, peak_alloc, peak_res = _tf_block(tf_fn, inputs, warmup, repeats)
-                st = _stats(samp)
+                meas = _tf_block(tf_fn, inputs, warmup, repeats)
+                st = _stats(meas)
+                peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                 gap = _make_gap(
                     cost,
-                    st,
+                    meas,
                     hardware,
                     operations=prof.operations,
                     peak_alloc=peak_alloc,
@@ -1225,11 +1230,12 @@ def eval_tensorflow_gpu(
                     tf_fn = tf.function(fn, jit_compile=False)
                     for _ in range(3):
                         tf_fn(*inputs)
-                    samp, peak_alloc, peak_res = _tf_block(tf_fn, inputs, warmup, repeats)
-                    st = _stats(samp)
+                    meas = _tf_block(tf_fn, inputs, warmup, repeats)
+                    st = _stats(meas)
+                    peak_alloc, peak_res = meas.peak_memory_bytes, meas.reserved_memory_bytes
                     gap = _make_gap(
                         cost,
-                        st,
+                        meas,
                         hardware,
                         operations=prof.operations,
                         peak_alloc=peak_alloc,
@@ -1269,14 +1275,23 @@ def _check_jax_mps_driver() -> None:
 
     Without a plugin, JAX silently runs on CPU even on MPS-capable machines.
     This function prints a diagnostic so the benchmark output is honest about
-    which device JAX is actually using.
+    which device JAX is actually using.  Off macOS it says nothing: a CUDA
+    sweep skips JAX instead of falling back (see _detect_jax_gpu).
     """
+    if sys.platform != "darwin":
+        return
     try:
         import importlib
 
         import jax
 
-        platforms = [d.platform for d in jax.devices()]
+        try:
+            platforms = [d.platform for d in jax.devices()]
+        except RuntimeError as exc:
+            # A broken plugin (e.g. one built for another jaxlib) fails backend
+            # start-up; report it and let the other frameworks run.
+            print(f"\n  WARNING: JAX could not start its default backend: {exc}\n")
+            return
         if any(p in ("gpu", "tpu", "metal", "mps") for p in platforms):
             return  # JAX has a real accelerator — nothing to do
 
@@ -1481,7 +1496,7 @@ def main() -> None:
         help=(
             "Sweep a fine batch-size grid (1..1024) to find where each architecture "
             "first runs faster on GPU than on CPU.  Reads CPU baseline from "
-            "benchmarks/results/benchmark_data.json if present."
+            "benchmarks/results/<host cpu>/benchmark_data.json if present."
         ),
     )
     parser.add_argument(
@@ -1512,6 +1527,12 @@ def main() -> None:
         "--no-fx",
         action="store_true",
         help="Disable PyTorch FX graph tracing fallback",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: benchmarks/results/<device>/)",
     )
     args = parser.parse_args()
 
@@ -1544,19 +1565,16 @@ def main() -> None:
 
         torch_dev, torch_label = _detect_torch_device(args.device)
         if str(torch_dev).startswith("cuda") and torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(torch_dev)
-            gpu_name = props.name
-            # SM count × 128 CUDA cores/SM (Ampere) × 2 FP32 ops/clock × clock Hz
-            # This is an approximation; --peak-flops can override.
-            clock_hz = props.max_clock_rate * 1000  # kHz → Hz
-            n_sm = props.multi_processor_count
-            peak_flops = n_sm * 128 * 2 * clock_hz
-            mem_bw = props.memory_bandwidth  # bytes/s (PyTorch 2.x)
+            # The library's NVIDIA spec table (datasheet FP32 peak and bandwidth);
+            # an SM-count estimate is wrong for any architecture without 128
+            # FP32 lanes per SM (a T4 would read 2x too fast).
+            gpu_spec, _ = detect_hardware(device=torch_dev)
+            gpu_name = torch.cuda.get_device_name(torch_dev)
+            peak_flops, mem_bw = gpu_spec.peak_flops, gpu_spec.memory_bandwidth
             print(f"  GPU detected: {gpu_name}")
             print(
-                f"  SMs={n_sm}  clock={clock_hz / 1e9:.2f} GHz  "
-                f"est. peak={peak_flops / 1e12:.1f} TFLOP/s  "
-                f"bw={mem_bw / 1e9:.0f} GB/s"
+                f"  peak={peak_flops / 1e12:.1f} TFLOP/s  bw={mem_bw / 1e9:.0f} GB/s"
+                "  (override with --peak-flops / --memory-bandwidth)"
             )
             _configure_cuda_for_benchmark(torch_dev)
         elif str(torch_dev) == "mps":
@@ -1612,6 +1630,35 @@ def main() -> None:
                 f"{r.latency_median_ms:7.2f} ms  {r.roofline_efficiency:.1%}  {r.bottleneck}{extra_str}"
             )
 
+    memory_budget = _device_memory_budget(torch_dev)
+    if memory_budget is not None:
+        print(f"  memory budget {memory_budget / 2**30:.1f} GiB (larger configurations are skipped)")
+
+    # A CUDA card gets its own directory; Apple GPUs share the chip's (the CPU
+    # results for the same chip live there too, which --crossover reads).
+    is_cuda = torch_dev is not None and str(torch_dev).startswith("cuda")
+    run = run_metadata(gpu_name if is_cuda else hardware.name, script="collect_gpu_data.py", torch_device=torch_label)
+    out_path = results_dir(run["device"], args.results_dir) / "benchmark_gpu_data.json"
+    global _CPU_DATA_FILE
+    _CPU_DATA_FILE = RESULTS_ROOT / device_slug(hardware.name) / "benchmark_data.json"
+    # Read before the first partial save overwrites the file.
+    previous = _previous_records(out_path) if args.append else []
+
+    def save(complete: bool, in_progress: list[BenchRecord] = ()) -> dict:
+        """Write every record so far; ``complete`` stays False until the sweep ends.
+
+        Called after each architecture (with the running section's records as
+        ``in_progress``) and each framework, so a crash or an out-of-memory
+        kill loses at most the architecture being measured.
+        """
+        finished = [*all_records, *in_progress]
+        for r in finished:
+            r.git_commit = run["git_commit"]
+        records = _merge_records(previous, [asdict(r) for r in finished])
+        payload = {"run": run, "hardware": hw_meta, "complete": complete, "records": records}
+        _write_json_atomic(out_path, payload)
+        return payload
+
     run_torch = args.framework in ("all", "torch")
     run_jax = args.framework in ("all", "jax")
     run_tf = args.framework in ("all", "tensorflow")
@@ -1628,17 +1675,26 @@ def main() -> None:
             torch_label,
             use_fx=not args.no_fx,
             architectures=active_archs,
+            memory_budget=memory_budget,
+            on_progress=lambda recs: save(complete=False, in_progress=recs),
         )
         all_records.extend(recs)
         _print_recs(recs)
+        _report_missing_device_time("PyTorch", recs)
         print()
+        save(complete=False)
     elif run_torch:
         print("[skip] PyTorch not installed or device unavailable")
 
     # JAX GPU
     if run_jax and importlib.util.find_spec("jax") is not None:
-        jax_dev, jax_label = _detect_jax_gpu()
-        if jax_dev is not None:
+        cuda_run = (torch_dev is not None and str(torch_dev).startswith("cuda")) or str(
+            args.device or ""
+        ).startswith("cuda")
+        jax_dev, jax_label = _detect_jax_gpu(cuda=cuda_run)
+        if jax_dev is None and cuda_run:
+            print(f"[skip] JAX: no CUDA device ({jax_label})")
+        elif jax_dev is not None:
             print(f"── JAX ({jax_label}) ─────────────────────────────────")
             recs = eval_jax_gpu(
                 gpu_hardware,
@@ -1648,10 +1704,15 @@ def main() -> None:
                 jax_dev,
                 jax_label,
                 architectures=active_archs,
+                memory_budget=memory_budget,
+                on_progress=lambda recs: save(complete=False, in_progress=recs),
             )
             all_records.extend(recs)
             _print_recs(recs)
+            if jax_dev.platform != "mps":  # jax-mps is never traced
+                _report_missing_device_time("JAX", recs)
             print()
+            save(complete=False)
         else:
             print("[skip] JAX: no GPU/accelerator device available")
     elif run_jax:
@@ -1660,57 +1721,33 @@ def main() -> None:
     # TensorFlow GPU
     if run_tf and importlib.util.find_spec("tensorflow") is not None:
         tf_dev, tf_label = _detect_tf_gpu()
-        print(f"── TensorFlow ({tf_label}) ─────────────────────────────────")
-        recs = eval_tensorflow_gpu(
-            gpu_hardware,
-            batches,
-            warmup,
-            repeats,
-            tf_dev,
-            tf_label,
-            architectures=active_archs,
-        )
-        all_records.extend(recs)
-        _print_recs(recs)
-        print()
+        if "GPU" not in tf_dev.upper():
+            # A CPU run belongs in collect_data.py; here it would be bounded by
+            # the GPU spec and land in the GPU results.
+            print(f"[skip] TensorFlow: no GPU device ({tf_label})")
+        else:
+            print(f"── TensorFlow ({tf_label}) ─────────────────────────────────")
+            recs = eval_tensorflow_gpu(
+                gpu_hardware,
+                batches,
+                warmup,
+                repeats,
+                tf_dev,
+                tf_label,
+                architectures=active_archs,
+                on_progress=lambda recs: save(complete=False, in_progress=recs),
+            )
+            all_records.extend(recs)
+            _print_recs(recs)
+            _report_missing_device_time("TensorFlow", recs)
+            print()
+            save(complete=False)
     elif run_tf:
         print("[skip] TensorFlow not installed")
 
-    out_dir = Path(__file__).parent / "results"
-    out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "benchmark_gpu_data.json"
-
-    records_to_save: list[dict] = []
-    if args.append and out_path.exists():
-        try:
-            old_payload = json.loads(out_path.read_text())
-            record_map = {
-                (
-                    r.get("framework"),
-                    r.get("variant"),
-                    r.get("architecture"),
-                    r.get("batch"),
-                    r.get("scale", "standard"),
-                ): r
-                for r in old_payload.get("records", [])
-            }
-            for r in all_records:
-                d = asdict(r)
-                k = (
-                    d.get("framework"),
-                    d.get("variant"),
-                    d.get("architecture"),
-                    d.get("batch"),
-                    d.get("scale", "standard"),
-                )
-                record_map[k] = d
-            records_to_save = list(record_map.values())
-        except Exception:
-            records_to_save = [asdict(r) for r in all_records]
-    else:
-        records_to_save = [asdict(r) for r in all_records]
-
-    payload: dict = {"hardware": hw_meta, "records": records_to_save}
+    payload = save(complete=False)
+    payload["complete"] = True
+    records_to_save = payload["records"]
 
     # ------------------------------------------------------------------
     # Crossover analysis: compare GPU latencies to CPU baseline
@@ -1727,7 +1764,7 @@ def main() -> None:
                 "  Run `python benchmarks/collect_data.py` first to generate it.\n"
             )
 
-    out_path.write_text(json.dumps(payload, indent=2))
+    _write_json_atomic(out_path, payload)
     print(f"\nSaved {len(records_to_save)} records → {out_path}")
 
 

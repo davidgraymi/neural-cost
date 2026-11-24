@@ -1,16 +1,17 @@
 """Generate figures and a markdown GPU benchmark report from benchmark_gpu_data.json.
 
 Usage:
-    python benchmarks/generate_gpu_report.py
+    python benchmarks/generate_gpu_report.py [--results-dir benchmarks/results/<device>]
 
-Reads:   benchmarks/results/benchmark_gpu_data.json
-Writes:  benchmarks/results/figures/gpu_*.png
-         GPU_BENCHMARK_REPORT.md  (repo root)
+Reads:   <results-dir>/benchmark_gpu_data.json  (default: the most recently written one)
+Writes:  <results-dir>/figures/gpu_*.png
+         <results-dir>/GPU_BENCHMARK_REPORT.md
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 import math
 from pathlib import Path
 
@@ -25,10 +26,37 @@ import numpy as np
 # Paths
 # ---------------------------------------------------------------------------
 REPO_ROOT   = Path(__file__).parent.parent
+# Set by configure() from --results-dir: benchmarks/results/<device>/.  Until
+# then (when imported, e.g. by tests) figures go to a scratch directory.
 DATA_FILE   = REPO_ROOT / "benchmarks" / "results" / "benchmark_gpu_data.json"
-FIG_DIR     = REPO_ROOT / "benchmarks" / "results" / "figures"
-REPORT_FILE = REPO_ROOT / "GPU_BENCHMARK_REPORT.md"
+FIG_DIR   = Path(tempfile.gettempdir()) / "neural-cost-figures"
+REPORT_FILE = FIG_DIR / "GPU_BENCHMARK_REPORT.md"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def configure(results_dir: Path | None) -> None:
+    """Point every input and output at one per-device results directory."""
+    import sys
+
+    global DATA_FILE, FIG_DIR, REPORT_FILE
+    sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks.run_info import latest_results_dir
+
+    root = results_dir if results_dir is not None else latest_results_dir("benchmark_gpu_data.json")
+    DATA_FILE = root / "benchmark_gpu_data.json"
+    FIG_DIR = root / "figures"
+    REPORT_FILE = root / "GPU_BENCHMARK_REPORT.md"
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def provenance(path: Path) -> str:
+    """Report line naming the version, commit and device that produced ``path``."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks.run_info import describe_run
+
+    return f"> **Run:** {describe_run(json.loads(path.read_text()).get('run'))}\n"
 
 # ---------------------------------------------------------------------------
 # Style
@@ -85,6 +113,69 @@ VAR_ALPHA = {
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
+
+def gpu_backend(hw: dict) -> str:
+    """The run's GPU backend: ``"cuda"``, ``"mps"`` or ``"cpu"`` (no GPU found)."""
+    label = str(hw.get("torch_device") or hw.get("timing_device") or "").lower()
+    if label.startswith("cuda"):
+        return "cuda"
+    if label.startswith("mps"):
+        return "mps"
+    if label.startswith("cpu"):
+        return "cpu"
+    name = str(hw.get("name", "")).lower()
+    if "apple" in name:
+        return "mps"
+    return "cuda" if any(t in name for t in ("nvidia", "tesla", "geforce", "rtx")) else "cpu"
+
+
+# Per-backend wording of the methodology section: (sync note, variants table, warmup note).
+_BACKEND_METHODOLOGY: dict[str, tuple[str, str, str]] = {
+    "cuda": (
+        "On CUDA, each sample waits for the device (`torch.cuda.synchronize()`, "
+        "`jax.Array.block_until_ready()`, TensorFlow's device sync) so the host clock covers "
+        "all queued kernels.",
+        "| **PyTorch** | Eager GPU (`cuda`) | `torch.compile()` | PyTorch CUDA backend with Inductor compilation |\n"
+        "| **JAX** | Eager XLA GPU (`cuda`) | `jax.jit()` | JAX CUDA plugin (`jax-cuda*-plugin`) with whole-graph XLA JIT |\n"
+        "| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow CUDA graph execution with XLA compilation |",
+        "full compilation, cache warm, CUDA context and cuDNN/cuBLAS autotuning",
+    ),
+    "mps": (
+        "On Apple Silicon MPS, synchronous timing barriers (`torch.mps.synchronize()`, "
+        "`jax.block_until_ready()`, and `tf.experimental.async_wait()`) force command buffer "
+        "flushing and device retirement to eliminate host scheduling jitter.",
+        "| **PyTorch** | Eager GPU (`mps`) | `torch.compile()` | PyTorch MPS backend with Inductor compilation |\n"
+        "| **JAX** | Eager XLA GPU (`mps`) | `jax.jit()` | `jax-mps` MLX-backed Metal plugin with whole-graph XLA JIT |\n"
+        "| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |",
+        "full compilation, cache warm, Metal kernel pipeline initialization",
+    ),
+    "cpu": (
+        "No GPU was found, so every framework ran on the CPU; synchronisation barriers are no-ops.",
+        "| **PyTorch** | Eager (`cpu`) | `torch.compile()` | PyTorch CPU backend with Inductor compilation |\n"
+        "| **JAX** | Eager XLA (`cpu`) | `jax.jit()` | XLA CPU backend with whole-graph JIT |\n"
+        "| **TensorFlow** | Eager | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |",
+        "full compilation and cache warm",
+    ),
+}
+
+
+def partial_run_warning(payload: dict) -> str:
+    """A warning block for a sweep that stopped before it finished, else ``""``.
+
+    ``collect_gpu_data.py`` saves after every architecture with
+    ``"complete": false`` and sets it to true only at the end; files written
+    before that flag existed have no key and count as complete.
+    """
+    if payload.get("complete", True):
+        return ""
+    frameworks = sorted({r.get("framework", "?") for r in payload.get("records", [])})
+    return (
+        "> [!WARNING]\n"
+        "> **Partial run:** the sweep stopped before it finished (crash, kill or out of memory). "
+        f"This report covers only the {len(payload.get('records', []))} configurations saved "
+        f"before that ({', '.join(frameworks) or 'none'}).\n\n"
+    )
+
 
 def load(path: Path) -> tuple[dict, list[dict]]:
     raw = json.loads(path.read_text())
@@ -544,7 +635,7 @@ def fig_framework_comparison(hw: dict, records: list[dict]) -> Path:
     ax.set_xticklabels(ARCHS)
     ax.set_ylabel("Speedup over PyTorch (T_PyTorch / T_JAX)")
     ax.set_title(
-        f"JAX (JIT) vs PyTorch (Compiled) Head-to-Head Speedup on Apple Silicon GPU\n{hw['name']}  ·  batch={ref_batch}  (Values > 1.0× indicate JAX is faster)",
+        f"JAX (JIT) vs PyTorch (Compiled) Head-to-Head Speedup\n{hw['name']}  ·  batch={ref_batch}  (Values > 1.0× indicate JAX is faster)",
         fontweight="bold",
     )
     legend_elements = [
@@ -730,7 +821,7 @@ def fig_gpu_memory(hw: dict, records: list[dict]) -> Path | None:
 def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None],
                  crossover: dict | None = None) -> str:
     def rel(p: Path) -> str:
-        return str(p.relative_to(REPO_ROOT))
+        return str(p.relative_to(REPORT_FILE.parent))
 
     batches = sorted({r["batch"] for r in records})
     ref_batch = 32 if 32 in batches else batches[len(batches) // 2]
@@ -904,6 +995,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
 
     ridge = hw["ridge_point"]
     tf_device = hw.get("torch_device", hw["name"])
+    sync_note, variants_table, warmup_note = _BACKEND_METHODOLOGY[gpu_backend(hw)]
 
     md = f"""# Neural-Cost GPU Benchmark Report
 
@@ -925,9 +1017,7 @@ def build_report(hw: dict, records: list[dict], fig_paths: dict[str, Path | None
 | **JAX** | `time.perf_counter_ns` | `jax.Array.block_until_ready()` |
 | **TensorFlow** | `time.perf_counter_ns` | `tf.experimental.async_wait()` |
 
-CUDA event timing measures only GPU kernel execution time on CUDA devices. On Apple Silicon MPS,
-synchronous timing barriers (`torch.mps.synchronize()`, `jax.block_until_ready()`, and `tf.experimental.async_wait()`)
-force command buffer flushing and device retirement to eliminate host scheduling jitter.
+{sync_note}
 
 ### Architectures under test
 
@@ -937,13 +1027,11 @@ force command buffer flushing and device retirement to eliminate host scheduling
 
 | Framework | Baseline | Optimised | Notes |
 |---|---|---|---|
-| **PyTorch** | Eager GPU (`mps`) | `torch.compile()` | PyTorch MPS backend with Inductor compilation |
-| **JAX** | Eager XLA GPU (`mps`) | `jax.jit()` | `jax-mps` MLX-backed Metal plugin with whole-graph XLA JIT |
-| **TensorFlow** | Eager GPU | `tf.function(jit_compile=True)` | TensorFlow graph execution with XLA compilation |
+{variants_table}
 
 ### Measurement protocol
 
-- **Warmup:** {hw.get('warmup', 15)} iterations (full compilation, cache warm, Metal kernel pipeline initialization)
+- **Warmup:** {hw.get('warmup', 15)} iterations ({warmup_note})
 - **Timed repeats:** {hw.get('repeats', 40)} samples per configuration
 - **Statistics reported:** median, mean, σ (stddev), CV%, p95
 - **Roofline efficiency:** `min(1, lower_bound / observed)`
@@ -1239,6 +1327,16 @@ Empirical memory telemetry measured from framework device allocators compared ag
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="benchmarks/results/<device>/ to read and write (default: most recent)",
+    )
+    configure(parser.parse_args().results_dir)
     print(f"Loading GPU data from {DATA_FILE}…")
     hw, records = load(DATA_FILE)
     print(f"  {len(records)} records  ·  {hw['name']}")
@@ -1275,7 +1373,10 @@ def main() -> None:
 
     print("Building GPU report…")
     report = build_report(hw, records, fig_paths, crossover=crossover)
-    REPORT_FILE.write_text(report)
+    title, _, body = report.partition("\n")
+    REPORT_FILE.write_text(
+        f"{title}\n\n{partial_run_warning(raw_json)}{provenance(DATA_FILE)}{body}"
+    )
     print(f"  Report written → {REPORT_FILE}")
 
 

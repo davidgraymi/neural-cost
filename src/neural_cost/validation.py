@@ -92,19 +92,45 @@ class ValidationCase:
         memory = estimate_memory(operations)
         working_set = memory.parameter_bytes + 2 * memory.minimum_peak_activation_bytes
         resident = hardware.find_resident_cache(working_set) if cache_aware else None
-        bandwidth = resident.bandwidth if resident is not None else hardware.memory_bandwidth
+        # A working set slightly larger than the last-level cache still keeps
+        # up to its capacity on chip between calls, so only the excess must
+        # come from DRAM (measured: a 134 MB CPU MLP beat the all-DRAM bound
+        # with a 38 MB L3).
+        spill_cache = (
+            max(hardware.caches, key=lambda c: c.capacity)
+            if cache_aware and resident is None and hardware.caches
+            else None
+        )
+
+        def traffic_seconds(nbytes: float) -> float:
+            if resident is not None:
+                return nbytes / resident.bandwidth
+            if spill_cache is None:
+                return nbytes / hardware.memory_bandwidth
+            cached = min(nbytes, spill_cache.capacity)
+            # Both levels stream at once: the slower of the two bounds the time.
+            return max(
+                (nbytes - cached) / hardware.memory_bandwidth, cached / spill_cache.bandwidth
+            )
+
         if fused:
             nbytes = estimate_fused_operations(operations).total_bytes
-            bound = max(total.flops / hardware.peak_flops, nbytes / bandwidth)
+            bound = max(total.flops / hardware.peak_flops, traffic_seconds(nbytes))
         else:
             nbytes = total.total_bytes
             bound = sum(
-                max(c.flops / hardware.peak_flops, c.total_bytes / bandwidth) for c in costs
+                max(c.flops / hardware.peak_flops, traffic_seconds(c.total_bytes)) for c in costs
             )
+        if resident is not None:
+            level = resident.name
+        elif spill_cache is not None:
+            level = f"DRAM (beyond {spill_cache.name})"
+        else:
+            level = "DRAM"
         metadata = {
             **(metadata or {}),
             "working_set_bytes": working_set,
-            "bound_memory_level": resident.name if resident is not None else "DRAM",
+            "bound_memory_level": level,
         }
         kernel_count = total.operations if kernels is None else kernels
         calibrated = None

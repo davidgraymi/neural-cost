@@ -11,6 +11,7 @@ OperationKind = Literal[
     "matmul",
     "linear",
     "conv2d",
+    "conv",
     "elementwise",
     "custom",
     "softmax",

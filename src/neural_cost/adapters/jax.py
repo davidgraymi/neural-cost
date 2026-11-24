@@ -10,6 +10,7 @@ from typing import Any
 from ..coverage import Coverage
 from ..operations import Operation, numel
 from ..profiler import Measurement
+from ..xspace import warn_no_device_time as _warn_no_device_time
 from .base import FrameworkAdapter
 
 # Primitives that only change layout or precision: a parameter stays a parameter.
@@ -330,6 +331,10 @@ class JaxAdapter(FrameworkAdapter):
     ``parameter_argnums`` selects which positional arguments hold weights.
     By default every argument after the first is treated as a parameter,
     together with any arrays closed over by the traced function.
+
+    On accelerators :meth:`benchmark` runs a second, separate pass under
+    ``jax.profiler`` to report device busy time; ``trace_device_time=False``
+    skips it.
     """
 
     name = "jax"
@@ -340,7 +345,9 @@ class JaxAdapter(FrameworkAdapter):
         *,
         trip_counts: Mapping[int, int] | None = None,
         default_trip_count: int | None = None,
+        trace_device_time: bool = True,
     ) -> None:
+        self.trace_device_time = trace_device_time
         self.parameter_argnums = tuple(parameter_argnums) if parameter_argnums is not None else None
         self.trip_counts = dict(trip_counts or {})
         if any(count < 0 for count in self.trip_counts.values()):
@@ -505,7 +512,7 @@ class JaxAdapter(FrameworkAdapter):
             )
         elif primitive == "conv_general_dilated" and len(input_shapes) == 2:
             lhs, rhs = input_shapes
-            if len(lhs) != 4 or len(rhs) != 4 or len(output_shape) != 4:
+            if not 3 <= len(lhs) <= 5 or len(rhs) != len(lhs) or len(output_shape) != len(lhs):
                 return None
             numbers = equation.params.get("dimension_numbers")
             if numbers is not None and hasattr(numbers, "lhs_spec"):
@@ -516,12 +523,17 @@ class JaxAdapter(FrameworkAdapter):
                 out = output_shape
             attrs = dict(base_attrs)
             attrs["groups"] = int(equation.params.get("feature_group_count", 1))
+            # ``lax.conv_transpose`` dilates the input with zeros; multiplying
+            # those zeros is not useful work, so model it as a transposed conv.
+            lhs_dilation = equation.params.get("lhs_dilation") or ()
+            transposed = any(int(step) > 1 for step in lhs_dilation)
+            if transposed:
+                attrs["transposed"] = True
             entry = param_vars.get(id(equation.invars[1]))
             if entry is not None:
                 attrs["parameter_id"], attrs["parameter_bytes"] = entry
-            operations.append(
-                Operation(f"conv_{index}", "conv2d", (lhs, rhs), out, dtype_bytes, attrs)
-            )
+            kind = "conv2d" if len(lhs) == 4 and not transposed else "conv"
+            operations.append(Operation(f"conv_{index}", kind, (lhs, rhs), out, dtype_bytes, attrs))
         elif primitive in {"gather", "dynamic_slice", "slice"}:
             operand = input_shapes[0] if input_shapes else output_shape
             indices = input_shapes[1] if primitive == "gather" and len(input_shapes) > 1 else ()
@@ -568,24 +580,32 @@ class JaxAdapter(FrameworkAdapter):
             q, k = input_shapes[0], input_shapes[1]
             if len(q) != 4 or len(k) != 4:
                 return None
-            batch, heads, q_len, head_dim = q
+            _, heads, q_len, head_dim = q
             kv_len = k[2]
             attrs = dict(base_attrs)
-            name = f"{primitive}_{index}"
-            if q_len == kv_len:
-                attrs.update(
-                    num_heads=heads, seq_len=q_len, head_dim=head_dim, include_projections=0
+            attrs.update(
+                num_heads=heads,
+                seq_len=q_len,
+                kv_len=kv_len,
+                head_dim=head_dim,
+                include_projections=0,
+            )
+            params = equation.params
+            if any(bool(params.get(flag)) for flag in ("is_causal", "causal")):
+                attrs["causal"] = True
+                window = params.get("sliding_window_length") or params.get("window")
+                if isinstance(window, int) and window > 0:
+                    attrs["window"] = window
+            operations.append(
+                Operation(
+                    f"{primitive}_{index}",
+                    "attention",
+                    input_shapes[:3],
+                    output_shape,
+                    dtype_bytes,
+                    attrs,
                 )
-                operations.append(
-                    Operation(name, "attention", input_shapes[:3], output_shape, dtype_bytes, attrs)
-                )
-            else:
-                # QKᵀ and AV (2 FLOP per MAC each) plus a 5-FLOP softmax per score.
-                scores = batch * heads * q_len * kv_len
-                attrs["flops"] = 4 * scores * head_dim + 5 * scores
-                operations.append(
-                    Operation(name, "custom", input_shapes[:3], output_shape, dtype_bytes, attrs)
-                )
+            )
         elif primitive in _DATA_MOVEMENT_PRIMITIVES:
             attrs = dict(base_attrs)
             attrs["flops_per_element"] = 0
@@ -701,50 +721,171 @@ class JaxAdapter(FrameworkAdapter):
         return result
 
     def benchmark(
-        self, function: Any, *args: Any, warmup: int = 3, repeats: int = 10, **kwargs: Any
+        self,
+        function: Any,
+        *args: Any,
+        warmup: int = 3,
+        repeats: int = 10,
+        min_sample_seconds: float | None = None,
+        **kwargs: Any,
     ) -> Measurement:
-        """Benchmark a JAX function while waiting for dispatched device work."""
+        """Benchmark a JAX function while waiting for dispatched device work.
+
+        ``min_sample_seconds`` batches short calls into longer samples (see
+        :func:`neural_cost.profiler.timed_samples`).
+
+        Every sample blocks on all output leaves, so asynchronous dispatch
+        cannot end the clock early.  Memory comes from the device allocator
+        when it exposes statistics (GPU, TPU).  Its peak counter cannot be
+        reset, so it is reported only when the timed run raised it; otherwise,
+        and on backends without statistics (CPU), the peak of a jitted
+        function is taken from XLA's compiled memory plan.
+        """
         try:
             import jax
         except ImportError as error:  # pragma: no cover - optional package
             raise ImportError("Install neural-cost[jax] to use JaxAdapter") from error
 
-        def wait(value: Any) -> None:
-            for leaf in jax.tree.leaves(value):
-                if hasattr(leaf, "block_until_ready"):
-                    leaf.block_until_ready()
-
         if warmup < 0 or repeats < 1:
             raise ValueError("warmup must be non-negative and repeats must be at least one")
+        output = None
         for _ in range(warmup):
-            wait(function(*args, **kwargs))
-        samples = []
-        for _ in range(repeats):
-            start = perf_counter_ns()
-            wait(function(*args, **kwargs))
-            samples.append((perf_counter_ns() - start) / 1_000_000_000)
-        # The first array leaf in the arguments (e.g. inside a Flax variables dict).
-        first = next((leaf for leaf in jax.tree.leaves(args) if hasattr(leaf, "device")), None)
-        device = str(first.device) if first is not None else None
-        peak = None
-        allocated = None
-        reserved = None
-        if first is not None:
-            dev = first.device
-            if hasattr(dev, "memory_stats") and callable(dev.memory_stats):
-                try:
-                    stats = dev.memory_stats()
-                    if stats:
-                        peak = stats.get("peak_bytes_in_use")
-                        allocated = stats.get("bytes_in_use")
-                        reserved = stats.get("bytes_limit") or stats.get("bytes_reserved")
-                except (AttributeError, RuntimeError, ValueError):
-                    stats = None
+            output = _block(jax, function(*args, **kwargs))
+        dev = _first_device(jax, (args, kwargs)) or _first_device(jax, output)
+        before = _allocator_stats(dev)
+        from ..profiler import timed_samples
+
+        last: list[Any] = [output]
+
+        def call() -> Any:
+            last[0] = function(*args, **kwargs)
+            return last[0]
+
+        samples, calls, overhead = timed_samples(
+            call,
+            lambda value: _block(jax, value),
+            warmup=0,
+            repeats=repeats,
+            min_sample_seconds=min_sample_seconds,
+        )
+        output = last[0]
+        if dev is None:
+            dev = _first_device(jax, output)
+        after = _allocator_stats(dev)
+        peak = allocated = reserved = None
+        if after:
+            allocated = after.get("bytes_in_use")
+            # Memory the allocator holds from the device, not its capacity limit.
+            reserved = _first_stat(after, "pool_bytes", "bytes_reserved")
+            raised = (before or {}).get("peak_bytes_in_use", -1) < after.get(
+                "peak_bytes_in_use", -1
+            )
+            if raised:
+                peak = after.get("peak_bytes_in_use")
+        if peak is None:
+            peak = compiled_peak_bytes(function, *args, **kwargs)
+        traced = None
+        platform = str(getattr(dev, "platform", "cpu")).lower()
+        if getattr(self, "trace_device_time", True) and platform != "cpu":
+            traced = _profile_device_time(jax, function, args, kwargs, repeats)
         return Measurement(
             median(samples),
             tuple(samples),
             peak_memory_bytes=peak,
-            device=device,
+            device=str(dev) if dev is not None else None,
             allocated_memory_bytes=allocated,
             reserved_memory_bytes=reserved,
+            trace_event_count=traced.event_count if traced else None,
+            trace_device_time_seconds=traced.total_seconds if traced else None,
+            calls_per_sample=calls,
+            sync_overhead_seconds=overhead,
         )
+
+
+def _block(jax: Any, value: Any) -> Any:
+    """Wait for every array in ``value`` to finish computing."""
+    for leaf in jax.tree.leaves(value):
+        if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
+    return value
+
+
+def _first_device(jax: Any, tree: Any) -> Any:
+    """Device of the first single-device array in ``tree`` (e.g. inside a Flax dict)."""
+    for leaf in jax.tree.leaves(tree):
+        devices = getattr(leaf, "devices", None)
+        if callable(devices):
+            try:
+                found = devices()
+            except (AttributeError, RuntimeError, ValueError):
+                continue
+            if len(found) == 1:
+                return next(iter(found))
+    return None
+
+
+def _allocator_stats(device: Any) -> dict[str, int] | None:
+    """The device allocator's counters, or ``None`` where the backend has none."""
+    stats_method = getattr(device, "memory_stats", None)
+    if not callable(stats_method):
+        return None
+    try:
+        return stats_method() or None
+    except (AttributeError, RuntimeError, ValueError, NotImplementedError):
+        return None
+
+
+def _first_stat(stats: dict[str, int], *keys: str) -> int | None:
+    return next((stats[key] for key in keys if stats.get(key) is not None), None)
+
+
+def compiled_peak_bytes(function: Any, *args: Any, **kwargs: Any) -> int | None:
+    """Peak device bytes XLA plans for one call of a jitted ``function``.
+
+    Sums the compiled program's arguments, outputs and temporaries, minus
+    outputs that alias (donate) an argument buffer.  Returns ``None`` when
+    ``function`` is not jitted or the backend gives no memory analysis.
+    """
+    lower = getattr(function, "lower", None)
+    if not callable(lower):
+        return None
+    try:
+        stats = lower(*args, **kwargs).compile().memory_analysis()
+    except Exception:  # noqa: BLE001 - any lowering/compile failure means "unknown"
+        return None
+    if stats is None:
+        return None
+    total = (
+        stats.argument_size_in_bytes
+        + stats.output_size_in_bytes
+        + stats.temp_size_in_bytes
+        - stats.alias_size_in_bytes
+    )
+    return int(total) if total > 0 else None
+
+
+def _profile_device_time(
+    jax: Any, function: Any, args: Sequence[Any], kwargs: dict[str, Any], repeats: int
+) -> Any:
+    """Device busy time over ``repeats`` calls, from a ``jax.profiler`` trace.
+
+    Runs after the timed loop so profiler overhead never reaches the samples.
+    Returns ``None`` when tracing fails (for example another trace is active)
+    or the trace has no accelerator timeline.
+    """
+    import tempfile
+
+    from ..xspace import read_trace_dir
+
+    with tempfile.TemporaryDirectory() as log_dir:
+        try:
+            with jax.profiler.trace(log_dir):
+                for _ in range(repeats):
+                    _block(jax, function(*args, **kwargs))
+        except (RuntimeError, ValueError) as error:
+            _warn_no_device_time("JAX", f"jax.profiler.trace failed: {error}")
+            return None
+        traced = read_trace_dir(log_dir, parser="jax")
+        if traced is None:
+            _warn_no_device_time("JAX", "the profiler trace has no device timeline")
+        return traced

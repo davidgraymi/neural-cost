@@ -30,11 +30,19 @@ class FrameworkAdapter(ABC):
         *args: Any,
         warmup: int = 3,
         repeats: int = 10,
+        min_sample_seconds: float | None = None,
         **kwargs: Any,
     ) -> Measurement:
         from ..profiler import benchmark
 
-        return benchmark(function, *args, warmup=warmup, repeats=repeats, **kwargs)
+        return benchmark(
+            function,
+            *args,
+            warmup=warmup,
+            repeats=repeats,
+            min_sample_seconds=min_sample_seconds,
+            **kwargs,
+        )
 
     def profile(
         self,

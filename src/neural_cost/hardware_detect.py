@@ -8,7 +8,9 @@ populated with values derived from:
 2. ``system_profiler SPHardwareDataType`` on macOS to identify Apple Silicon
    chips and look up their published peak FP32 compute throughput.
 3. ``nvidia-smi`` on systems with NVIDIA GPUs (CUDA peak FLOPs).
-4. Sensible CPU-level fallbacks (logical cores × clock × scalar FMA factor).
+4. CPU fallbacks: logical cores × clock × the FP32 FLOP/cycle of the widest
+   SIMD unit the CPU reports (AVX-512, AVX2+FMA, AVX, SSE2, NEON, SVE), read
+   from ``/proc/cpuinfo`` on Linux and ``sysctl machdep.cpu`` on Intel macOS.
 
 Pass ``device=`` (a string such as ``"cpu"``/``"gpu"``, or a framework device
 object such as ``jax.devices()[0]`` or ``torch.device("mps")``) to describe the
@@ -163,15 +165,23 @@ def normalize_device_type(device: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _measure_bandwidth_gb_s(size_mb: int = 256, repeats: int = 5) -> float | None:
-    """Return effective memory bandwidth in GB/s via a NumPy array copy.
+def _measure_bandwidth_gb_s(
+    size_mb: int = 256, repeats: int = 5, threads: int | None = None
+) -> float | None:
+    """Return effective memory bandwidth in GB/s from a NumPy STREAM triad.
 
-    Uses a *STREAM Triad*-style kernel (c = a + scalar * b) over a buffer
-    large enough to exceed typical L3 caches, measured with
-    :func:`time.perf_counter_ns`.  Returns ``None`` when NumPy (an optional
-    dependency) is not installed.
+    Runs ``c = a + scalar * b`` over float64 buffers large enough to exceed
+    typical L3 caches.  Each thread owns a slice and works through it in
+    cache-sized blocks (``c = scalar * b`` then ``c += a``), so ``c`` stays in
+    cache between the two passes and no temporary is allocated: DRAM traffic
+    is the triad's three arrays.  ``threads`` defaults to ``os.cpu_count()``
+    (NumPy releases the GIL), since one core cannot saturate a server's memory
+    controllers and the bound must hold for multi-threaded BLAS.  Returns
+    ``None`` when NumPy (an optional dependency) is not installed.
     """
+    import os
     import time
+    from concurrent.futures import ThreadPoolExecutor
 
     try:
         import numpy as np
@@ -179,23 +189,33 @@ def _measure_bandwidth_gb_s(size_mb: int = 256, repeats: int = 5) -> float | Non
         return None
 
     n = (size_mb * 1024 * 1024) // 8  # float64 elements
-    a = np.random.rand(n).astype(np.float64)
-    b = np.random.rand(n).astype(np.float64)
-    c = np.empty_like(a)
+    a = np.random.rand(n)
+    b = np.random.rand(n)
+    c = np.empty_like(a)  # random.rand already touched a and b; warmup touches c
     scalar = 3.0
+    block = 1 << 17  # 1 MiB of float64 per array: three blocks fit any L2
+    workers = max(1, threads or os.cpu_count() or 1)
+    edges = [n * k // workers for k in range(workers + 1)]
 
-    # Warmup
-    np.add(a, b, out=c)
-    np.add(a, b, out=c)
+    def triad(lo: int, hi: int) -> None:
+        for start in range(lo, hi, block):
+            stop = min(start + block, hi)
+            out = c[start:stop]
+            np.multiply(b[start:stop], scalar, out=out)
+            np.add(out, a[start:stop], out=out)
 
-    samples: list[float] = []
     bytes_moved = 3 * a.nbytes  # read a, read b, write c
+    samples: list[float] = []
+    with ThreadPoolExecutor(workers) as pool:
 
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        np.add(a * scalar, b, out=c)
-        elapsed = (time.perf_counter_ns() - t0) / 1e9
-        samples.append(bytes_moved / elapsed / 1e9)
+        def run() -> float:
+            t0 = time.perf_counter_ns()
+            list(pool.map(triad, edges[:-1], edges[1:]))
+            return (time.perf_counter_ns() - t0) / 1e9
+
+        run()  # warmup: page in c, start the threads
+        for _ in range(repeats):
+            samples.append(bytes_moved / run() / 1e9)
 
     samples.sort()
     # Use the median of the top half to reduce OS scheduling noise.
@@ -238,7 +258,11 @@ def _probe_apple_silicon() -> tuple[str | None, float | None, float | None, tupl
         return chip_raw, None, None, ()
 
     tflops, bw, caches = _APPLE_CHIP_TABLE[matched_key]
-    cores_match = re.search(r"Total Number of Cores:\s+(\d+)", out)
+    # SPHardwareDataType also has a "Total Number of Cores" line, for the CPU
+    # ("8 (4 Performance and 4 Efficiency)"): read the GPU's from the
+    # Graphics/Displays section only.
+    _, found, graphics = out.partition("Graphics/Displays:")
+    cores_match = re.search(r"Total Number of Cores:\s+(\d+)", graphics) if found else None
     if cores_match:
         gpu_cores = int(cores_match.group(1))
         reference = _APPLE_GPU_CORES.get(matched_key)
@@ -315,14 +339,20 @@ def _probe_nvidia(
 
 # Apple Silicon CPU clocks (P-core, E-core) per generation.  Each P-core issues
 # four 128-bit FP32 FMAs per cycle (32 FLOP/cycle) and each E-core two
-# (16 FLOP/cycle).  This is the NEON peak an XLA/Eigen CPU backend can reach;
-# Accelerate's AMX matmul units are not counted.
+# (16 FLOP/cycle): the NEON peak an XLA/Eigen CPU backend can reach.
+# Accelerate (PyTorch's CPU BLAS on macOS) also drives the matrix coprocessor
+# (AMX, SME on M4) that each CPU cluster shares, so the CPU peak is whichever
+# of the two is higher.
 _APPLE_CPU_CLOCKS: dict[str, tuple[float, float]] = {
     "M1": (3.2e9, 2.06e9),
     "M2": (3.5e9, 2.42e9),
     "M3": (4.05e9, 2.75e9),
     "M4": (4.4e9, 2.9e9),
 }
+
+# FP32 FLOP/cycle of one cluster's matrix coprocessor: a 16x16 FP32 outer-product
+# FMA per cycle (512 FLOP) on a P-cluster; E-clusters carry a quarter-rate unit.
+_APPLE_AMX_FLOP_PER_CYCLE = (512.0, 128.0)
 
 
 def _sysctl_int(key: str) -> int | None:
@@ -338,7 +368,7 @@ def _sysctl_int(key: str) -> int | None:
 
 
 def _apple_cpu_peak_flops(chip_name: str | None) -> float | None:
-    """FP32 NEON peak of an Apple Silicon CPU complex, or ``None`` if unknown."""
+    """FP32 peak of an Apple Silicon CPU complex (NEON or AMX), or ``None`` if unknown."""
     if not chip_name:
         return None
     match = re.search(r"\b(M\d+)\b", chip_name)
@@ -349,7 +379,106 @@ def _apple_cpu_peak_flops(chip_name: str | None) -> float | None:
     if not p_cores:
         return None
     p_clock, e_clock = _APPLE_CPU_CLOCKS[match.group(1)]
-    return p_cores * p_clock * 32.0 + e_cores * e_clock * 16.0
+    neon = p_cores * p_clock * 32.0 + e_cores * e_clock * 16.0
+    p_clusters = _clusters(p_cores, _sysctl_int("hw.perflevel0.cpusperl2"))
+    e_clusters = _clusters(e_cores, _sysctl_int("hw.perflevel1.cpusperl2"))
+    p_amx, e_amx = _APPLE_AMX_FLOP_PER_CYCLE
+    amx = p_clusters * p_clock * p_amx + e_clusters * e_clock * e_amx
+    return max(neon, amx)
+
+
+def _clusters(cores: int, cores_per_cluster: int | None) -> int:
+    """Number of CPU clusters (cores sharing an L2 and a matrix unit)."""
+    if cores <= 0:
+        return 0
+    if not cores_per_cluster:
+        return 1
+    return -(-cores // cores_per_cluster)
+
+
+# FP32 FLOP per cycle per core for each SIMD level, assuming two vector FMA (or
+# add + multiply) pipes per core: a datasheet-style upper bound, so a roofline
+# lower bound built on it holds even for hand-tuned BLAS.
+_X86_SIMD_FLOP_PER_CYCLE: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("AVX-512", ("avx512f",), 64.0),  # 2 x 512-bit FMA: 2 x 16 lanes x 2
+    ("AVX2+FMA", ("avx2", "fma"), 32.0),  # 2 x 256-bit FMA
+    ("AVX", ("avx",), 16.0),  # 256-bit add + 256-bit multiply
+    ("SSE2", ("sse2",), 8.0),  # 128-bit add + 128-bit multiply
+)
+_ARM_SIMD_FLOP_PER_CYCLE: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("SVE", ("sve",), 32.0),  # up to 2 x 256-bit FMA (Neoverse V1)
+    ("NEON", ("asimd",), 16.0),  # 2 x 128-bit FMA
+)
+_SCALAR_FLOP_PER_CYCLE = 2.0  # one scalar FP32 FMA
+
+
+@dataclass(frozen=True)
+class CpuInfo:
+    """CPU model name and its widest SIMD unit, as reported by the OS."""
+
+    name: str | None
+    simd: str
+    flop_per_cycle: float  # FP32 FLOP per cycle per core
+
+
+def _simd_from_flags(flags: set[str]) -> tuple[str, float]:
+    for table in (_X86_SIMD_FLOP_PER_CYCLE, _ARM_SIMD_FLOP_PER_CYCLE):
+        for label, required, flop in table:
+            if all(flag in flags for flag in required):
+                return label, flop
+    return "scalar", _SCALAR_FLOP_PER_CYCLE
+
+
+def _parse_proc_cpuinfo(text: str) -> CpuInfo:
+    """Read the model name and SIMD flags of the first CPU in ``/proc/cpuinfo``."""
+    name: str | None = None
+    flags: set[str] = set()
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        # x86: "model name" + "flags"; ARM: "Features", and "model name" only on
+        # some kernels ("Hardware"/"CPU part" otherwise, which are not names).
+        if key == "model name" and name is None and value:
+            name = value
+        elif key in ("flags", "features") and not flags:
+            flags = set(value.lower().split())
+    label, flop = _simd_from_flags(flags)
+    return CpuInfo(name, label, flop)
+
+
+def _sysctl_str(key: str) -> str | None:
+    if not shutil.which("sysctl"):
+        return None
+    try:
+        out = subprocess.check_output(
+            ["sysctl", "-n", key], text=True, timeout=5, stderr=subprocess.DEVNULL
+        ).strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return out or None
+
+
+def _probe_cpu_info() -> CpuInfo:
+    """Return the CPU's model name and SIMD width (Linux or Intel macOS)."""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            return _parse_proc_cpuinfo(fh.read())
+    except OSError:
+        pass
+    brand = _sysctl_str("machdep.cpu.brand_string")
+    if brand is None:
+        return CpuInfo(None, "scalar", _SCALAR_FLOP_PER_CYCLE)
+    # Intel macOS lists AVX/SSE in features and AVX2/AVX512F in leaf7_features,
+    # in upper case with dots ("SSE4.1", "AVX1.0"); "FMA" is in features.
+    words = " ".join(
+        _sysctl_str(key) or "" for key in ("machdep.cpu.features", "machdep.cpu.leaf7_features")
+    )
+    flags = {re.sub(r"1\.0$", "", word.lower()) for word in words.split()}
+    label, flop = _simd_from_flags(flags)
+    return CpuInfo(brand, label, flop)
 
 
 def _probe_cpu_flops() -> tuple[int, float | None]:
@@ -380,18 +509,51 @@ def _probe_cpu_flops() -> tuple[int, float | None]:
             except (subprocess.SubprocessError, OSError, ValueError):
                 continue
 
-    # Linux /proc/cpuinfo fallback
     if clock_hz is None:
-        try:
-            with open("/proc/cpuinfo") as fh:
-                for line in fh:
-                    if "cpu MHz" in line:
-                        clock_hz = float(line.split(":")[1].strip()) * 1e6
-                        break
-        except OSError:
-            pass
+        clock_hz = _linux_max_clock_hz()
 
     return cores, clock_hz
+
+
+def _linux_max_clock_hz() -> float | None:
+    """Return the CPU's maximum clock on Linux, or None.
+
+    ``cpu MHz`` in /proc/cpuinfo is the *current* frequency, which frequency
+    scaling moves between calls (e.g. 0.8 GHz idle vs 3.1 GHz busy), so a peak
+    derived from it is not reproducible. Prefer the cpufreq maximum, then the
+    nominal clock in the model name, then the highest current per-core value.
+    """
+    import re
+
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq") as fh:
+            khz = float(fh.read().strip())
+        if khz > 0:
+            return khz * 1e3
+    except (OSError, ValueError):
+        pass
+
+    nominal_hz: float | None = None
+    current_hz: list[float] = []
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                key, _, value = line.partition(":")
+                key = key.strip()
+                if key == "model name" and nominal_hz is None:
+                    m = re.search(r"@\s*([\d.]+)\s*GHz", value)
+                    if m:
+                        nominal_hz = float(m.group(1)) * 1e9
+                elif key == "cpu MHz":
+                    try:
+                        current_hz.append(float(value.strip()) * 1e6)
+                    except ValueError:
+                        continue
+    except OSError:
+        return None
+
+    candidates = [hz for hz in (nominal_hz, max(current_hz, default=None)) if hz]
+    return max(candidates) if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -519,33 +681,51 @@ def detect_hardware(
     # --- CPU fallback ---
     cores, clock_hz = _probe_cpu_flops()
     apple_cpu_flops = _apple_cpu_peak_flops(chip_name)
+    cpu_info = (
+        _probe_cpu_info()
+        if apple_cpu_flops is None
+        else CpuInfo(chip_name, "NEON/AMX", _SCALAR_FLOP_PER_CYCLE)
+    )
     if apple_cpu_flops is not None:
         peak_flops = apple_cpu_flops * mult
     elif clock_hz:
-        # scalar FP32 FMA = 2 FLOP/cycle/core; use conservative 2× factor
-        peak_flops = cores * clock_hz * 2.0 * mult
+        # Widest SIMD unit the CPU reports (2 FLOP/cycle scalar FMA without one).
+        peak_flops = cores * clock_hz * cpu_info.flop_per_cycle * mult
     else:
-        # Very conservative: assume 2 GFLOP/s per core at unknown speed
-        peak_flops = cores * 2e9 * mult
+        # Unknown clock: assume 3 GHz, an upper bound for most server parts.
+        peak_flops = cores * 3e9 * cpu_info.flop_per_cycle * mult
 
-    # Apple Silicon CPU and GPU share unified memory: without a live
-    # measurement the chip's published bandwidth is the best available bound.
-    fallback_bw = apple_bw if apple_bw else 30e9
-    memory_bandwidth = (measured_bw * 1e9) if measured_bw is not None else fallback_bw
+    # Apple Silicon CPU and GPU share unified memory, so the CPU's bound is the
+    # chip's published bandwidth: the NumPy triad reaches well
+    # under half of it, while multi-threaded BLAS gets close.  Elsewhere the
+    # measurement is the only figure available.
+    if apple_bw and apple_cpu_flops is not None:
+        memory_bandwidth = max(apple_bw, (measured_bw or 0.0) * 1e9)
+    elif measured_bw is not None:
+        memory_bandwidth = measured_bw * 1e9
+    else:
+        memory_bandwidth = apple_bw if apple_bw else 30e9
     source = (
         f"CPU estimate ({cores} cores"
         + (f" @ {clock_hz / 1e9:.2f} GHz" if clock_hz else "")
-        + (", Apple NEON P/E-core table" if apple_cpu_flops is not None else "")
+        + (
+            ", Apple NEON/AMX table"
+            if apple_cpu_flops is not None
+            else f", {cpu_info.simd} {cpu_info.flop_per_cycle:g} FLOP/cycle/core"
+        )
         + f" [{precision.upper()}])"
     )
     if measured_bw is not None:
         source += " + NumPy STREAM triad"
 
-    cpu_name = f"{chip_name.split(' (')[0]} (CPU)" if chip_name else "CPU"
+    if chip_name:
+        cpu_name = f"{chip_name.split(' (')[0]} (CPU)"
+    else:
+        cpu_name = cpu_info.name or "CPU"
     return (
         HardwareSpec(cpu_name, peak_flops, memory_bandwidth, device_type="cpu"),
         DetectionResult(
-            chip_name,
+            chip_name or cpu_info.name,
             cores,
             clock_hz,
             measured_bw,

@@ -133,3 +133,21 @@ def test_cache_aware_bound_uses_resident_level():
     assert warm.metadata["bound_memory_level"] == "L2"
     assert cold.metadata["bound_memory_level"] == "DRAM"
     assert warm.lower_bound_seconds < cold.lower_bound_seconds
+
+
+def test_bound_credits_cache_capacity_for_a_spilling_working_set():
+    # Issue #90: a 134 MB MLP with a 38 MB L3 beat the all-DRAM bound on a
+    # Colab host. Up to the cache's capacity of each op's traffic may stay on
+    # chip between calls, so only the excess is charged to DRAM.
+    from neural_cost import CacheSpec
+
+    cap = 4 * 1024 * 1024
+    ops = [Operation("act", "elementwise", ((2048, 2048),), (2048, 2048))]  # 32 MiB of traffic
+    plain = HardwareSpec("c", 1e15, 1e10)
+    cached = HardwareSpec("c", 1e15, 1e10, caches=(CacheSpec("L3", float("inf"), cap),))
+    cold = ValidationCase.from_operations("w", ops, 1e-3, plain)
+    warm = ValidationCase.from_operations("w", ops, 1e-3, cached)
+    assert warm.metadata["bound_memory_level"] == "DRAM (beyond L3)"
+    assert warm.lower_bound_seconds == pytest.approx(cold.lower_bound_seconds - cap / 1e10)
+    off = ValidationCase.from_operations("w", ops, 1e-3, cached, cache_aware=False)
+    assert off.lower_bound_seconds == cold.lower_bound_seconds

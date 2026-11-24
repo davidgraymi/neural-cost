@@ -7,7 +7,7 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/neural-cost.svg?color=blue&label=Downloads)](https://pypi.org/project/neural-cost/)
 [![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-[**PyPI Package**](https://pypi.org/project/neural-cost/) • [**Documentation**](https://github.com/davidgraymi/neural-cost#readme) • [**Issue Tracker**](https://github.com/davidgraymi/neural-cost/issues) • [**Releases**](https://github.com/davidgraymi/neural-cost/releases)
+[**Website**](https://davidmgray.com/neural-cost/) • [**PyPI Package**](https://pypi.org/project/neural-cost/) • [**Documentation**](https://github.com/davidgraymi/neural-cost#readme) • [**Issue Tracker**](https://github.com/davidgraymi/neural-cost/issues) • [**Releases**](https://github.com/davidgraymi/neural-cost/releases)
 
 `neural-cost` estimates a neural network's useful compute and compulsory tensor
 traffic, measures its runtime, and uses a roofline lower bound to highlight
@@ -95,25 +95,42 @@ flowchart LR
 |---|---|
 | `linear` | Dense / fully-connected projection |
 | `conv2d` | 2-D convolution (NCHW / OIHW) |
+| `conv` | 1-D, 2-D or 3-D convolution, channels-first; `transposed`, grouped and depthwise variants |
 | `matmul` | Raw matrix multiply |
 | `embedding` | Token embedding lookup (read-only traffic model) |
-| `attention` | Multi-head self-attention (QKV projections + softmax + output) |
+| `attention` | Multi-head self- or cross-attention (QKV projections + softmax + output); causal and sliding-window masks count only visible pairs |
 | `elementwise` | Point-wise ops (ReLU, exp, tanh, …) |
 | `softmax` / `layernorm` / `batchnorm` | Normalisation ops |
 | `rmsnorm` | Root Mean Square normalisation |
 | `swiglu` | Gated linear unit with Swish activation |
-| `pooling` | Max / average / global-average pooling |
+| `pooling` | Max / average / adaptive / global pooling over 1 to 3 spatial dimensions |
 | `moe` | Mixture-of-Experts sparse routing and expert FFN execution |
 | `gather` / `scatter` | Indexed reads and in-place indexed updates; only touched elements count as traffic |
 | `custom` | Caller-supplied explicit FLOP count |
+
+A transposed `conv` counts `C_out / groups × prod(k)` MACs for every input
+element (the fvcore/ptflops convention), so the zeros a strided transposed
+convolution inserts are not counted. Plain 2-D convolutions keep the
+`conv2d` kind. `estimate_conv` estimates any `conv` record.
+
+Masked attention pairs are not useful work, so they are excluded.
+`attention` ops accept `kv_len` (key length; defaults to `seq_len`), `causal`,
+`window` (sliding window, requires `causal`) and `q_offset` (absolute position
+of the first query). A causal prefill scores `T(T+1)/2` pairs, about half of
+`T²`. A decode step against a 1024-token cache scores 1024 pairs per head.
+The adapters fill these in from `scaled_dot_product_attention(is_causal=...)`,
+`nn.MultiheadAttention(is_causal=...)`, Keras `use_causal_mask=True`, and the
+key length. Arbitrary `attn_mask` tensors are still counted as dense.
+`attention_visible_pairs(q_len, kv_len, causal=True, window=...)` returns the
+per-head count.
 
 Adapters automatically emit the right kind for each layer type:
 
 | Framework | Captured layer types |
 |---|---|
-| **PyTorch** | `Linear`, `Conv2d`, `Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, `BatchNorm1d/2d` |
-| **TensorFlow** | `Dense`, `Conv2D`, `Embedding`, `GRU`, `LSTM`, `MultiHeadAttention`, `BatchNormalization`, `LayerNormalization`, pooling layers |
-| **JAX** | `dot_general` (matmul), `conv_general_dilated` (conv2d), elementwise/comparison/reduction primitives, `gather`/`scatter`/`dynamic_slice`/`dynamic_update_slice`, and `scan`/`while`/`cond` bodies |
+| **PyTorch** | `Linear`, `Conv1d/2d/3d`, `ConvTranspose1d/2d/3d`, `Max/Avg/AdaptiveMax/AdaptiveAvgPool1d/2d/3d`, `Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, `BatchNorm1d/2d/3d` |
+| **TensorFlow** | `Dense`, `Conv1D/2D/3D`, `Conv1D/2D/3DTranspose`, `DepthwiseConv1D/2D`, `SeparableConv1D/2D` (as depthwise + pointwise), 1-D/2-D/3-D max, average and global pooling, `Embedding`, `GRU`, `LSTM`, `MultiHeadAttention`, `BatchNormalization`, `LayerNormalization` |
+| **JAX** | `dot_general` (matmul), `conv_general_dilated` (1-D to 3-D conv; `conv_transpose` as a transposed conv), elementwise/comparison/reduction primitives, `gather`/`scatter`/`dynamic_slice`/`dynamic_update_slice`, and `scan`/`while`/`cond` bodies |
 
 ## Analyze portable operations
 
@@ -152,8 +169,12 @@ Adapters see a model at different granularity. A PyTorch hook records one
 `reduce_sum` primitives that implement it. `flop_breakdown` separates
 granularity-invariant **dense FLOPs** (contractions, 2 FLOPs per MAC) and
 **unique parameters** from **auxiliary FLOPs** (point-wise work, which depends
-on what the adapter captures). `cross_check` then compares adapters against
-their median:
+on what the adapter captures). Causal attention is one case where adapters
+legitimately differ: a fused causal `attention` op counts only the visible
+lower triangle, while attention written out as `dot_general` plus a mask
+counts the full score matrix it computes. Compare non-causal models, or
+models built the same way, when you expect exact agreement. `cross_check`
+then compares adapters against their median:
 
 ```python
 from neural_cost import cross_check
@@ -196,7 +217,7 @@ components that sum exactly to the median:
 from neural_cost import attribute_gap, detect_hardware
 from neural_cost.adapters import TorchAdapter
 
-adapter = TorchAdapter(use_profiler=False)            # no profiler overhead in timings
+adapter = TorchAdapter(use_profiler=False)            # skip the extra profiled pass
 hardware, _ = detect_hardware()
 calibration = adapter.calibrate("mps")                 # size-dependent FLOP/s + bandwidth curves,
                                                        # dispatch and sync latency
@@ -228,7 +249,7 @@ dispatch.
 
 `benchmarks/validate.py` runs a grid of MLP, CNN, LSTM and Transformer
 workloads on every installed backend and writes
-[`VALIDATION_REPORT.md`](VALIDATION_REPORT.md). It scores three predictors,
+[`VALIDATION_REPORT.md`](benchmarks/results/apple-m3/VALIDATION_REPORT.md). It scores three predictors,
 and none of them is ever fit to the workload it predicts:
 
 * **Zero-shot**: microbenchmark calibration only. It never sees a model runtime.
@@ -241,17 +262,19 @@ and none of them is ever fit to the workload it predicts:
 It also checks that the roofline is a valid **lower bound**. Any measurement
 faster than the bound would falsify the model.
 
-Results on an Apple M3 (`VALIDATION_REPORT.md`, 59 workloads, 3 backends):
+Results on an Apple M3 (`VALIDATION_REPORT.md`, 95 workloads, 5 backends; TensorFlow has no calibration, so only the LOO fit applies):
 
 | Backend | Bound violations | Zero-shot MAPE (median) | Op-replay MAPE (median) | LOO fit MAPE (median) | Rank corr. (best predictor) |
 |---|---:|---:|---:|---:|---:|
-| PyTorch eager, CPU | 0 / 23 | 61% (66%) | **26% (22%)** | 51% (52%) | 0.987 |
-| PyTorch eager, MPS | 0 / 23 | 29% (19%) | 30% (15%) | **22% (13%)** | 0.948 |
-| JAX jit, CPU | 0 / 13 | **39% (33%)** | n/a | 45% (41%) | 0.989 |
+| PyTorch eager, CPU | 0 / 23 | 63% (68%) | **25% (18%)** | 51% (52%) | 0.987 |
+| PyTorch eager, MPS | 0 / 23 | 29% (20%) | 29% (14%) | **21% (12%)** | 0.936 |
+| JAX jit, CPU | 0 / 13 | 63% (76%) | n/a | **5% (2%)** | 0.995 |
+| JAX jit, MPS | 0 / 13 | 26% (20%) | n/a | **21% (16%)** | 0.951 |
+| TensorFlow graph, CPU | 0 / 23 | n/a | n/a | **22% (22%)** | 0.954 |
 
 What this shows, and what it doesn't. The bound was never violated, and both
-bound and predictions rank workloads correctly (Spearman ρ 0.91–0.99). The
-best predictor still has a typical (median) error of 13–33%. Most of what remains is the eager-LSTM
+bound and predictions rank workloads correctly (Spearman ρ 0.89–0.995). The
+best predictor still has a typical (median) error of 2–22%. Most of what remains is the eager-LSTM
 decomposition and composition effects that only appear when ops run together.
 That is exactly what the `residual` component isolates. The report contains
 every per-workload number. Run it on your hardware with:
@@ -529,9 +552,9 @@ Auto-detection via `detect_hardware()` returns a `(HardwareSpec, DetectionResult
 to determine hardware peak compute and memory bandwidth:
 
 - **Apple Silicon lookup from chip table**: Identifies Apple Silicon chips (M1–M4 series) and looks up published peak FP32 throughput and memory bandwidth.
-- **NumPy STREAM-triad bandwidth benchmark**: Measures live effective memory bandwidth using a STREAM Triad kernel (`c = a + scalar * b`).
+- **NumPy STREAM-triad bandwidth benchmark**: Measures live effective memory bandwidth using a STREAM Triad kernel (`c = a + scalar * b`), run on every core in cache-sized blocks with no temporaries, so it counts only DRAM traffic.
 - **NVIDIA GPU probe via nvidia-smi**: Probes GPU models, clock rates, and bus specs on systems with NVIDIA GPUs.
-- **CPU fallback**: Falls back to CPU logical core counts and clock rates when accelerator probes are unavailable.
+- **CPU fallback**: Without an accelerator (or with `device="cpu"`), the peak is logical cores × maximum clock × the FP32 FLOP/cycle of the widest SIMD unit the CPU reports: 64 for AVX-512, 32 for AVX2+FMA, 16 for AVX, 8 for SSE2, 32 for SVE and 16 for NEON (two vector FMA pipes per core), or 2 for scalar FMA. Flags and the CPU's model name come from `/proc/cpuinfo` on Linux and `sysctl machdep.cpu` on Intel macOS. This is a datasheet-style upper bound, so roofline lower bounds built on it hold; Apple Silicon uses its NEON/AMX table instead.
 
 ```python
 from neural_cost import detect_hardware
@@ -559,8 +582,10 @@ spec, _ = JaxAdapter().hardware()                       # active JAX device
 Every detected `HardwareSpec` records a `device_type` (`"cpu"` or `"gpu"`).
 When an adapter benchmark records the device it ran on, `analyze_gap` adds a
 **Device mismatch** finding if the two disagree.  On Apple Silicon the CPU
-peak uses a NEON P/E-core table and the CPU shares the chip's unified memory
-bandwidth with the GPU.  The CLI accepts the same option:
+peak is the higher of the NEON P/E-core peak and the per-cluster AMX/SME matrix
+units that Accelerate (PyTorch's CPU BLAS) drives, and the CPU is bounded by the
+chip's unified memory bandwidth (the NumPy triad reaches only about half of
+it).  The CLI accepts the same option:
 `neural-cost hardware --device cpu`.
 
 Apple variants are told apart by GPU core count (from `system_profiler`): the
@@ -605,16 +630,47 @@ estimate = estimate_model(model, inputs, TorchAdapter())
 measurement = TorchAdapter().benchmark(model, *inputs)
 ```
 
-`TorchAdapter` captures `Linear`, `Conv2d`, `Embedding`, `RNN`, `GRU`, `LSTM`,
-`MultiheadAttention`, `LayerNorm`, and `BatchNorm` modules via forward hooks and
-synchronizes CUDA benchmarks.  Its `trace` method uses `torch.profiler` and
-returns aggregate profiler-event and CUDA allocator statistics.
-`TensorFlowAdapter` captures the equivalent Keras layers and returns supported
-TensorFlow GPU allocator statistics.  `JaxAdapter` traces `dot_general`,
+`TorchAdapter` captures `Linear`, 1-D to 3-D (transposed) convolution and pooling,
+`Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, and
+`BatchNorm` modules via forward hooks and
+synchronizes CUDA and MPS benchmarks.  `benchmark` always times a loop with
+no profiler attached, then (unless `use_profiler=False`) runs a separate
+`torch.profiler` pass for event counts, per-op self time and CPU peak memory.
+CUDA reports allocator peak, current and reserved bytes; MPS reports GPU time
+from `torch.mps.Event` pairs and current/driver memory (it has no peak counter).
+`TensorFlowAdapter` captures the equivalent Keras layers, waits for every
+device after each benchmark call (`tf.test.experimental.sync_devices`), and
+returns peak and current allocator bytes for the GPU holding the inputs.
+On accelerators, `JaxAdapter` and `TensorFlowAdapter` then run a separate pass
+under `jax.profiler` / `tf.profiler` and report `trace_device_time_seconds`:
+the time each device had a kernel running, with overlapping streams merged
+and idle gaps excluded (`trace_device_time=False` skips the pass).  CPU runs
+have no device timeline, so the field stays `None` there.  `JaxAdapter` traces `dot_general`,
 `conv_general_dilated`, elementwise, comparison and reduction primitives, and
 indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
 `dynamic_update_slice`), and waits for asynchronous device work during
-benchmarks.  All adapters are optional imports:
+benchmarks.  Its peak memory is the allocator peak when the timed run raised
+it, otherwise (and on CPU) the peak of XLA's compiled memory plan for jitted
+functions; reserved memory is the allocator pool, never its capacity limit.
+
+Every `Measurement` also reports `min_seconds` and `relative_spread` (the
+interquartile range of the samples divided by the median).  When the spread
+exceeds 10 %, `measurement.noise_warning()` returns a message and
+`analyze_gap` adds it to the findings, because a noisy median makes any
+efficiency figure unreliable.
+
+Each sample normally times one call plus a wait for the device: the latency
+of a single invocation.  For short kernels that wait dominates (about 280 µs
+per call on Apple MPS for a 6 µs kernel), so every adapter also measures
+`sync_overhead_seconds` (one synchronised call minus the per-call time of
+back-to-back calls).  When it exceeds 10 % of the median,
+`sync_overhead_warning()` fires and joins the `analyze_gap` findings.  Pass
+`min_sample_seconds=1e-3` to `benchmark()` (or `--min-sample-ms 1` to
+`neural-cost benchmark`) to time back-to-back calls until each sample lasts
+at least that long; samples are divided by `calls_per_sample`, which
+`attribute_gap` uses to amortize the per-call sync in its dispatch term.
+
+All adapters are optional imports:
 
 ```python
 from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchAdapter
@@ -754,12 +810,18 @@ python benchmarks/collect_gpu_data.py \
   --peak-flops 312e12 --memory-bandwidth 2.0e12
 ```
 
-Results are written to `benchmarks/results/benchmark_gpu_data.json`.
+No CUDA machine? [`benchmarks/cloud_gpu_benchmark.ipynb`](benchmarks/cloud_gpu_benchmark.ipynb)
+runs the suite on a free Colab or Kaggle GPU at a chosen commit and packages the
+results for `benchmarks/results/<device>/`.
+
+Results are written to `benchmarks/results/<device>/benchmark_gpu_data.json`
+(for example `nvidia-tesla-t4/` or `apple-m3/`), stamped with the neural-cost
+version, git commit and framework versions.
 Generate figures and the full markdown report:
 
 ```bash
 python benchmarks/generate_gpu_report.py
-# → GPU_BENCHMARK_REPORT.md + benchmarks/results/figures/gpu_fig*.png
+# → benchmarks/results/<device>/GPU_BENCHMARK_REPORT.md + figures/gpu_fig*.png
 ```
 
 ### GPU-vs-CPU crossover analysis

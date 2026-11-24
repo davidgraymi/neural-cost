@@ -96,8 +96,9 @@ gap = analyze_gap(
 print(gap.render(top=5))
 ```
 
-`TorchAdapter` hooks modules (Linear, Conv2d, Embedding, RNN/GRU/LSTM,
-MultiheadAttention, norms) and `scaled_dot_product_attention`.
+`TorchAdapter` hooks modules (Linear, 1-D to 3-D Conv and ConvTranspose,
+pooling, Embedding, RNN/GRU/LSTM, MultiheadAttention, norms) and
+`scaled_dot_product_attention`.
 Untracked modules such as ReLU and GELU show up in `adapter.coverage`.
 TensorFlow: `TensorFlowAdapter()` follows the same pattern.
 
@@ -159,6 +160,11 @@ Add `--json` for machine-readable output.
    `trip_counts` or `default_trip_count` is given. Check `adapter.warnings`.
 4. **Timing.** Use the adapter's `benchmark`, which waits for asynchronous
    JAX/CUDA/MPS work, and warm up so compilation is excluded.
+5. **Attention masks.** Causal and sliding-window attention count only the
+   visible (query, key) pairs, about half of `T²` for a causal prefill. This
+   is detected from `is_causal` / `use_causal_mask` on fused attention. Explicit
+   `attn_mask` tensors, and JAX attention written as `dot_general` plus `where`,
+   count the full score matrix because that is what runs.
 
 ## Reporting rule
 
@@ -166,8 +172,15 @@ When you report results, always state:
 
 - the device (`measurement.device`, `hardware.name` and `hardware.device_type`),
 - the batch size and input shapes,
-- the number of timed runs (`len(measurement.samples_seconds)`) and that the
-  figure is a median,
+- the number of timed runs (`len(measurement.samples_seconds)`), that the
+  figure is a median, and its spread (`measurement.relative_spread`, the
+  interquartile range over the median). If `measurement.noise_warning()` is
+  not `None` (spread above 10 %), say the timing is noisy and rerun with more
+  warmup and repeats before drawing conclusions,
+- for sub-millisecond workloads, whether samples were single calls or batched
+  (`measurement.calls_per_sample`). If `measurement.sync_overhead_warning()`
+  is not `None`, the median is mostly device-sync latency: rerun with
+  `min_sample_seconds=1e-3` before quoting a roofline efficiency,
 - **the coverage**. Never quote a roofline efficiency without saying how much
   of the workload it covers, e.g. "59% roofline efficiency over 100% of 257
   traced equations".

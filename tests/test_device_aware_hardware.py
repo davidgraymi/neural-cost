@@ -42,7 +42,12 @@ def test_normalize_device_type(device, expected):
 
 @patch(
     "neural_cost.hardware_detect._sysctl_int",
-    side_effect={"hw.perflevel0.physicalcpu": 4, "hw.perflevel1.physicalcpu": 4}.get,
+    side_effect={
+        "hw.perflevel0.physicalcpu": 4,
+        "hw.perflevel1.physicalcpu": 4,
+        "hw.perflevel0.cpusperl2": 4,
+        "hw.perflevel1.cpusperl2": 4,
+    }.get,
 )
 @patch("neural_cost.hardware_detect._probe_cpu_flops", return_value=(8, None))
 @patch("neural_cost.hardware_detect._probe_nvidia", return_value=(None, None, None, ()))
@@ -53,11 +58,25 @@ def test_cpu_device_skips_apple_gpu_table(_apple, _nvidia, _cpu, _sysctl):
     assert gpu.device_type == "gpu" and gpu.peak_flops == 3.6e12
     assert cpu.device_type == "cpu"
     assert cpu.name == "Apple M3 (CPU)"
-    # NEON peak: 4 P-cores x 4.05 GHz x 32 + 4 E-cores x 2.75 GHz x 16.
-    assert cpu.peak_flops == pytest.approx(4 * 4.05e9 * 32 + 4 * 2.75e9 * 16)
-    # Unified memory: without a measurement the chip's bandwidth is used.
+    # The AMX peak (one P- and one E-cluster) beats NEON's 4x4.05x32 + 4x2.75x16.
+    assert cpu.peak_flops == pytest.approx(4.05e9 * 512 + 2.75e9 * 128)
+    assert cpu.peak_flops > 4 * 4.05e9 * 32 + 4 * 2.75e9 * 16
+    # Unified memory: the chip's bandwidth bounds the CPU too.
     assert cpu.memory_bandwidth == 100e9
     assert "CPU estimate" in detection.source
+
+
+@patch("neural_cost.hardware_detect._sysctl_int", side_effect={"hw.perflevel0.physicalcpu": 4}.get)
+@patch("neural_cost.hardware_detect._probe_cpu_flops", return_value=(4, None))
+@patch("neural_cost.hardware_detect._probe_nvidia", return_value=(None, None, None, ()))
+@patch("neural_cost.hardware_detect._probe_apple_silicon", return_value=APPLE_M3)
+@patch("neural_cost.hardware_detect._measure_bandwidth_gb_s", return_value=41.0)
+def test_apple_cpu_bandwidth_is_not_the_single_threaded_triad(_bw, _apple, _nvidia, _cpu, _sysctl):
+    # A one-thread NumPy triad reaches well under the unified-memory bandwidth
+    # that multi-threaded BLAS sustains; a lower bound must use the chip's.
+    cpu, detection = detect_hardware(device="cpu")
+    assert cpu.memory_bandwidth == 100e9
+    assert detection.measured_bandwidth_gb_s == 41.0
 
 
 @patch("neural_cost.hardware_detect._probe_apple_silicon", return_value=APPLE_M3)

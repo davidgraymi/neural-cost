@@ -1,0 +1,48 @@
+name: Benchmark validation
+
+# After every successful Publish run on main (each version bump), check on a
+# free hosted runner that no measured runtime beats its roofline lower bound.
+# Hosted runners are shared VMs: the timings are too noisy to publish, so this
+# job gates correctness only and keeps its report as a build artifact.
+on:
+  workflow_run:
+    workflows: [Publish]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0 # tags, so the recorded version matches the release
+
+      - uses: astral-sh/setup-uv@v10.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra torch --extra jax
+
+      - name: Validate lower bounds (CPU)
+        run: >
+          uv run python benchmarks/validate.py --quick
+          --backends torch-cpu jax-cpu
+          --results-dir validation-results
+          --fail-on-violation
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: validation-${{ github.event.workflow_run.head_sha || github.sha }}
+          path: validation-results/
+          if-no-files-found: ignore

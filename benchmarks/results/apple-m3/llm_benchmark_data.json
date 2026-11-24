@@ -1,0 +1,94 @@
+{
+  "run": {
+    "neural_cost_version": "0.2.1.dev39+g547ce13bc",
+    "git_describe": "v0.13.0-18-gcb36a1c",
+    "git_commit": "cb36a1c2c16356b84b25e1496002c01db6d622e9",
+    "git_dirty": false,
+    "device": "Apple M3 (CPU)",
+    "device_slug": "apple-m3",
+    "frameworks": {
+      "torch": "2.14.0",
+      "jax": "0.11.2",
+      "jaxlib": "0.11.2",
+      "tensorflow": "2.21.0",
+      "keras": "3.15.1",
+      "numpy": "2.5.3"
+    },
+    "python": "3.13.18",
+    "platform": "Darwin 27.2.0 arm64",
+    "created_utc": "2026-11-23T22:40:40+00:00",
+    "script": "llm_bench.py"
+  },
+  "hardware": {
+    "name": "Apple M3 (CPU)",
+    "peak_flops": 2425600000000.0,
+    "memory_bandwidth": 100000000000.0
+  },
+  "prefill": [
+    {
+      "prompt_len": 128,
+      "batch_size": 1,
+      "latency_ms": 0.333264,
+      "ttft_ms": 0.333264,
+      "gflops": 805.4739065725671,
+      "achieved_gflops": 805.4739065725671,
+      "throughput_tokens_s": 384079.8886168323,
+      "memory_traffic_bytes": 8388608
+    },
+    {
+      "prompt_len": 512,
+      "batch_size": 1,
+      "latency_ms": 4.260791,
+      "ttft_ms": 4.260791,
+      "gflops": 1008.0211153281164,
+      "achieved_gflops": 1008.0211153281164,
+      "throughput_tokens_s": 120165.48101045088,
+      "memory_traffic_bytes": 33554432
+    },
+    {
+      "prompt_len": 2048,
+      "batch_size": 1,
+      "latency_ms": 89.678041,
+      "ttft_ms": 89.678041,
+      "gflops": 766.2910113747913,
+      "achieved_gflops": 766.2910113747913,
+      "throughput_tokens_s": 22837.251763784625,
+      "memory_traffic_bytes": 134217728
+    }
+  ],
+  "decode": [
+    {
+      "prompt_len": 128,
+      "gen_tokens": 16,
+      "batch_size": 1,
+      "latency_ms": 0.05822134375,
+      "tokens_per_sec": 17175.83167255565,
+      "throughput_tokens_s": 17175.83167255565,
+      "achieved_gbw": 72.60347713977316,
+      "memory_bw_util": 0.7260347713977316,
+      "kv_cache_bytes": 4194304
+    },
+    {
+      "prompt_len": 512,
+      "gen_tokens": 16,
+      "batch_size": 1,
+      "latency_ms": 0.2076458125,
+      "tokens_per_sec": 4815.892928252526,
+      "throughput_tokens_s": 4815.892928252526,
+      "achieved_gbw": 80.95508306963812,
+      "memory_bw_util": 0.8095508306963812,
+      "kv_cache_bytes": 16777216
+    },
+    {
+      "prompt_len": 2048,
+      "gen_tokens": 16,
+      "batch_size": 1,
+      "latency_ms": 0.9428515625,
+      "tokens_per_sec": 1060.612337904462,
+      "throughput_tokens_s": 1060.612337904462,
+      "achieved_gbw": 71.21124328624104,
+      "memory_bw_util": 0.7121124328624104,
+      "kv_cache_bytes": 67108864
+    }
+  ]
+}

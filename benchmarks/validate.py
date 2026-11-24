@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate neural-cost predictions against measured runtimes on this machine.
 
-For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit) this:
+For each available backend (PyTorch CPU / CUDA / MPS eager, JAX jit on CPU /
+CUDA / MPS, TensorFlow graph on CPU / GPU) this:
 
 1. calibrates achievable FLOP/s, bandwidth and dispatch overhead with
    microbenchmarks that never touch the evaluated models;
@@ -16,8 +17,11 @@ Usage::
     python benchmarks/validate.py                # all available backends
     python benchmarks/validate.py --quick        # smaller grid
     python benchmarks/validate.py --backends torch-cpu jax-cpu
+    python benchmarks/validate.py --quick --fail-on-violation   # CI gate
 
-Writes ``VALIDATION_REPORT.md`` and ``benchmarks/results/validation_data.json``.
+Writes ``VALIDATION_REPORT.md`` and ``validation_data.json`` to
+``benchmarks/results/<device>/``, stamped with the neural-cost version and git
+commit.  ``--fail-on-violation`` exits 1 if any measurement beat its lower bound.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -32,8 +37,16 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+# Before JAX or TensorFlow is imported: both reserve most of every GPU's memory
+# up front by default (JAX 75 %, TensorFlow nearly all), even for a backend that
+# runs on the CPU, so a GPU backend measured after them would start short of
+# memory and its results would depend on backend order.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from neural_cost import (
     CacheSpec,
@@ -42,6 +55,7 @@ from neural_cost import (
     detect_hardware,
     run_validation_suite,
 )
+from benchmarks.run_info import describe_run, results_dir, run_metadata
 from neural_cost.profiler import Measurement
 
 # ------------------------------------------------------------------ torch models
@@ -131,7 +145,23 @@ def torch_workloads(device: str, quick: bool) -> list[Workload]:
 # -------------------------------------------------------------------- jax models
 
 
-def jax_workloads(quick: bool) -> list[Workload]:
+def jax_workloads(quick: bool, device=None) -> list[Workload]:
+    """JAX workloads whose inputs are committed to ``device``.
+
+    ``jax.default_device`` alone makes *uncommitted* arrays, which a later jit
+    call (outside the context) moves to the default device: on a CUDA host the
+    jax-cpu section would time the GPU.  ``device_put`` commits them.
+    """
+    import jax
+
+    with jax.default_device(device):
+        workloads = _jax_workloads(quick)
+    if device is None:
+        return workloads
+    return [replace(w, inputs=tuple(jax.device_put(w.inputs, device))) for w in workloads]
+
+
+def _jax_workloads(quick: bool) -> list[Workload]:
     import jax
     import jax.numpy as jnp
 
@@ -200,6 +230,91 @@ def jax_workloads(quick: bool) -> list[Workload]:
     return out
 
 
+# -------------------------------------------------------------- tensorflow models
+
+
+def tf_workloads(quick: bool, device: str = "/CPU:0") -> list[Workload]:
+    """Keras models run as ``tf.function`` graphs on ``device`` (``"/CPU:0"`` or ``"/GPU:0"``).
+
+    Weights, inputs and every op are pinned to ``device``: without a scope TF
+    places ops on a visible GPU, so a CPU section on a CUDA host would time the GPU.
+    """
+    import tensorflow as tf
+
+    keras = tf.keras
+    tf.random.set_seed(0)
+    out: list[Workload] = []
+
+    def add(name: str, build, shape, **meta) -> None:
+        with tf.device(device):
+            model = build()
+            x = tf.random.normal(shape)
+
+        def run(inp, _m=model):
+            with tf.device(device):
+                return _m(inp, training=False)
+
+        out.append(Workload(name, model, (x,), runner=tf.function(run), metadata=meta))
+
+    widths = (256, 1024) if quick else (256, 1024, 4096)
+    batches = (1, 64) if quick else (1, 16, 128)
+    for w in widths:
+        for b in batches:
+            mlp = lambda w=w: keras.Sequential(  # noqa: E731
+                [
+                    keras.Input((w,)),
+                    keras.layers.Dense(w, activation="gelu"),
+                    keras.layers.Dense(w, activation="gelu"),
+                    keras.layers.Dense(10),
+                ]
+            )
+            add(f"mlp w={w} b={b}", mlp, (b, w), family="mlp")
+
+    for img in (32,) if quick else (32, 64):
+        for b in (1, 16) if quick else (1, 8, 32):
+            cnn = lambda img=img: keras.Sequential(  # noqa: E731
+                [
+                    keras.Input((img, img, 3)),
+                    keras.layers.Conv2D(32, 3, padding="same", activation="relu"),
+                    keras.layers.Conv2D(64, 3, strides=2, padding="same", activation="relu"),
+                    keras.layers.Conv2D(128, 3, strides=2, padding="same", activation="relu"),
+                    keras.layers.GlobalAveragePooling2D(),
+                    keras.layers.Dense(10),
+                ]
+            )
+            add(f"cnn {img}px b={b}", cnn, (b, img, img, 3), family="cnn")
+
+    for d in (128,) if quick else (128, 256):
+        for b in (1, 16):
+            lstm = lambda d=d: keras.Sequential(  # noqa: E731
+                [
+                    keras.Input((32, d)),
+                    keras.layers.LSTM(d, return_sequences=True),
+                    keras.layers.LSTM(d),
+                    keras.layers.Dense(10),
+                ]
+            )
+            add(f"lstm d={d} b={b}", lstm, (b, 32, d), family="lstm")
+
+    def block(t: int, d: int = 256, h: int = 8):
+        x = inp = keras.Input((t, d))
+        y = keras.layers.LayerNormalization()(x)
+        x = x + keras.layers.MultiHeadAttention(h, d // h)(y, y)
+        y = keras.layers.LayerNormalization()(x)
+        y = keras.layers.Dense(4 * d, activation="gelu")(y)
+        return keras.Model(inp, x + keras.layers.Dense(d)(y))
+
+    for t in (64,) if quick else (64, 256):
+        for b in (1, 8):
+            add(
+                f"transformer d=256 T={t} b={b}",
+                lambda t=t: block(t),
+                (b, t, 256),
+                family="transformer",
+            )
+    return out
+
+
 # ------------------------------------------------------------------------ driver
 
 
@@ -245,8 +360,31 @@ def available_backends() -> list[str]:
         if torch.backends.mps.is_available():
             found.append("torch-mps")
     if importlib.util.find_spec("jax"):
+        import jax
+
         found.append("jax-cpu")
+        if _jax_device("gpu") is not None:
+            found.append("jax-gpu")
+        if _jax_device("mps") is not None:
+            found.append("jax-mps")
+    if importlib.util.find_spec("tensorflow"):
+        import tensorflow as tf
+
+        found.append("tf-cpu")
+        # Not on Apple Silicon: tensorflow-metal is unmaintained.
+        if tf.config.list_physical_devices("GPU") and sys.platform != "darwin":
+            found.append("tf-gpu")
     return found
+
+
+def _jax_device(platform: str):
+    """First JAX device of ``platform`` (``"cpu"``, ``"mps"``, ``"gpu"``), or None."""
+    import jax
+
+    try:
+        return jax.devices(platform)[0]
+    except (RuntimeError, ValueError, IndexError):
+        return None
 
 
 def main() -> None:
@@ -254,14 +392,32 @@ def main() -> None:
     parser.add_argument("--backends", nargs="*", default=None)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--repeats", type=int, default=30)
-    parser.add_argument("--output", type=Path, default=ROOT / "VALIDATION_REPORT.md")
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Output directory (default: benchmarks/results/<device>/)",
+    )
+    parser.add_argument(
+        "--fail-on-violation",
+        action="store_true",
+        help="Exit 1 if any measured runtime beat its lower bound",
+    )
     args = parser.parse_args()
+    if args.backends and not any(
+        b.startswith("jax-") and not b.endswith("cpu") for b in args.backends
+    ):
+        # Only CPU JAX backends requested: don't start JAX's GPU client at all.
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
     hardware, info = detect_hardware()
     backends = args.backends or available_backends()
     print(f"Hardware: {hardware.name} ({info.source}); backends: {', '.join(backends)}")
 
-    sections, payload = [], {"hardware": hardware.name, "detection": info.source, "backends": {}}
+    run = run_metadata(hardware.name, script="validate.py", backends=backends, quick=args.quick)
+    sections = []
+    payload = {"run": run, "hardware": hardware.name, "detection": info.source, "backends": {}}
+    violations = 0
     for backend in backends:
         if backend.startswith("torch"):
             from neural_cost.adapters import TorchAdapter
@@ -271,17 +427,42 @@ def main() -> None:
             calibration = adapter.calibrate(device)
             workloads = torch_workloads(device, args.quick)
             title = f"PyTorch eager ({device})"
+        elif backend in ("tf-cpu", "tf-gpu"):
+            from neural_cost.adapters import TensorFlowAdapter
+
+            # TensorFlow has no calibration microbenchmarks: its section reports
+            # lower-bound validity and the fitted model, without zero-shot or
+            # gap attribution.
+            adapter = TensorFlowAdapter(trace_device_time=False)
+            calibration = None
+            tf_device = "/GPU:0" if backend == "tf-gpu" else "/CPU:0"
+            if backend == "tf-gpu":
+                import tensorflow as tf
+
+                if not tf.config.list_physical_devices("GPU"):
+                    print(f"\n[skip] {backend}: TensorFlow sees no GPU")
+                    continue
+            workloads = tf_workloads(args.quick, tf_device)
+            title = f"TensorFlow graph ({backend.split('-', 1)[1]})"
         else:
             from neural_cost.adapters import JaxAdapter
 
-            adapter = JaxAdapter()
-            calibration = adapter.calibrate()
-            workloads = jax_workloads(args.quick)
-            title = "JAX jit (cpu)"
+            jax_platform = backend.split("-", 1)[1]
+            device = _jax_device(jax_platform)
+            if device is None:
+                # Skip rather than abort: the sections already measured still get written.
+                print(f"\n[skip] {backend}: JAX has no {jax_platform} device")
+                continue
+            adapter = JaxAdapter(trace_device_time=False)  # as for torch: no profiler
+            calibration = adapter.calibrate(device=device)
+            workloads = jax_workloads(args.quick, device)
+            title = f"JAX jit ({jax_platform})"
         print(f"\n[{backend}] calibration: {calibration}")
-        spec = hardware
+        # Each backend is bounded by its own device: on a CUDA host the default
+        # spec is the GPU's, which would make every CPU bound far too loose.
+        spec, _ = detect_hardware(device="cpu" if backend.endswith("cpu") else "gpu")
         if backend.endswith("cpu"):
-            spec = replace(hardware, caches=hardware.caches + cpu_caches())
+            spec = replace(spec, caches=spec.caches + cpu_caches())
         report = run_validation_suite(
             adapter,
             workloads,
@@ -292,9 +473,12 @@ def main() -> None:
             warmup_seconds=0.25,
         )
         print(report.render())
+        violations += report.bound_violations
 
         # Attribute the gap for the smallest, the most expensive, and the last workload.
         picks = [workloads[0], max(workloads, key=lambda w: _flops(adapter, w)), workloads[-1]]
+        if calibration is None:
+            picks = []  # attribution needs measured achievable peaks
         attributions = []
         seen: set[str] = set()
         for workload in picks:
@@ -328,16 +512,18 @@ def main() -> None:
             attributions.append((workload.name, attribution))
             print(attribution.render())
 
-        md = [
-            report.to_markdown(),
-            "",
-            f"Calibration: {calibration.source} — "
-            f"{calibration.achievable_flops / 1e9:.0f} GFLOP/s achievable, "
-            f"{calibration.achievable_bandwidth / 1e9:.1f} GB/s, "
-            f"{calibration.dispatch_seconds * 1e6:.2f} µs/kernel dispatch, "
-            f"{calibration.call_overhead_seconds * 1e6:.1f} µs/call sync latency.",
-            "",
-        ]
+        md = [report.to_markdown(), ""]
+        if calibration is None:
+            md += ["No calibration microbenchmarks for this backend; no gap attribution.", ""]
+        else:
+            md += [
+                f"Calibration: {calibration.source} — "
+                f"{calibration.achievable_flops / 1e9:.0f} GFLOP/s achievable, "
+                f"{calibration.achievable_bandwidth / 1e9:.1f} GB/s, "
+                f"{calibration.dispatch_seconds * 1e6:.2f} µs/kernel dispatch, "
+                f"{calibration.call_overhead_seconds * 1e6:.1f} µs/call sync latency.",
+                "",
+            ]
         for name, attribution in attributions:
             md += [
                 f"<details><summary>Gap attribution: {name}</summary>",
@@ -351,7 +537,9 @@ def main() -> None:
             ]
         sections.append("\n".join(md))
         payload["backends"][backend] = {
-            "calibration": {
+            "calibration": None
+            if calibration is None
+            else {
                 "achievable_flops": calibration.achievable_flops,
                 "achievable_bandwidth": calibration.achievable_bandwidth,
                 "dispatch_seconds": calibration.dispatch_seconds,
@@ -367,6 +555,8 @@ def main() -> None:
 
 Generated {date.today().isoformat()} by `benchmarks/validate.py` on **{hardware.name}**
 ({platform.platform()}), hardware spec from {info.source}.
+
+Run: {describe_run(run)}.
 
 **How to read this.** *Bound* is the per-operation roofline at datasheet peak
 (fused aggregate roofline for jit). It must never exceed the measurement; any
@@ -384,10 +574,15 @@ of their traced traffic, paying Python dispatch only when issued from Python. A
 jitted JAX program is one dispatch.
 
 """
-    args.output.write_text(header + "\n\n".join(sections) + "\n")
-    data_path = ROOT / "benchmarks" / "results" / "validation_data.json"
+    out_dir = results_dir(hardware.name, args.results_dir)
+    report_path = out_dir / "VALIDATION_REPORT.md"
+    data_path = out_dir / "validation_data.json"
+    report_path.write_text(header + "\n\n".join(sections) + "\n")
     data_path.write_text(json.dumps(payload, indent=2, default=str))
-    print(f"\nWrote {args.output} and {data_path}")
+    print(f"\nWrote {report_path} and {data_path}")
+    if args.fail_on_violation and violations:
+        print(f"FAIL: {violations} measurement(s) beat their lower bound", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

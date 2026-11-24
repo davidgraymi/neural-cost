@@ -63,7 +63,7 @@ class TestOperationsExpanded(unittest.TestCase):
             # missing attrs
         )
         with self.assertRaisesRegex(
-            ValueError, r"pooling requires attrs\['kernel_size'\] as \(kH, kW\)"
+            ValueError, r"pooling requires attrs\['kernel_size'\] as a tuple"
         ):
             estimate_operation(op)
 

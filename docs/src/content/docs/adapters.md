@@ -1,0 +1,125 @@
+---
+title: "Framework adapters"
+description: "PyTorch, JAX and TensorFlow adapters, coverage reporting and per-operation breakdowns."
+section: "Guides"
+order: 1
+---
+
+```python
+import torch
+from neural_cost import estimate_model
+from neural_cost.adapters import TorchAdapter
+
+model = torch.nn.Sequential(torch.nn.Linear(128, 64), torch.nn.ReLU(), torch.nn.Linear(64, 10))
+inputs = (torch.randn(16, 128),)
+estimate = estimate_model(model, inputs, TorchAdapter())
+measurement = TorchAdapter().benchmark(model, *inputs)
+```
+
+`TorchAdapter` captures `Linear`, 1-D to 3-D (transposed) convolution and pooling,
+`Embedding`, `RNN`, `GRU`, `LSTM`, `MultiheadAttention`, `LayerNorm`, and
+`BatchNorm` modules via forward hooks and
+synchronizes CUDA and MPS benchmarks.  `benchmark` always times a loop with
+no profiler attached, then (unless `use_profiler=False`) runs a separate
+`torch.profiler` pass for event counts, per-op self time and CPU peak memory.
+CUDA reports allocator peak, current and reserved bytes; MPS reports GPU time
+from `torch.mps.Event` pairs and current/driver memory (it has no peak counter).
+`TensorFlowAdapter` captures the equivalent Keras layers, waits for every
+device after each benchmark call (`tf.test.experimental.sync_devices`), and
+returns peak and current allocator bytes for the GPU holding the inputs.
+On accelerators, `JaxAdapter` and `TensorFlowAdapter` then run a separate pass
+under `jax.profiler` / `tf.profiler` and report `trace_device_time_seconds`:
+the time each device had a kernel running, with overlapping streams merged
+and idle gaps excluded (`trace_device_time=False` skips the pass).  CPU runs
+have no device timeline, so the field stays `None` there.  `JaxAdapter` traces `dot_general`,
+`conv_general_dilated`, elementwise, comparison and reduction primitives, and
+indexing primitives (`gather`, `scatter*`, `dynamic_slice`,
+`dynamic_update_slice`), and waits for asynchronous device work during
+benchmarks.  Its peak memory is the allocator peak when the timed run raised
+it, otherwise (and on CPU) the peak of XLA's compiled memory plan for jitted
+functions; reserved memory is the allocator pool, never its capacity limit.
+
+Every `Measurement` also reports `min_seconds` and `relative_spread` (the
+interquartile range of the samples divided by the median).  When the spread
+exceeds 10 %, `measurement.noise_warning()` returns a message and
+`analyze_gap` adds it to the findings, because a noisy median makes any
+efficiency figure unreliable.
+
+Each sample normally times one call plus a wait for the device: the latency
+of a single invocation.  For short kernels that wait dominates (about 280 µs
+per call on Apple MPS for a 6 µs kernel), so every adapter also measures
+`sync_overhead_seconds` (one synchronised call minus the per-call time of
+back-to-back calls).  When it exceeds 10 % of the median,
+`sync_overhead_warning()` fires and joins the `analyze_gap` findings.  Pass
+`min_sample_seconds=1e-3` to `benchmark()` (or `--min-sample-ms 1` to
+`neural-cost benchmark`) to time back-to-back calls until each sample lasts
+at least that long; samples are divided by `calls_per_sample`, which
+`attribute_gap` uses to amortize the per-call sync in its dispatch term.
+
+All adapters are optional imports:
+
+```python
+from neural_cost.adapters import JaxAdapter, TensorFlowAdapter, TorchAdapter
+```
+
+`JaxAdapter` recurses into `scan` (scaled by its static length), `cond` (most
+expensive branch) and `while_loop`.  A counted `while i < N` loop with literal
+bounds is inferred; for data-dependent loops (tree search, environment
+rollouts) supply the trip count:
+
+```python
+adapter = JaxAdapter(trip_counts={0: 16}, default_trip_count=8)
+ops = adapter.operations(search_fn, (obs, params))
+adapter.while_trip_counts  # [(16, "user"), (8, "default"), ...] in trace order
+```
+
+### Coverage: how much of the workload the roofline describes
+
+Bounds and efficiencies only describe the operations an adapter understood.
+After `operations()`, `JaxAdapter` (jaxpr equations) and `TorchAdapter`
+(executed leaf modules) record a `Coverage`. Pass it to `analyze_gap`, or use
+`profile_model` + `analyze_model_gap`, which pass it for you:
+
+```python
+adapter = JaxAdapter()
+ops = adapter.operations(fn, (obs, params))
+gap = analyze_gap(estimate_operations(ops), adapter.benchmark(fn, obs, params),
+                  hardware, operations=ops, coverage=adapter.coverage)
+print(gap.render())
+# Neural cost gap analysis
+#   coverage: 41.2% of 340 equations modeled (unmodeled: sort x12, threefry2x32 x8, ...)
+#   WARNING: Low coverage: only 41.2% of the traced equations were modeled; ...
+```
+
+`Coverage.unmodeled_primitives` lists skipped primitives by frequency, and
+`unmodeled_output_bytes` sums their output sizes as a rough measure of the
+traffic left out. The warning threshold defaults to 90%
+(`analyze_gap(..., coverage_threshold=0.8)`).
+
+### Per-operation breakdown
+
+When `analyze_gap` receives `operations=`, `render()` includes a table of
+the top operations. Choose how many rows (`top`) and the sort key
+(`"share"` of the lower bound, `"bytes"` or `"flops"`). `JaxAdapter` prefixes
+operation names with their name scope (`jax.named_scope`, Flax module
+names), and `group_by_scope=True` sums each scope, which shows whether
+normalization layers or convolutions drive the traffic:
+
+```python
+print(gap.render(top=5, group_by_scope=True))
+#   top 5 of 6 scopes by share of lower bound:
+#      #  operation                  kind         FLOPs        bytes   FLOP/B      bound   share  regime
+#      1  model/block_0/Conv_0       conv2d       604.0 MFLOP  4.3 MB  139.11   1.116 ms   36.1%  compute
+#      3  model/block_0/GroupNorm_0  elementwise  3.7 MFLOP   25.2 MB    0.15   0.369 ms   11.9%  memory
+```
+
+Group and layer norms lowered to reductions plus elementwise ops are traced in
+full. Reductions count one FLOP per input element.
+
+## Custom frameworks
+
+Subclass `FrameworkAdapter` and implement `operations(model, example_inputs)`
+to return portable `Operation` records.  The adapter can also override
+`benchmark` to synchronize an accelerator or collect framework-specific memory
+statistics.  This contract keeps model extraction separate from the framework-
+independent estimator and analyzer.
