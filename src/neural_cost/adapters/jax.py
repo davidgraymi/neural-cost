@@ -10,6 +10,7 @@ from typing import Any
 from ..coverage import Coverage
 from ..operations import Operation, numel
 from ..profiler import Measurement
+from ..xspace import warn_no_device_time as _warn_no_device_time
 from .base import FrameworkAdapter
 
 # Primitives that only change layout or precision: a parameter stays a parameter.
@@ -881,6 +882,10 @@ def _profile_device_time(
             with jax.profiler.trace(log_dir):
                 for _ in range(repeats):
                     _block(jax, function(*args, **kwargs))
-        except (RuntimeError, ValueError):
+        except (RuntimeError, ValueError) as error:
+            _warn_no_device_time("JAX", f"jax.profiler.trace failed: {error}")
             return None
-        return read_trace_dir(log_dir, parser="jax")
+        traced = read_trace_dir(log_dir, parser="jax")
+        if traced is None:
+            _warn_no_device_time("JAX", "the profiler trace has no device timeline")
+        return traced

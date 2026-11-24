@@ -97,7 +97,8 @@ def test_jax_profiler_pass_runs_and_reports_nothing_on_cpu():
     from neural_cost.adapters.jax import _profile_device_time
 
     fn = jax.jit(lambda x: x @ x)
-    assert _profile_device_time(jax, fn, (jax.numpy.ones((64, 64)),), {}, 2) is None
+    with pytest.warns(RuntimeWarning, match="no device timeline"):
+        assert _profile_device_time(jax, fn, (jax.numpy.ones((64, 64)),), {}, 2) is None
 
 
 def test_tf_profiler_pass_runs_and_reports_nothing_on_cpu():
@@ -105,7 +106,8 @@ def test_tf_profiler_pass_runs_and_reports_nothing_on_cpu():
     from neural_cost.adapters.tensorflow import _device_sync, _profile_device_time
 
     x = tf.ones((64, 64))
-    result = _profile_device_time(tf, lambda a: tf.matmul(a, a), (x,), {}, 2, _device_sync(tf))
+    with pytest.warns(RuntimeWarning, match="no GPU timeline"):
+        result = _profile_device_time(tf, lambda a: tf.matmul(a, a), (x,), {}, 2, _device_sync(tf))
     assert result is None
 
 
