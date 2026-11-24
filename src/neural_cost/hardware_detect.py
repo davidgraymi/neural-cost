@@ -8,7 +8,9 @@ populated with values derived from:
 2. ``system_profiler SPHardwareDataType`` on macOS to identify Apple Silicon
    chips and look up their published peak FP32 compute throughput.
 3. ``nvidia-smi`` on systems with NVIDIA GPUs (CUDA peak FLOPs).
-4. Sensible CPU-level fallbacks (logical cores × clock × scalar FMA factor).
+4. CPU fallbacks: logical cores × clock × the FP32 FLOP/cycle of the widest
+   SIMD unit the CPU reports (AVX-512, AVX2+FMA, AVX, SSE2, NEON, SVE), read
+   from ``/proc/cpuinfo`` on Linux and ``sysctl machdep.cpu`` on Intel macOS.
 
 Pass ``device=`` (a string such as ``"cpu"``/``"gpu"``, or a framework device
 object such as ``jax.devices()[0]`` or ``torch.device("mps")``) to describe the
@@ -376,6 +378,91 @@ def _clusters(cores: int, cores_per_cluster: int | None) -> int:
     return -(-cores // cores_per_cluster)
 
 
+# FP32 FLOP per cycle per core for each SIMD level, assuming two vector FMA (or
+# add + multiply) pipes per core: a datasheet-style upper bound, so a roofline
+# lower bound built on it holds even for hand-tuned BLAS.
+_X86_SIMD_FLOP_PER_CYCLE: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("AVX-512", ("avx512f",), 64.0),  # 2 x 512-bit FMA: 2 x 16 lanes x 2
+    ("AVX2+FMA", ("avx2", "fma"), 32.0),  # 2 x 256-bit FMA
+    ("AVX", ("avx",), 16.0),  # 256-bit add + 256-bit multiply
+    ("SSE2", ("sse2",), 8.0),  # 128-bit add + 128-bit multiply
+)
+_ARM_SIMD_FLOP_PER_CYCLE: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    ("SVE", ("sve",), 32.0),  # up to 2 x 256-bit FMA (Neoverse V1)
+    ("NEON", ("asimd",), 16.0),  # 2 x 128-bit FMA
+)
+_SCALAR_FLOP_PER_CYCLE = 2.0  # one scalar FP32 FMA
+
+
+@dataclass(frozen=True)
+class CpuInfo:
+    """CPU model name and its widest SIMD unit, as reported by the OS."""
+
+    name: str | None
+    simd: str
+    flop_per_cycle: float  # FP32 FLOP per cycle per core
+
+
+def _simd_from_flags(flags: set[str]) -> tuple[str, float]:
+    for table in (_X86_SIMD_FLOP_PER_CYCLE, _ARM_SIMD_FLOP_PER_CYCLE):
+        for label, required, flop in table:
+            if all(flag in flags for flag in required):
+                return label, flop
+    return "scalar", _SCALAR_FLOP_PER_CYCLE
+
+
+def _parse_proc_cpuinfo(text: str) -> CpuInfo:
+    """Read the model name and SIMD flags of the first CPU in ``/proc/cpuinfo``."""
+    name: str | None = None
+    flags: set[str] = set()
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        # x86: "model name" + "flags"; ARM: "Features", and "model name" only on
+        # some kernels ("Hardware"/"CPU part" otherwise, which are not names).
+        if key == "model name" and name is None and value:
+            name = value
+        elif key in ("flags", "features") and not flags:
+            flags = set(value.lower().split())
+    label, flop = _simd_from_flags(flags)
+    return CpuInfo(name, label, flop)
+
+
+def _sysctl_str(key: str) -> str | None:
+    if not shutil.which("sysctl"):
+        return None
+    try:
+        out = subprocess.check_output(
+            ["sysctl", "-n", key], text=True, timeout=5, stderr=subprocess.DEVNULL
+        ).strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return out or None
+
+
+def _probe_cpu_info() -> CpuInfo:
+    """Return the CPU's model name and SIMD width (Linux or Intel macOS)."""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            return _parse_proc_cpuinfo(fh.read())
+    except OSError:
+        pass
+    brand = _sysctl_str("machdep.cpu.brand_string")
+    if brand is None:
+        return CpuInfo(None, "scalar", _SCALAR_FLOP_PER_CYCLE)
+    # Intel macOS lists AVX/SSE in features and AVX2/AVX512F in leaf7_features,
+    # in upper case with dots ("SSE4.1", "AVX1.0"); "FMA" is in features.
+    words = " ".join(
+        _sysctl_str(key) or "" for key in ("machdep.cpu.features", "machdep.cpu.leaf7_features")
+    )
+    flags = {re.sub(r"1\.0$", "", word.lower()) for word in words.split()}
+    label, flop = _simd_from_flags(flags)
+    return CpuInfo(brand, label, flop)
+
+
 def _probe_cpu_flops() -> tuple[int, float | None]:
     """Return (logical_core_count, clock_hz_or_None) from sysctl / /proc/cpuinfo."""
     import os
@@ -576,14 +663,19 @@ def detect_hardware(
     # --- CPU fallback ---
     cores, clock_hz = _probe_cpu_flops()
     apple_cpu_flops = _apple_cpu_peak_flops(chip_name)
+    cpu_info = (
+        _probe_cpu_info()
+        if apple_cpu_flops is None
+        else CpuInfo(chip_name, "NEON/AMX", _SCALAR_FLOP_PER_CYCLE)
+    )
     if apple_cpu_flops is not None:
         peak_flops = apple_cpu_flops * mult
     elif clock_hz:
-        # scalar FP32 FMA = 2 FLOP/cycle/core; use conservative 2× factor
-        peak_flops = cores * clock_hz * 2.0 * mult
+        # Widest SIMD unit the CPU reports (2 FLOP/cycle scalar FMA without one).
+        peak_flops = cores * clock_hz * cpu_info.flop_per_cycle * mult
     else:
-        # Very conservative: assume 2 GFLOP/s per core at unknown speed
-        peak_flops = cores * 2e9 * mult
+        # Unknown clock: assume 3 GHz, an upper bound for most server parts.
+        peak_flops = cores * 3e9 * cpu_info.flop_per_cycle * mult
 
     # Apple Silicon CPU and GPU share unified memory, so the CPU's bound is the
     # chip's published bandwidth: the single-threaded NumPy triad reaches well
@@ -598,17 +690,24 @@ def detect_hardware(
     source = (
         f"CPU estimate ({cores} cores"
         + (f" @ {clock_hz / 1e9:.2f} GHz" if clock_hz else "")
-        + (", Apple NEON/AMX table" if apple_cpu_flops is not None else "")
+        + (
+            ", Apple NEON/AMX table"
+            if apple_cpu_flops is not None
+            else f", {cpu_info.simd} {cpu_info.flop_per_cycle:g} FLOP/cycle/core"
+        )
         + f" [{precision.upper()}])"
     )
     if measured_bw is not None:
         source += " + NumPy STREAM triad"
 
-    cpu_name = f"{chip_name.split(' (')[0]} (CPU)" if chip_name else "CPU"
+    if chip_name:
+        cpu_name = f"{chip_name.split(' (')[0]} (CPU)"
+    else:
+        cpu_name = cpu_info.name or "CPU"
     return (
         HardwareSpec(cpu_name, peak_flops, memory_bandwidth, device_type="cpu"),
         DetectionResult(
-            chip_name,
+            chip_name or cpu_info.name,
             cores,
             clock_hz,
             measured_bw,

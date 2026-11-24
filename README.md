@@ -554,7 +554,7 @@ to determine hardware peak compute and memory bandwidth:
 - **Apple Silicon lookup from chip table**: Identifies Apple Silicon chips (M1–M4 series) and looks up published peak FP32 throughput and memory bandwidth.
 - **NumPy STREAM-triad bandwidth benchmark**: Measures live effective memory bandwidth using a STREAM Triad kernel (`c = a + scalar * b`).
 - **NVIDIA GPU probe via nvidia-smi**: Probes GPU models, clock rates, and bus specs on systems with NVIDIA GPUs.
-- **CPU fallback**: Falls back to CPU logical core counts and clock rates when accelerator probes are unavailable.
+- **CPU fallback**: Without an accelerator (or with `device="cpu"`), the peak is logical cores × maximum clock × the FP32 FLOP/cycle of the widest SIMD unit the CPU reports: 64 for AVX-512, 32 for AVX2+FMA, 16 for AVX, 8 for SSE2, 32 for SVE and 16 for NEON (two vector FMA pipes per core), or 2 for scalar FMA. Flags and the CPU's model name come from `/proc/cpuinfo` on Linux and `sysctl machdep.cpu` on Intel macOS. This is a datasheet-style upper bound, so roofline lower bounds built on it hold; Apple Silicon uses its NEON/AMX table instead.
 
 ```python
 from neural_cost import detect_hardware
