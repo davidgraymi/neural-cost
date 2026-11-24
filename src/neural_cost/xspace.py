@@ -116,6 +116,24 @@ def read_events(serialized: bytes, parser: str = "auto") -> list[TraceEvent]:
     ]
 
 
+def warn_no_device_time(framework: str, reason: str) -> None:
+    """Warn that a device trace gave no busy time, so the gap is never silent.
+
+    A failed trace leaves ``Measurement.trace_device_time_seconds`` empty; the
+    usual cause on CUDA is CUPTI refusing a second profiler in the process
+    (another framework's profiler already subscribed) or a CUPTI/driver
+    version mismatch.
+    """
+    import warnings
+
+    warnings.warn(
+        f"{framework}: no device busy time ({reason}); "
+        "trace_device_time_seconds is unavailable for this measurement",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
 def read_trace_dir(log_dir: str, parser: str = "auto") -> DeviceTime | None:
     """Device time from the newest ``*.xplane.pb`` written under ``log_dir``."""
     files = glob.glob(os.path.join(log_dir, "**", "*.xplane.pb"), recursive=True)

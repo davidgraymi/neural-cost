@@ -6,6 +6,7 @@ from typing import Any
 
 from ..operations import Operation
 from ..profiler import Measurement
+from ..xspace import warn_no_device_time as _warn_no_device_time
 from .base import FrameworkAdapter
 
 
@@ -600,11 +601,15 @@ def _profile_device_time(
     with tempfile.TemporaryDirectory() as log_dir:
         try:
             tf.profiler.experimental.start(log_dir)
-        except (RuntimeError, ValueError, tf.errors.OpError):
+        except (RuntimeError, ValueError, tf.errors.OpError) as error:
+            _warn_no_device_time("TensorFlow", f"tf.profiler failed to start: {error}")
             return None
         try:
             for _ in range(repeats):
                 sync(function(*args, **kwargs))
         finally:
             tf.profiler.experimental.stop()
-        return read_trace_dir(log_dir, parser="tensorflow")
+        traced = read_trace_dir(log_dir, parser="tensorflow")
+        if traced is None:
+            _warn_no_device_time("TensorFlow", "the profiler trace has no GPU timeline")
+        return traced

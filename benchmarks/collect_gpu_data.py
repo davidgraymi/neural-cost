@@ -254,6 +254,18 @@ def _tf_block(fn: Callable, args: tuple, warmup: int, repeats: int) -> Measureme
 _stats = timing_stats
 
 
+def _report_missing_device_time(framework: str, recs: list[BenchRecord]) -> None:
+    """One line when a GPU section recorded no device busy time (issue #92)."""
+    on_device = [r for r in recs if not str(r.device).lower().startswith("cpu")]
+    missing = [r for r in on_device if r.trace_device_ms is None]
+    if missing:
+        print(
+            f"  [warn] {framework}: no device busy time in {len(missing)}/{len(on_device)} records "
+            "(device tracing failed; trace_device_ms is empty). On CUDA, CUPTI allows one "
+            "profiler per process: run one framework per process with --framework"
+        )
+
+
 def _is_out_of_memory(exc: BaseException) -> bool:
     """True for a device allocation failure (PyTorch CUDA/MPS, XLA)."""
     text = str(exc).lower()
@@ -1578,6 +1590,7 @@ def main() -> None:
         )
         all_records.extend(recs)
         _print_recs(recs)
+        _report_missing_device_time("PyTorch", recs)
         print()
     elif run_torch:
         print("[skip] PyTorch not installed or device unavailable")
@@ -1599,6 +1612,8 @@ def main() -> None:
             )
             all_records.extend(recs)
             _print_recs(recs)
+            if jax_dev.platform != "mps":  # jax-mps is never traced
+                _report_missing_device_time("JAX", recs)
             print()
         else:
             print("[skip] JAX: no GPU/accelerator device available")
@@ -1625,6 +1640,7 @@ def main() -> None:
             )
             all_records.extend(recs)
             _print_recs(recs)
+            _report_missing_device_time("TensorFlow", recs)
             print()
     elif run_tf:
         print("[skip] TensorFlow not installed")
