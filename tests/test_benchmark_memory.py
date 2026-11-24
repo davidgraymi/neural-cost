@@ -95,6 +95,22 @@ class BenchmarkMemoryTelemetryTests(unittest.TestCase):
         self.assertIsNotNone(meas.peak_memory_bytes)
         self.assertGreater(meas.peak_memory_bytes, 0)
 
+    def test_torch_trace_time_counts_nested_ops_once(self) -> None:
+        pytest.importorskip("torch")
+        import torch
+
+        adapter = TorchAdapter()
+        model = torch.nn.Sequential(*[torch.nn.Linear(256, 256) for _ in range(4)]).eval()
+        x = torch.randn(64, 256)
+
+        with torch.no_grad():
+            meas = adapter.trace(model, x, warmup=2, repeats=5)
+        self.assertIsNotNone(meas.trace_device_time_seconds)
+        self.assertGreater(meas.trace_device_time_seconds, 0)
+        # Profiled op time sits inside the timed loop, so it cannot exceed the
+        # wall clock. Summing inclusive times over nested ops roughly doubled it.
+        self.assertLessEqual(meas.trace_device_time_seconds, sum(meas.samples_seconds))
+
     def test_memory_gap_correlation_with_profile(self) -> None:
         pytest.importorskip("torch")
         import torch
