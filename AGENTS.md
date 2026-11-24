@@ -18,8 +18,8 @@ In Claude Code you can also install it as a plugin:
 `/plugin marketplace add davidgraymi/neural-cost`, then
 `/plugin install neural-cost@neural-cost`.
 
-Reporting rule: always state the device, batch size, number of timed runs and
-coverage. Never quote a roofline efficiency without saying how much of the
+Reporting rule: always state the device, batch size, number of timed runs, timing
+spread and coverage. Never quote a roofline efficiency without saying how much of the
 workload it covers.
 
 ## Working on this repository

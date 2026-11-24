@@ -332,6 +332,10 @@ def analyze_gap(
         findings.append(mismatch)
     if coverage is not None and (warning := coverage.warning(coverage_threshold)) is not None:
         findings.append(warning)
+    # Duck-typed measurements (median_seconds only) skip the noise check.
+    noise_check = getattr(measurement, "noise_warning", None)
+    if callable(noise_check) and (noise := noise_check()) is not None:
+        findings.append(noise)
 
     layer_analyses = ()
     if operations is not None:

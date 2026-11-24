@@ -172,8 +172,11 @@ When you report results, always state:
 
 - the device (`measurement.device`, `hardware.name` and `hardware.device_type`),
 - the batch size and input shapes,
-- the number of timed runs (`len(measurement.samples_seconds)`) and that the
-  figure is a median,
+- the number of timed runs (`len(measurement.samples_seconds)`), that the
+  figure is a median, and its spread (`measurement.relative_spread`, the
+  interquartile range over the median). If `measurement.noise_warning()` is
+  not `None` (spread above 10 %), say the timing is noisy and rerun with more
+  warmup and repeats before drawing conclusions,
 - **the coverage**. Never quote a roofline efficiency without saying how much
   of the workload it covers, e.g. "59% roofline efficiency over 100% of 257
   traced equations".

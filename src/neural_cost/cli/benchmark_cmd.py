@@ -266,6 +266,9 @@ def run_benchmark(args: argparse.Namespace) -> int:
         "in_features": k,
         "out_features": n,
         "median_ms": measurement.median_seconds * 1e3,
+        "min_ms": measurement.min_seconds * 1e3,
+        "relative_spread": measurement.relative_spread,
+        "repeats": len(measurement.samples_seconds),
         "achieved_gflops": gap.achieved_flops / 1e9,
         "achieved_gbw": gap.achieved_bandwidth / 1e9,
         "roofline_efficiency": gap.efficiency,
@@ -283,10 +286,17 @@ def run_benchmark(args: argparse.Namespace) -> int:
 
     print("┌─ Neural Cost Empirical Benchmark ──────────────────────────────────────────")
     print(f"│  Workload:           {b}×{k}→{n} Linear ({fw.upper()})")
-    print(f"│  Median Latency:     {measurement.median_seconds * 1e3:.3f} ms")
+    spread = measurement.relative_spread
+    spread_text = f", IQR {spread:.1%} of median" if spread is not None else ""
+    print(
+        f"│  Median Latency:     {measurement.median_seconds * 1e3:.3f} ms "
+        f"(min {measurement.min_seconds * 1e3:.3f} ms, {len(measurement.samples_seconds)} runs{spread_text})"
+    )
     print(f"│  Achieved Compute:   {gap.achieved_flops / 1e9:.2f} GFLOP/s")
     print(f"│  Achieved Bandwidth: {gap.achieved_bandwidth / 1e9:.2f} GB/s")
     print(f"│  Roofline Efficiency:{gap.efficiency:.1%}")
     print(f"│  Regime:             {gap.bottleneck.upper()}-BOUND")
+    if (noise := measurement.noise_warning()) is not None:
+        print(f"│  Warning:            {noise}")
     print("└────────────────────────────────────────────────────────────────────────────")
     return 0
