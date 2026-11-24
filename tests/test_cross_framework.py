@@ -293,3 +293,23 @@ def test_fx_adapter_matches_hook_adapter():
         rtol=0.0,
     )
     assert report.consistent, report.render()
+
+
+def test_adapters_trace_without_autograd():
+    """Shape tracing must not build an autograd graph.
+
+    With grad enabled the graph keeps every activation alive: ConvNeXt at
+    batch 128 needed ~13 GiB of host RAM and was OOM-killed on a free Colab VM.
+    """
+    torch = pytest.importorskip("torch")
+    from neural_cost.adapters import TorchAdapter, TorchFxAdapter
+
+    grad_enabled: list[bool] = []
+    model = torch.nn.Sequential(torch.nn.Linear(D, OUT))
+    # nn.Linear is an FX leaf, so the hook fires only when real tensors run.
+    model[0].register_forward_hook(lambda *_: grad_enabled.append(torch.is_grad_enabled()))
+
+    for adapter in (TorchAdapter(), TorchFxAdapter()):
+        grad_enabled.clear()
+        adapter.operations(model, (torch.ones(B, D),))
+        assert grad_enabled == [False], type(adapter).__name__

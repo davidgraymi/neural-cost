@@ -1030,7 +1030,10 @@ class TorchFxAdapter(TorchAdapter):
 
         try:
             gm = torch.fx.symbolic_trace(model)
-            ShapeProp(gm).propagate(*example_inputs)
+            # Without no_grad, autograd keeps every activation alive for a
+            # backward pass that never comes: ~7x the memory of a forward pass.
+            with torch.no_grad():
+                ShapeProp(gm).propagate(*example_inputs)
         except Exception:  # noqa: BLE001
             # Fall back gracefully to hook-based capture if symbolic tracing fails
             return super().operations(model, example_inputs)
