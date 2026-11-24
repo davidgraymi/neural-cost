@@ -29,12 +29,20 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import platform
 import subprocess
 import sys
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+
+# Before JAX or TensorFlow is imported: both reserve most of every GPU's memory
+# up front by default (JAX 75 %, TensorFlow nearly all), even for a backend that
+# runs on the CPU, so a GPU backend measured after them would start short of
+# memory and its results would depend on backend order.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -369,6 +377,11 @@ def main() -> None:
         help="Exit 1 if any measured runtime beat its lower bound",
     )
     args = parser.parse_args()
+    if args.backends and not any(
+        b.startswith("jax-") and not b.endswith("cpu") for b in args.backends
+    ):
+        # Only CPU JAX backends requested: don't start JAX's GPU client at all.
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
     hardware, info = detect_hardware()
     backends = args.backends or available_backends()
