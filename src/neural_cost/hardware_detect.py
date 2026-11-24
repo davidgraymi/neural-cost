@@ -165,15 +165,23 @@ def normalize_device_type(device: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _measure_bandwidth_gb_s(size_mb: int = 256, repeats: int = 5) -> float | None:
-    """Return effective memory bandwidth in GB/s via a NumPy array copy.
+def _measure_bandwidth_gb_s(
+    size_mb: int = 256, repeats: int = 5, threads: int | None = None
+) -> float | None:
+    """Return effective memory bandwidth in GB/s from a NumPy STREAM triad.
 
-    Uses a *STREAM Triad*-style kernel (c = a + scalar * b) over a buffer
-    large enough to exceed typical L3 caches, measured with
-    :func:`time.perf_counter_ns`.  Returns ``None`` when NumPy (an optional
-    dependency) is not installed.
+    Runs ``c = a + scalar * b`` over float64 buffers large enough to exceed
+    typical L3 caches.  Each thread owns a slice and works through it in
+    cache-sized blocks (``c = scalar * b`` then ``c += a``), so ``c`` stays in
+    cache between the two passes and no temporary is allocated: DRAM traffic
+    is the triad's three arrays.  ``threads`` defaults to ``os.cpu_count()``
+    (NumPy releases the GIL), since one core cannot saturate a server's memory
+    controllers and the bound must hold for multi-threaded BLAS.  Returns
+    ``None`` when NumPy (an optional dependency) is not installed.
     """
+    import os
     import time
+    from concurrent.futures import ThreadPoolExecutor
 
     try:
         import numpy as np
@@ -181,23 +189,33 @@ def _measure_bandwidth_gb_s(size_mb: int = 256, repeats: int = 5) -> float | Non
         return None
 
     n = (size_mb * 1024 * 1024) // 8  # float64 elements
-    a = np.random.rand(n).astype(np.float64)
-    b = np.random.rand(n).astype(np.float64)
-    c = np.empty_like(a)
+    a = np.random.rand(n)
+    b = np.random.rand(n)
+    c = np.empty_like(a)  # random.rand already touched a and b; warmup touches c
     scalar = 3.0
+    block = 1 << 17  # 1 MiB of float64 per array: three blocks fit any L2
+    workers = max(1, threads or os.cpu_count() or 1)
+    edges = [n * k // workers for k in range(workers + 1)]
 
-    # Warmup
-    np.add(a, b, out=c)
-    np.add(a, b, out=c)
+    def triad(lo: int, hi: int) -> None:
+        for start in range(lo, hi, block):
+            stop = min(start + block, hi)
+            out = c[start:stop]
+            np.multiply(b[start:stop], scalar, out=out)
+            np.add(out, a[start:stop], out=out)
 
-    samples: list[float] = []
     bytes_moved = 3 * a.nbytes  # read a, read b, write c
+    samples: list[float] = []
+    with ThreadPoolExecutor(workers) as pool:
 
-    for _ in range(repeats):
-        t0 = time.perf_counter_ns()
-        np.add(a * scalar, b, out=c)
-        elapsed = (time.perf_counter_ns() - t0) / 1e9
-        samples.append(bytes_moved / elapsed / 1e9)
+        def run() -> float:
+            t0 = time.perf_counter_ns()
+            list(pool.map(triad, edges[:-1], edges[1:]))
+            return (time.perf_counter_ns() - t0) / 1e9
+
+        run()  # warmup: page in c, start the threads
+        for _ in range(repeats):
+            samples.append(bytes_moved / run() / 1e9)
 
     samples.sort()
     # Use the median of the top half to reduce OS scheduling noise.
@@ -678,7 +696,7 @@ def detect_hardware(
         peak_flops = cores * 3e9 * cpu_info.flop_per_cycle * mult
 
     # Apple Silicon CPU and GPU share unified memory, so the CPU's bound is the
-    # chip's published bandwidth: the single-threaded NumPy triad reaches well
+    # chip's published bandwidth: the NumPy triad reaches well
     # under half of it, while multi-threaded BLAS gets close.  Elsewhere the
     # measurement is the only figure available.
     if apple_bw and apple_cpu_flops is not None:

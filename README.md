@@ -552,7 +552,7 @@ Auto-detection via `detect_hardware()` returns a `(HardwareSpec, DetectionResult
 to determine hardware peak compute and memory bandwidth:
 
 - **Apple Silicon lookup from chip table**: Identifies Apple Silicon chips (M1–M4 series) and looks up published peak FP32 throughput and memory bandwidth.
-- **NumPy STREAM-triad bandwidth benchmark**: Measures live effective memory bandwidth using a STREAM Triad kernel (`c = a + scalar * b`).
+- **NumPy STREAM-triad bandwidth benchmark**: Measures live effective memory bandwidth using a STREAM Triad kernel (`c = a + scalar * b`), run on every core in cache-sized blocks with no temporaries, so it counts only DRAM traffic.
 - **NVIDIA GPU probe via nvidia-smi**: Probes GPU models, clock rates, and bus specs on systems with NVIDIA GPUs.
 - **CPU fallback**: Without an accelerator (or with `device="cpu"`), the peak is logical cores × maximum clock × the FP32 FLOP/cycle of the widest SIMD unit the CPU reports: 64 for AVX-512, 32 for AVX2+FMA, 16 for AVX, 8 for SSE2, 32 for SVE and 16 for NEON (two vector FMA pipes per core), or 2 for scalar FMA. Flags and the CPU's model name come from `/proc/cpuinfo` on Linux and `sysctl machdep.cpu` on Intel macOS. This is a datasheet-style upper bound, so roofline lower bounds built on it hold; Apple Silicon uses its NEON/AMX table instead.
 
@@ -584,8 +584,8 @@ When an adapter benchmark records the device it ran on, `analyze_gap` adds a
 **Device mismatch** finding if the two disagree.  On Apple Silicon the CPU
 peak is the higher of the NEON P/E-core peak and the per-cluster AMX/SME matrix
 units that Accelerate (PyTorch's CPU BLAS) drives, and the CPU is bounded by the
-chip's unified memory bandwidth (a single-threaded NumPy triad reaches well
-under half of it).  The CLI accepts the same option:
+chip's unified memory bandwidth (the NumPy triad reaches only about half of
+it).  The CLI accepts the same option:
 `neural-cost hardware --device cpu`.
 
 Apple variants are told apart by GPU core count (from `system_profiler`): the
