@@ -12,12 +12,15 @@
 
 ### Architectures under test
 
+Scale tier: `standard`. PyTorch, JAX and TensorFlow build each architecture from
+the same dimensions (`benchmarks/models/configs.py`), so they run the same network.
+
 | Architecture | Description |
 |---|---|
-| **FF DNN** | 784 → 128 → 128 → 10, ReLU + LayerNorm |
-| **ConvNeXt** | Depthwise 7×7 → LayerNorm → 1×1 Inverted Bottleneck (dim×4) → GELU → 1×1, input 32×32×3 |
-| **ViT** | Vision Transformer: Patch Embedding (4×4) → Class Token + Position → Multi-Head Self-Attention + MLP, input 32×32×3 |
-| **Transformer** | 2-layer encoder (MHA h=4 with SDPA + FFN×4 + RMSNorm/LayerNorm), embed=128, seq=32 |
+| **FF DNN** | 1024 → 4096 → 4096 → 1024 → 10, GELU + LayerNorm |
+| **ConvNeXt** | 4-stage ConvNeXt, depths [3, 3, 9, 3], dims [96, 192, 384, 768] (4×4 stem; 7×7 depthwise → LayerNorm → 1×1 (dim×4) → GELU → 1×1), input 224×224×3 |
+| **ViT** | 6-block pre-norm ViT, 16×16 patches, embed 384, 6 heads, MLP×4, input 224×224×3 |
+| **Transformer** | 6-layer pre-norm encoder (SDPA, 12 heads, FFN 3072, LayerNorm), embed 768, seq 512 |
 
 ### Frameworks and optimisation variants
 

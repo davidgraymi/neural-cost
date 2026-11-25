@@ -573,107 +573,6 @@ JAX_BUILDERS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# TF model builders
-# ---------------------------------------------------------------------------
-
-
-def _tf_ff_dnn(batch: int):
-    import tensorflow as tf
-
-    m = tf.keras.Sequential(
-        [
-            tf.keras.layers.Dense(EMBED_DIM, activation="relu"),
-            tf.keras.layers.LayerNormalization(),
-            tf.keras.layers.Dense(EMBED_DIM, activation="relu"),
-            tf.keras.layers.LayerNormalization(),
-            tf.keras.layers.Dense(NUM_CLASSES),
-        ]
-    )
-    x = tf.ones((batch, 784))
-    m(x)
-    return m, (x,)
-
-
-def _tf_cnn(batch: int):
-    import tensorflow as tf
-
-    m = tf.keras.Sequential(
-        [
-            tf.keras.layers.Conv2D(EMBED_DIM // 2, 3, padding="same", activation="relu"),
-            tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.MaxPooling2D(2),
-            tf.keras.layers.Conv2D(EMBED_DIM, 3, padding="same", activation="relu"),
-            tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.GlobalAveragePooling2D(),
-            tf.keras.layers.Dense(NUM_CLASSES),
-        ]
-    )
-    x = tf.ones((batch, IMG_SIZE, IMG_SIZE, 3))
-    m(x)
-    return m, (x,)
-
-
-def _tf_rnn(batch: int):
-    import tensorflow as tf
-
-    inp = tf.keras.layers.Input(shape=(32, EMBED_DIM))
-    x = tf.keras.layers.GRU(EMBED_DIM, return_sequences=True)(inp)
-    x = tf.keras.layers.GRU(EMBED_DIM)(x)
-    out = tf.keras.layers.Dense(NUM_CLASSES)(x)
-    m = tf.keras.Model(inp, out)
-    xi = tf.ones((batch, 32, EMBED_DIM))
-    m(xi)
-    return m, (xi,)
-
-
-def _tf_lstm(batch: int):
-    import tensorflow as tf
-
-    inp = tf.keras.layers.Input(shape=(32, EMBED_DIM))
-    x = tf.keras.layers.LSTM(EMBED_DIM, return_sequences=True)(inp)
-    x = tf.keras.layers.LSTM(EMBED_DIM)(x)
-    out = tf.keras.layers.Dense(NUM_CLASSES)(x)
-    m = tf.keras.Model(inp, out)
-    xi = tf.ones((batch, 32, EMBED_DIM))
-    m(xi)
-    return m, (xi,)
-
-
-def _tf_transformer(batch: int):
-    import tensorflow as tf
-
-    inp = tf.keras.layers.Input(shape=(32, EMBED_DIM))
-    x = tf.keras.layers.MultiHeadAttention(num_heads=NUM_HEADS, key_dim=EMBED_DIM // NUM_HEADS)(
-        inp, inp
-    )
-    x = tf.keras.layers.LayerNormalization()(inp + x)
-    ff = tf.keras.layers.Dense(EMBED_DIM * 4, activation="relu")(x)
-    ff = tf.keras.layers.Dense(EMBED_DIM)(ff)
-    x = tf.keras.layers.LayerNormalization()(x + ff)
-    x2 = tf.keras.layers.MultiHeadAttention(num_heads=NUM_HEADS, key_dim=EMBED_DIM // NUM_HEADS)(
-        x, x
-    )
-    x2 = tf.keras.layers.LayerNormalization()(x + x2)
-    ff2 = tf.keras.layers.Dense(EMBED_DIM * 4, activation="relu")(x2)
-    ff2 = tf.keras.layers.Dense(EMBED_DIM)(ff2)
-    x2 = tf.keras.layers.LayerNormalization()(x2 + ff2)
-    p = tf.keras.layers.GlobalAveragePooling1D()(x2)
-    out = tf.keras.layers.Dense(NUM_CLASSES)(p)
-    m = tf.keras.Model(inp, out)
-    xi = tf.ones((batch, 32, EMBED_DIM))
-    m(xi)
-    return m, (xi,)
-
-
-TF_BUILDERS = {
-    "FF DNN": _tf_ff_dnn,
-    "CNN": _tf_cnn,
-    "RNN": _tf_rnn,
-    "LSTM": _tf_lstm,
-    "Transformer": _tf_transformer,
-}
-
 DEFAULT_ARCHITECTURES: list[str] = ["FF DNN", "ConvNeXt", "ViT", "Transformer"]
 LEGACY_ARCHITECTURES: list[str] = ["CNN", "RNN", "LSTM"]
 
@@ -737,13 +636,13 @@ def eval_torch(
                         for x in inputs
                     )
             except Exception as exc:
-                print(f"  PyTorch get_model {arch} scale={scale}: {exc}")
+                print(f"  [skip] PyTorch get_model {arch} scale={scale} B={batch}: {exc}")
                 continue
             # Static profile
             try:
                 prof = profile_model(model, inputs, adapter)
             except Exception as exc:
-                print(f"  PyTorch profile {arch} B={batch}: {exc}")
+                print(f"  [skip] PyTorch profile {arch} B={batch}: {exc}")
                 continue
 
             flop_multiplier = get_mode_flops_multiplier(mode)
@@ -885,12 +784,12 @@ def eval_jax(
             try:
                 model, inputs = get_model(arch, framework="jax", scale=scale, batch=batch)
             except Exception as exc:
-                print(f"  JAX get_model {arch} scale={scale}: {exc}")
+                print(f"  [skip] JAX get_model {arch} scale={scale} B={batch}: {exc}")
                 continue
             try:
                 prof = profile_model(model, inputs, adapter)
             except Exception as exc:
-                print(f"  JAX profile {arch} B={batch}: {exc}")
+                print(f"  [skip] JAX profile {arch} B={batch}: {exc}")
                 continue
             flop_multiplier = get_mode_flops_multiplier(mode)
             cost = prof.cost
@@ -985,13 +884,16 @@ def eval_tensorflow(
     active_archs = architectures if architectures is not None else ARCHITECTURES
     records: list[BenchRecord] = []
     for arch in active_archs:
-        if arch not in TF_BUILDERS:
-            continue
         for batch in batches:
-            model, inputs = TF_BUILDERS[arch](batch)
+            try:
+                model, inputs = get_model(arch, framework="tensorflow", scale=scale, batch=batch)
+            except Exception as exc:
+                print(f"  [skip] TF get_model {arch} scale={scale} B={batch}: {exc}")
+                continue
             try:
                 prof = profile_model(model, inputs, adapter)
-            except Exception:
+            except Exception as exc:
+                print(f"  [skip] TF profile {arch} B={batch}: {exc}")
                 continue
             flop_multiplier = get_mode_flops_multiplier(mode)
             cost = prof.cost

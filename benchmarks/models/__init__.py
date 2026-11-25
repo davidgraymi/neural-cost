@@ -104,6 +104,13 @@ def get_model(
         return JAX_BUILDERS[arch_key](scale=scale, batch=batch, **kwargs)
 
     elif fw in {"tf", "tensorflow"}:
-        raise NotImplementedError("TensorFlow benchmark models not installed in this environment")
+        from .tf_models import TF_BUILDERS
+
+        if arch_key not in TF_BUILDERS:
+            raise KeyError(
+                f"Unknown TensorFlow architecture: {name!r} (normalized: {arch_key!r}). "
+                f"Available: {list(TF_BUILDERS.keys())}"
+            )
+        return TF_BUILDERS[arch_key](scale=scale, batch=batch, **kwargs)
 
     raise ValueError(f"Unsupported framework: {framework!r}")

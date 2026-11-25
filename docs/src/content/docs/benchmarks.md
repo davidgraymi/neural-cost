@@ -42,6 +42,22 @@ Reports print it on their first line. Pass `--results-dir` to any script to
 write or read elsewhere; the report generators default to the most recently
 written directory.
 
+## Model definitions
+
+`collect_data.py` sweeps four architectures (FF DNN, ConvNeXt, ViT,
+Transformer; `--include-legacy` adds CNN, RNN and LSTM) in PyTorch, JAX and
+TensorFlow. `benchmarks/models/` builds each one per framework
+(`torch_models.py`, `jax_models.py`, `tf_models.py`) from the dimensions in
+`configs.py`, so the three frameworks run the same network at a given
+`--scale`. PyTorch is the reference: the JAX and Keras models copy its layers,
+biases and LayerNorms. `tests/test_benchmark_models.py` checks that the JAX and
+TensorFlow adapters report FLOPs within 5% and parameters within 3% of PyTorch.
+In practice they are within 3% and 2%: JAX counts LayerNorm and GELU as primitive
+ops, and counts the ViT position embedding as a parameter.
+
+When an architecture can't be built or profiled for a framework, the sweep
+prints a `[skip]` line naming it and the reason, then carries on.
+
 ## Free CUDA runs (Colab or Kaggle)
 
 [`benchmarks/cloud_gpu_benchmark.ipynb`](https://github.com/davidgraymi/neural-cost/blob/main/benchmarks/cloud_gpu_benchmark.ipynb)

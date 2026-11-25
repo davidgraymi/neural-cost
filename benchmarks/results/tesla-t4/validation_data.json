@@ -1,0 +1,1256 @@
+{
+  "run": {
+    "neural_cost_version": "0.19.1.dev1+gfa0e97817",
+    "git_describe": "v0.19.0-1-gfa0e978",
+    "git_commit": "fa0e978173c1bbe4f275313a205c6177c8e95f64",
+    "git_dirty": null,
+    "device": "Tesla T4",
+    "device_slug": "tesla-t4",
+    "frameworks": {
+      "torch": "2.14.1+cu130",
+      "jax": "0.12.1",
+      "jaxlib": "0.12.1",
+      "tensorflow": "2.21.0",
+      "keras": "3.13.2",
+      "numpy": "2.4.6"
+    },
+    "python": "3.13.16",
+    "platform": "Linux 6.6.159+ x86_64",
+    "created_utc": "2026-11-24T13:14:47+00:00",
+    "script": "validate.py",
+    "backends": [
+      "torch-cuda",
+      "jax-gpu",
+      "tf-gpu",
+      "torch-cpu",
+      "jax-cpu"
+    ],
+    "quick": true
+  },
+  "hardware": "Tesla T4",
+  "detection": "NVIDIA profile (Tesla T4) [FP32] + NumPy STREAM triad",
+  "backends": {
+    "torch-cuda": {
+      "calibration": {
+        "achievable_flops": 4271246713812.506,
+        "achievable_bandwidth": 233717402023.93954,
+        "dispatch_seconds": 8.4510425e-06,
+        "call_overhead_seconds": 1.51149575e-05,
+        "flops_curve": [
+          [
+            65536.0,
+            4296856856.4423485
+          ],
+          [
+            524288.0,
+            37365545365.81595
+          ],
+          [
+            4194304.0,
+            316489380566.36475
+          ],
+          [
+            33554432.0,
+            790695889356.4712
+          ],
+          [
+            268435456.0,
+            2368000993652.7607
+          ],
+          [
+            2147483648.0,
+            3174787380763.4653
+          ],
+          [
+            17179869184.0,
+            4271246713812.506
+          ],
+          [
+            137438953472.0,
+            4267175687474.592
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            17297426932.407486
+          ],
+          [
+            524288.0,
+            72517818217.38733
+          ],
+          [
+            2097152.0,
+            277056720146.4146
+          ],
+          [
+            8388608.0,
+            219714325725.66653
+          ],
+          [
+            33554432.0,
+            231729502762.43094
+          ],
+          [
+            134217728.0,
+            233546544881.2124
+          ],
+          [
+            536870912.0,
+            233717402023.93954
+          ]
+        ],
+        "source": "torch microbenchmarks (cuda, float32)"
+      },
+      "report": {
+        "title": "PyTorch eager (cuda)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 0.00011620200000000001,
+            "lower_bound_seconds": 1.083552e-06,
+            "tightness": 0.009324727629472814,
+            "predicted_seconds": 0.00014598261041087854,
+            "relative_error": 0.2562831139815023,
+            "metadata": {
+              "family": "mlp",
+              "device": "cuda",
+              "min_seconds": 0.000109252,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 7.013567187760485e-05,
+            "zero_shot_error": -0.3964331777628195,
+            "replay_seconds": 8.386046506115107e-05,
+            "replay_error": -0.27832167207835434
+          },
+          {
+            "name": "mlp w=256 b=64",
+            "measured_seconds": 0.0001571795,
+            "lower_bound_seconds": 2.228013234567901e-06,
+            "tightness": 0.014174960695051841,
+            "predicted_seconds": 0.00013215460662017154,
+            "relative_error": -0.1592121961186316,
+            "metadata": {
+              "family": "mlp",
+              "device": "cuda",
+              "min_seconds": 0.000133987,
+              "working_set_bytes": 667688,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 8.538249781865821e-05,
+            "zero_shot_error": -0.4567835002741566,
+            "replay_seconds": 0.00010197786608310514,
+            "replay_error": -0.3512012311840594
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 0.000150319,
+            "lower_bound_seconds": 1.6867488e-05,
+            "tightness": 0.11221128400268764,
+            "predicted_seconds": 0.00020767685136065567,
+            "relative_error": 0.3815741946171521,
+            "metadata": {
+              "family": "mlp",
+              "device": "cuda",
+              "min_seconds": 0.000133202,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 7.458418493319617e-05,
+            "zero_shot_error": -0.5038272943992698,
+            "replay_seconds": 9.398884662065516e-05,
+            "replay_error": -0.37473741429456586
+          },
+          {
+            "name": "mlp w=1024 b=64",
+            "measured_seconds": 0.00015494499999999997,
+            "lower_bound_seconds": 3.375158775308642e-05,
+            "tightness": 0.21782947338143485,
+            "predicted_seconds": 0.00022613496249174252,
+            "relative_error": 0.45945311234142794,
+            "metadata": {
+              "family": "mlp",
+              "device": "cuda",
+              "min_seconds": 0.000150662,
+              "working_set_bytes": 8962088,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 0.00020909851200551376,
+            "zero_shot_error": 0.3495015134758385,
+            "replay_seconds": 0.00015911109346839958,
+            "replay_error": 0.026887563124977292
+          },
+          {
+            "name": "cnn 32px b=1",
+            "measured_seconds": 0.0003790535,
+            "lower_bound_seconds": 2.702040888888889e-06,
+            "tightness": 0.007128389234999515,
+            "predicted_seconds": 0.0001986694790443299,
+            "relative_error": -0.4758801091552251,
+            "metadata": {
+              "family": "cnn",
+              "device": "cuda",
+              "min_seconds": 0.000343288,
+              "working_set_bytes": 640296,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.00012112077142777373,
+            "zero_shot_error": -0.6804652339899943,
+            "replay_seconds": 0.00021319948386185387,
+            "replay_error": -0.4375477766018416
+          },
+          {
+            "name": "cnn 32px b=16",
+            "measured_seconds": 0.000346916,
+            "lower_bound_seconds": 4.297033422222222e-05,
+            "tightness": 0.1238638005229572,
+            "predicted_seconds": 0.0002613131535550338,
+            "relative_error": -0.24675381488592685,
+            "metadata": {
+              "family": "cnn",
+              "device": "cuda",
+              "min_seconds": 0.000310275,
+              "working_set_bytes": 4572456,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 0.0002931718764755135,
+            "zero_shot_error": -0.1549197025345805,
+            "replay_seconds": 0.00019840076849064953,
+            "replay_error": -0.42810141794944734
+          },
+          {
+            "name": "lstm d=128 b=1",
+            "measured_seconds": 0.000518494,
+            "lower_bound_seconds": 3.5540128e-05,
+            "tightness": 0.06854491662391464,
+            "predicted_seconds": 0.00025481672670798165,
+            "relative_error": -0.5085445025246548,
+            "metadata": {
+              "family": "lstm",
+              "device": "cuda",
+              "min_seconds": 0.000429277,
+              "working_set_bytes": 1193000,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.0010324255564203558,
+            "zero_shot_error": 0.9912005855812329,
+            "replay_seconds": 0.0013753152233721584,
+            "replay_error": 1.6525190713338216
+          },
+          {
+            "name": "lstm d=128 b=16",
+            "measured_seconds": 0.000492847,
+            "lower_bound_seconds": 5.565752987654321e-05,
+            "tightness": 0.11293064556859067,
+            "predicted_seconds": 0.00026903437633323305,
+            "relative_error": -0.4541219154560482,
+            "metadata": {
+              "family": "lstm",
+              "device": "cuda",
+              "min_seconds": 0.000472562,
+              "working_set_bytes": 3159080,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.0010398658413935784,
+            "zero_shot_error": 1.1099161431307856,
+            "replay_seconds": 0.0012670946104661788,
+            "replay_error": 1.5709695107531925
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.000381275,
+            "lower_bound_seconds": 1.349808987654321e-05,
+            "tightness": 0.035402504429986784,
+            "predicted_seconds": 0.0003090182927567404,
+            "relative_error": -0.18951336238478683,
+            "metadata": {
+              "family": "transformer",
+              "device": "cuda",
+              "min_seconds": 0.000342239,
+              "working_set_bytes": 3683328,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.0002078313500385661,
+            "zero_shot_error": -0.4549043340408731,
+            "replay_seconds": 0.00027301745797849835,
+            "replay_error": -0.28393558985378436
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.000447417,
+            "lower_bound_seconds": 0.00010792737501234567,
+            "tightness": 0.24122323249305608,
+            "predicted_seconds": 0.000545511613235475,
+            "relative_error": 0.21924650434711926,
+            "metadata": {
+              "family": "transformer",
+              "device": "cuda",
+              "min_seconds": 0.00041022,
+              "working_set_bytes": 7353344,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 0.0004966342726224305,
+            "zero_shot_error": 0.11000313493325141,
+            "replay_seconds": 0.00041103377244292895,
+            "replay_error": -0.08131838431948502
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.09037810031330114,
+        "tightness_min": 0.007128389234999515,
+        "tightness_max": 0.24122323249305608,
+        "bound_rank_correlation": 0.6242424242424243,
+        "loo_mape": 0.3350582825812475,
+        "loo_median_ape": 0.31892865429932715,
+        "loo_bias": 0.8606217355955842,
+        "loo_within_25pct": 0.4,
+        "loo_rank_correlation": 0.6606060606060606,
+        "roofline_only_mape": 0.9057366065417847,
+        "full_model": {
+          "call_overhead_seconds": 0.0,
+          "dispatch_seconds": 2.6134797369938432e-05,
+          "seconds_per_flop": 0.0,
+          "seconds_per_byte": 7.281888186384433e-12,
+          "fitted_cases": 10
+        },
+        "hardware": "Tesla T4",
+        "zero_shot_mape": 0.5207954620122802,
+        "zero_shot_median_ape": 0.4558439171575148,
+        "zero_shot_rank_correlation": 0.8545454545454545,
+        "calibration_source": "torch microbenchmarks (cuda, float32)",
+        "replay_mape": 0.548553963149353,
+        "replay_median_ape": 0.3629693227393126,
+        "replay_rank_correlation": 0.9878787878787879
+      }
+    },
+    "jax-gpu": {
+      "calibration": {
+        "achievable_flops": 5958376085296.294,
+        "achievable_bandwidth": 234829787075.8324,
+        "dispatch_seconds": 7.952556e-05,
+        "call_overhead_seconds": 4.9408440000000016e-05,
+        "flops_curve": [
+          [
+            65536.0,
+            1804554340.9422593
+          ],
+          [
+            524288.0,
+            11624495587.778814
+          ],
+          [
+            4194304.0,
+            52077278370.9958
+          ],
+          [
+            33554432.0,
+            818620410353.9978
+          ],
+          [
+            268435456.0,
+            1386031310669.5854
+          ],
+          [
+            2147483648.0,
+            2387586510228.065
+          ],
+          [
+            17179869184.0,
+            5958376085296.294
+          ],
+          [
+            137438953472.0,
+            5106205289369.007
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            115818679862.15427
+          ],
+          [
+            524288.0,
+            21264976678.15859
+          ],
+          [
+            2097152.0,
+            158275622641.50946
+          ],
+          [
+            8388608.0,
+            281657589900.27875
+          ],
+          [
+            33554432.0,
+            182900799642.42297
+          ],
+          [
+            134217728.0,
+            217411217390.6001
+          ],
+          [
+            536870912.0,
+            234829787075.8324
+          ]
+        ],
+        "source": "jax microbenchmarks (gpu, jit)"
+      },
+      "report": {
+        "title": "JAX jit (gpu)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 0.00018672399999999998,
+            "lower_bound_seconds": 1.124576e-06,
+            "tightness": 0.006022664467342174,
+            "predicted_seconds": 0.00023566185042968695,
+            "relative_error": 0.2620865578591235,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000174945,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.00017105359206005436,
+            "zero_shot_error": -0.08392283766385479,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=256 b=64",
+            "measured_seconds": 0.00024294749999999998,
+            "lower_bound_seconds": 4.355216e-06,
+            "tightness": 0.017926572613424712,
+            "predicted_seconds": 0.00020634122262085466,
+            "relative_error": -0.1506756701721373,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.00020841,
+              "working_set_bytes": 667688,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.00017966850051084925,
+            "zero_shot_error": -0.2604636783220685,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 0.000243176,
+            "lower_bound_seconds": 1.358115e-05,
+            "tightness": 0.05584905582787775,
+            "predicted_seconds": 0.00024906812863879327,
+            "relative_error": 0.024229893734551377,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000183844,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 0.00020923271250139114,
+            "zero_shot_error": -0.13958321338704832,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=64",
+            "measured_seconds": 0.000267366,
+            "lower_bound_seconds": 3.3749025e-05,
+            "tightness": 0.12622781131482685,
+            "predicted_seconds": 0.00028563494672191874,
+            "relative_error": 0.06832935646985307,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000257228,
+              "working_set_bytes": 8962088,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 0.0003239315894663927,
+            "zero_shot_error": 0.21156612832743393,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.00027256350000000003,
+            "lower_bound_seconds": 1.5753264e-05,
+            "tightness": 0.05779667490327941,
+            "predicted_seconds": 0.00023999840432374042,
+            "relative_error": -0.11947709680958604,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.00025738,
+              "working_set_bytes": 3670016,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": 0.00022543464059355135,
+            "zero_shot_error": -0.1729096500685113,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.000416471,
+            "lower_bound_seconds": 0.000114995275,
+            "tightness": 0.2761183251654977,
+            "predicted_seconds": 0.00041660821803209927,
+            "relative_error": 0.0003294779999069658,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.00039891,
+              "working_set_bytes": 7340032,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": 0.0005805784176235921,
+            "zero_shot_error": 0.3940428448165467,
+            "replay_seconds": null,
+            "replay_error": null
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.05682286536557858,
+        "tightness_min": 0.006022664467342174,
+        "tightness_max": 0.2761183251654977,
+        "bound_rank_correlation": 0.9428571428571428,
+        "loo_mape": 0.10418800884085971,
+        "loo_median_ape": 0.09390322663971956,
+        "loo_bias": 1.0054446632750706,
+        "loo_within_25pct": 0.8333333333333334,
+        "loo_rank_correlation": 0.7714285714285715,
+        "roofline_only_mape": 0.9100098159512919,
+        "full_model": {
+          "call_overhead_seconds": 0.00020368373512234247,
+          "dispatch_seconds": 0.0,
+          "seconds_per_flop": 0.0,
+          "seconds_per_byte": 5.19166506760535e-12,
+          "fitted_cases": 6
+        },
+        "hardware": "Tesla T4",
+        "zero_shot_mape": 0.21041472543091058,
+        "zero_shot_median_ape": 0.19223788919797263,
+        "zero_shot_rank_correlation": 0.9428571428571428,
+        "calibration_source": "jax microbenchmarks (gpu, jit)",
+        "replay_mape": null,
+        "replay_median_ape": null,
+        "replay_rank_correlation": null
+      }
+    },
+    "tf-gpu": {
+      "calibration": null,
+      "report": {
+        "title": "TensorFlow graph (gpu)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 0.000907283,
+            "lower_bound_seconds": 1.083552e-06,
+            "tightness": 0.001194282269148656,
+            "predicted_seconds": 0.0009121220084469717,
+            "relative_error": 0.005333516055047443,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000823298,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=256 b=64",
+            "measured_seconds": 0.0009016965,
+            "lower_bound_seconds": 2.228013234567901e-06,
+            "tightness": 0.0024709125903981007,
+            "predicted_seconds": 0.0009259090311012772,
+            "relative_error": 0.02685219594539541,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000818533,
+              "working_set_bytes": 667688,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 0.000902414,
+            "lower_bound_seconds": 1.6867488e-05,
+            "tightness": 0.01869151852697321,
+            "predicted_seconds": 0.000916491773999591,
+            "relative_error": 0.015600128100396288,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000823525,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=64",
+            "measured_seconds": 0.0009335945,
+            "lower_bound_seconds": 3.375158775308642e-05,
+            "tightness": 0.036152299261709896,
+            "predicted_seconds": 0.0011017198868682671,
+            "relative_error": 0.180083951724509,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000818002,
+              "working_set_bytes": 8962088,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "cnn 32px b=1",
+            "measured_seconds": 0.0009700355,
+            "lower_bound_seconds": 2.702040888888889e-06,
+            "tightness": 0.002785507219982041,
+            "predicted_seconds": 0.000953586283308353,
+            "relative_error": -0.0169573347487252,
+            "metadata": {
+              "family": "cnn",
+              "min_seconds": 0.000904007,
+              "working_set_bytes": 640296,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "cnn 32px b=16",
+            "measured_seconds": 0.0010045455,
+            "lower_bound_seconds": 4.297033422222222e-05,
+            "tightness": 0.04277589638520328,
+            "predicted_seconds": 0.00117440876330599,
+            "relative_error": 0.1690946436034903,
+            "metadata": {
+              "family": "cnn",
+              "min_seconds": 0.000924656,
+              "working_set_bytes": 4572456,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "lstm d=128 b=1",
+            "measured_seconds": 0.0020510935,
+            "lower_bound_seconds": 3.6326559999999996e-05,
+            "tightness": 0.01771082595698343,
+            "predicted_seconds": 0.0019519830457071332,
+            "relative_error": -0.04832078805420957,
+            "metadata": {
+              "family": "lstm",
+              "min_seconds": 0.001949071,
+              "working_set_bytes": 1188904,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "lstm d=128 b=16",
+            "measured_seconds": 0.002072092,
+            "lower_bound_seconds": 5.539538587654321e-05,
+            "tightness": 0.026734037811324596,
+            "predicted_seconds": 0.0022229704362868915,
+            "relative_error": 0.0728145450524838,
+            "metadata": {
+              "family": "lstm",
+              "min_seconds": 0.001955441,
+              "working_set_bytes": 3154984,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.0016561865,
+            "lower_bound_seconds": 1.349808987654321e-05,
+            "tightness": 0.008150102585996933,
+            "predicted_seconds": 0.0009725213087458995,
+            "relative_error": -0.41279480979593813,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.001449876,
+              "working_set_bytes": 3683328,
+              "bound_memory_level": "L2"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.001622457,
+            "lower_bound_seconds": 0.00010792737501234567,
+            "tightness": 0.06652094632544694,
+            "predicted_seconds": 0.001104167898464822,
+            "relative_error": -0.3194470494658274,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.001416723,
+              "working_set_bytes": 7353344,
+              "bound_memory_level": "DRAM (beyond L2)"
+            },
+            "zero_shot_seconds": null,
+            "zero_shot_error": null,
+            "replay_seconds": null,
+            "replay_error": null
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.01820117224197832,
+        "tightness_min": 0.001194282269148656,
+        "tightness_max": 0.06652094632544694,
+        "bound_rank_correlation": 0.6606060606060606,
+        "loo_mape": 0.12672989625460224,
+        "loo_median_ape": 0.06056766655334669,
+        "loo_bias": 0.9470093849935214,
+        "loo_within_25pct": 0.8,
+        "loo_rank_correlation": 0.8424242424242424,
+        "roofline_only_mape": 0.9776813671066833,
+        "full_model": {
+          "call_overhead_seconds": 0.0008600905521856739,
+          "dispatch_seconds": 1.69207775033258e-05,
+          "seconds_per_flop": 5.721601633238171e-13,
+          "seconds_per_byte": 0.0,
+          "fitted_cases": 10
+        },
+        "hardware": "Tesla T4",
+        "zero_shot_mape": null,
+        "zero_shot_median_ape": null,
+        "zero_shot_rank_correlation": null,
+        "calibration_source": null,
+        "replay_mape": null,
+        "replay_median_ape": null,
+        "replay_rank_correlation": null
+      }
+    },
+    "torch-cpu": {
+      "calibration": {
+        "achievable_flops": 1032563654983.9749,
+        "achievable_bandwidth": 11257569868.354622,
+        "dispatch_seconds": 6.8563135e-06,
+        "call_overhead_seconds": 8.168650000000015e-08,
+        "flops_curve": [
+          [
+            65536.0,
+            1032563654983.9749
+          ],
+          [
+            524288.0,
+            77838293063.44287
+          ],
+          [
+            4194304.0,
+            70834327395.70909
+          ],
+          [
+            33554432.0,
+            75813824543.86472
+          ],
+          [
+            268435456.0,
+            84675705122.53532
+          ],
+          [
+            2147483648.0,
+            124814563940.62512
+          ],
+          [
+            17179869184.0,
+            123449248432.67728
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            4974501613285.563
+          ],
+          [
+            524288.0,
+            685242361348.3417
+          ],
+          [
+            2097152.0,
+            26839732806.920624
+          ],
+          [
+            8388608.0,
+            25057384173.33711
+          ],
+          [
+            33554432.0,
+            18989825093.910896
+          ],
+          [
+            134217728.0,
+            12657566302.517082
+          ],
+          [
+            536870912.0,
+            11257569868.354622
+          ]
+        ],
+        "source": "torch microbenchmarks (cpu, float32)"
+      },
+      "report": {
+        "title": "PyTorch eager (cpu)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 0.000123779,
+            "lower_bound_seconds": 1.043907092268788e-06,
+            "tightness": 0.008433636499477199,
+            "predicted_seconds": 0.00025557377004190035,
+            "relative_error": 1.0647587235468081,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.00011198,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 3.497002180565962e-05,
+            "zero_shot_error": -0.7174801718735841,
+            "replay_seconds": 5.024110914303567e-05,
+            "replay_error": -0.5941063577582977
+          },
+          {
+            "name": "mlp w=256 b=64",
+            "measured_seconds": 0.0003781625,
+            "lower_bound_seconds": 6.681005390520244e-05,
+            "tightness": 0.17667022485096337,
+            "predicted_seconds": 0.00037410301585402006,
+            "relative_error": -0.01073476123618794,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.000324515,
+              "working_set_bytes": 667688,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0002683109615739122,
+            "zero_shot_error": -0.290487656565862,
+            "replay_seconds": 0.0002800338036991832,
+            "replay_error": -0.2594881732081229
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 0.000576975,
+            "lower_bound_seconds": 1.646253483439974e-05,
+            "tightness": 0.028532492455305238,
+            "predicted_seconds": 0.0008138671490553968,
+            "relative_error": 0.4105761065131018,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.000548749,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.00035885029513722864,
+            "zero_shot_error": -0.37804879737037367,
+            "replay_seconds": 0.00041441001700618827,
+            "replay_error": -0.2817539460008002
+          },
+          {
+            "name": "mlp w=1024 b=64",
+            "measured_seconds": 0.003605095,
+            "lower_bound_seconds": 0.0010536022294015833,
+            "tightness": 0.29225366582616635,
+            "predicted_seconds": 0.004347382811901835,
+            "relative_error": 0.2058996536573475,
+            "metadata": {
+              "family": "mlp",
+              "device": "cpu",
+              "min_seconds": 0.003302654,
+              "working_set_bytes": 8962088,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0033426032898515056,
+            "zero_shot_error": -0.07281131569306616,
+            "replay_seconds": 0.003461195689970437,
+            "replay_error": -0.03991553898844914
+          },
+          {
+            "name": "cnn 32px b=1",
+            "measured_seconds": 0.001105713,
+            "lower_bound_seconds": 8.067481994102524e-05,
+            "tightness": 0.07296180830018752,
+            "predicted_seconds": 0.00045571354120662135,
+            "relative_error": -0.5878554912471669,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.000819339,
+              "working_set_bytes": 640296,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.00034550001675990954,
+            "zero_shot_error": -0.6875319212490858,
+            "replay_seconds": 0.0005133153933728919,
+            "replay_error": -0.5357607323302774
+          },
+          {
+            "name": "cnn 32px b=16",
+            "measured_seconds": 0.0052349185,
+            "lower_bound_seconds": 0.0012907971190564038,
+            "tightness": 0.246574444101929,
+            "predicted_seconds": 0.004836603862868502,
+            "relative_error": -0.07608803023991628,
+            "metadata": {
+              "family": "cnn",
+              "device": "cpu",
+              "min_seconds": 0.004874052,
+              "working_set_bytes": 4572456,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0043637595911719725,
+            "zero_shot_error": -0.1664130795595055,
+            "replay_seconds": 0.0047638900735644165,
+            "replay_error": -0.08997817758492002
+          },
+          {
+            "name": "lstm d=128 b=1",
+            "measured_seconds": 0.001727369,
+            "lower_bound_seconds": 6.554016692514367e-05,
+            "tightness": 0.037942192389202115,
+            "predicted_seconds": 0.0012711618891822032,
+            "relative_error": -0.2641051858738908,
+            "metadata": {
+              "family": "lstm",
+              "device": "cpu",
+              "min_seconds": 0.001490568,
+              "working_set_bytes": 1193000,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0006196278269486443,
+            "zero_shot_error": -0.6412880936565122,
+            "replay_seconds": 0.001738061418439753,
+            "replay_error": 0.006190002506559386
+          },
+          {
+            "name": "lstm d=128 b=16",
+            "measured_seconds": 0.0056677655,
+            "lower_bound_seconds": 0.0010486426708022987,
+            "tightness": 0.1850187116602299,
+            "predicted_seconds": 0.00489575810045767,
+            "relative_error": -0.13621018716147126,
+            "metadata": {
+              "family": "lstm",
+              "device": "cpu",
+              "min_seconds": 0.005102942,
+              "working_set_bytes": 3159080,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.004040696533262112,
+            "zero_shot_error": -0.28707415060448205,
+            "replay_seconds": 0.005021628617590514,
+            "replay_error": -0.11400204938074557
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.002591694,
+            "lower_bound_seconds": 0.0004108434349342909,
+            "tightness": 0.15852312616161124,
+            "predicted_seconds": 0.0017760608295898277,
+            "relative_error": -0.3147104443696564,
+            "metadata": {
+              "family": "transformer",
+              "device": "cpu",
+              "min_seconds": 0.002297387,
+              "working_set_bytes": 3683328,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0014384467409619566,
+            "zero_shot_error": -0.4449781722063034,
+            "replay_seconds": 0.0020060094189377157,
+            "replay_error": -0.22598523632121856
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.0095577185,
+            "lower_bound_seconds": 0.003286747479474327,
+            "tightness": 0.34388410575958345,
+            "predicted_seconds": 0.0130847094827854,
+            "relative_error": 0.36902017806711934,
+            "metadata": {
+              "family": "transformer",
+              "device": "cpu",
+              "min_seconds": 0.009068267,
+              "working_set_bytes": 7353344,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.010516239841583775,
+            "zero_shot_error": 0.10028767237534518,
+            "replay_seconds": 0.008711205127443595,
+            "replay_error": -0.08856856085020753
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.16759667550628732,
+        "tightness_min": 0.008433636499477199,
+        "tightness_max": 0.34388410575958345,
+        "bound_rank_correlation": 0.9030303030303031,
+        "loo_mape": 0.3439958761912666,
+        "loo_median_ape": 0.2894078151217736,
+        "loo_bias": 0.9765798623003801,
+        "loo_within_25pct": 0.4,
+        "loo_rank_correlation": 0.9878787878787879,
+        "roofline_only_mape": 0.8449205591995345,
+        "full_model": {
+          "call_overhead_seconds": 0.0,
+          "dispatch_seconds": 2.0412858238088098e-05,
+          "seconds_per_flop": 1.291798623860991e-11,
+          "seconds_per_byte": 5.963052038868628e-11,
+          "fitted_cases": 10
+        },
+        "hardware": "Intel(R) Xeon(R) CPU @ 2.00GHz",
+        "zero_shot_mape": 0.378640103115412,
+        "zero_shot_median_ape": 0.33426822696811787,
+        "zero_shot_rank_correlation": 0.9757575757575757,
+        "calibration_source": "torch microbenchmarks (cpu, float32)",
+        "replay_mape": 0.22357487749295984,
+        "replay_median_ape": 0.16999364285098206,
+        "replay_rank_correlation": 1.0
+      }
+    },
+    "jax-cpu": {
+      "calibration": {
+        "achievable_flops": 121090899330.77245,
+        "achievable_bandwidth": 4941746929.37873,
+        "dispatch_seconds": 9.552552000000001e-06,
+        "call_overhead_seconds": 3.3244799999999835e-07,
+        "flops_curve": [
+          [
+            65536.0,
+            2899566410.0522075
+          ],
+          [
+            524288.0,
+            14302144143.16111
+          ],
+          [
+            4194304.0,
+            37217530191.57563
+          ],
+          [
+            33554432.0,
+            60884076063.28929
+          ],
+          [
+            268435456.0,
+            116237022923.90164
+          ],
+          [
+            2147483648.0,
+            121090899330.77245
+          ],
+          [
+            17179869184.0,
+            117464227385.12656
+          ],
+          [
+            137438953472.0,
+            103276605614.77942
+          ]
+        ],
+        "bandwidth_curve": [
+          [
+            131072.0,
+            15920320660.755499
+          ],
+          [
+            524288.0,
+            10353851926.45694
+          ],
+          [
+            2097152.0,
+            15010321084.501198
+          ],
+          [
+            8388608.0,
+            19223348671.787632
+          ],
+          [
+            33554432.0,
+            20457961241.70434
+          ],
+          [
+            134217728.0,
+            5006506218.270283
+          ],
+          [
+            536870912.0,
+            4941746929.37873
+          ]
+        ],
+        "source": "jax microbenchmarks (cpu, jit)"
+      },
+      "report": {
+        "title": "JAX jit (cpu)",
+        "cases": [
+          {
+            "name": "mlp w=256 b=1",
+            "measured_seconds": 0.00017244,
+            "lower_bound_seconds": 1.0619445494351004e-06,
+            "tightness": 0.006158342318691141,
+            "predicted_seconds": 0.00038874350037448234,
+            "relative_error": 1.2543696379870237,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 6.6744e-05,
+              "working_set_bytes": 538664,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 6.318360884334942e-05,
+            "zero_shot_error": -0.6335907629126106,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=256 b=64",
+            "measured_seconds": 0.0005884055,
+            "lower_bound_seconds": 6.796445116384642e-05,
+            "tightness": 0.11550614527540348,
+            "predicted_seconds": 0.00041692256744044106,
+            "relative_error": -0.2914366581542133,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000526481,
+              "working_set_bytes": 667688,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.000343741168022249,
+            "zero_shot_error": -0.4158090500135553,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=1",
+            "measured_seconds": 0.000597616,
+            "lower_bound_seconds": 1.6534567485993748e-05,
+            "tightness": 0.027667544854879635,
+            "predicted_seconds": 0.00200056708863187,
+            "relative_error": 2.3475795303871885,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.000516743,
+              "working_set_bytes": 8445992,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0004537932803453983,
+            "zero_shot_error": -0.24066075817013222,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "mlp w=1024 b=64",
+            "measured_seconds": 0.0034549835,
+            "lower_bound_seconds": 0.0010582123191035999,
+            "tightness": 0.3062857808448578,
+            "predicted_seconds": 0.0036490666099655957,
+            "relative_error": 0.056174829768534495,
+            "metadata": {
+              "family": "mlp",
+              "min_seconds": 0.003130513,
+              "working_set_bytes": 8962088,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0023402718930170077,
+            "zero_shot_error": -0.3226387642612454,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=1",
+            "measured_seconds": 0.0017643385,
+            "lower_bound_seconds": 0.00041250928667348603,
+            "tightness": 0.23380393653116227,
+            "predicted_seconds": 0.001550372464015293,
+            "relative_error": -0.12127266733946296,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.001641469,
+              "working_set_bytes": 3670016,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.0012242617847552126,
+            "zero_shot_error": -0.30610719838896416,
+            "replay_seconds": null,
+            "replay_error": null
+          },
+          {
+            "name": "transformer d=256 T=64 b=8",
+            "measured_seconds": 0.009474027,
+            "lower_bound_seconds": 0.0033000742933878883,
+            "tightness": 0.3483285717243458,
+            "predicted_seconds": 0.011421851139786656,
+            "relative_error": 0.2055962200431408,
+            "metadata": {
+              "family": "transformer",
+              "min_seconds": 0.00866198,
+              "working_set_bytes": 7340032,
+              "bound_memory_level": "CPU cache"
+            },
+            "zero_shot_seconds": 0.007116473080475964,
+            "zero_shot_error": -0.2488439097254035,
+            "replay_seconds": null,
+            "replay_error": null
+          }
+        ],
+        "bound_violations": 0,
+        "tightness_median": 0.17465504090328288,
+        "tightness_min": 0.006158342318691141,
+        "tightness_max": 0.3483285717243458,
+        "bound_rank_correlation": 0.9428571428571428,
+        "loo_mape": 0.7127382572799273,
+        "loo_median_ape": 0.24851643909867704,
+        "loo_bias": 1.347372738815217,
+        "loo_within_25pct": 0.5,
+        "loo_rank_correlation": 0.9428571428571428,
+        "roofline_only_mape": 0.82704161307511,
+        "full_model": {
+          "call_overhead_seconds": 0.00015432009747636555,
+          "dispatch_seconds": 0.0,
+          "seconds_per_flop": 9.922137476232305e-12,
+          "seconds_per_byte": 4.947421960791478e-11,
+          "fitted_cases": 6
+        },
+        "hardware": "Intel(R) Xeon(R) CPU @ 2.00GHz",
+        "zero_shot_mape": 0.3612750739119852,
+        "zero_shot_median_ape": 0.31437298132510477,
+        "zero_shot_rank_correlation": 1.0,
+        "calibration_source": "jax microbenchmarks (cpu, jit)",
+        "replay_mape": null,
+        "replay_median_ape": null,
+        "replay_rank_correlation": null
+      }
+    }
+  }
+}

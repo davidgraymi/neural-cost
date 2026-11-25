@@ -59,6 +59,16 @@ def provenance(path: Path) -> str:
 
     return f"> **Run:** {describe_run(json.loads(path.read_text()).get('run'))}\n"
 
+
+def describe_architecture(arch: str, scale: str) -> str | None:
+    """Description of ``arch`` at ``scale`` from the shared model configs."""
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT))
+    from benchmarks.models.configs import describe
+
+    return describe(arch, scale)
+
 # ---------------------------------------------------------------------------
 # Style
 # ---------------------------------------------------------------------------
@@ -968,18 +978,16 @@ Evaluates operational regime differences in Large Language Models (Issue #22):
             return ""
 
     arch_descriptions = {
-        "FF DNN": "784 → 128 → 128 → 10, ReLU + LayerNorm",
-        "Deep DNN": "784 → 128 → 128 → 10, ReLU + LayerNorm",
-        "ConvNeXt": "Depthwise 7×7 → LayerNorm → 1×1 Inverted Bottleneck (dim×4) → GELU → 1×1, input 32×32×3",
-        "ViT": "Vision Transformer: Patch Embedding (4×4) → Class Token + Position → Multi-Head Self-Attention + MLP, input 32×32×3",
-        "Transformer": "2-layer encoder (MHA h=4 with SDPA + FFN×4 + RMSNorm/LayerNorm), embed=128, seq=32",
-        "CNN": "Conv64 (3×3) → BN → MaxPool → Conv128 (3×3) → BN → GAP → Dense10, input 32×32×3",
-        "RNN": "2-layer Vanilla RNN, hidden=128, seq=32",
-        "LSTM": "2-layer LSTM (4-gate), hidden=128, seq=32",
+        "CNN": "Conv64 (3×3) → ReLU → Conv128 (3×3, stride 2) → ReLU → GAP → Dense10",
+        "RNN": "Vanilla RNN → mean over time → Dense10",
+        "LSTM": "LSTM (4-gate) → mean over time → Dense10",
     }
+    scales = sorted({r.get("scale", "standard") for r in records})
+    scale = scales[0] if len(scales) == 1 else "standard"
     active_archs_in_data = get_active_architectures(records)
     arch_rows = [
-        f"| **{a}** | {arch_descriptions.get(a, 'Neural network topology')} |"
+        f"| **{a}** | "
+        f"{describe_architecture(a, scale) or arch_descriptions.get(a, 'Neural network topology')} |"
         for a in active_archs_in_data
     ]
     arch_table_md = "\n".join(["| Architecture | Description |", "|---|---|"] + arch_rows)
@@ -997,6 +1005,9 @@ Evaluates operational regime differences in Large Language Models (Issue #22):
 ## Methodology
 
 ### Architectures under test
+
+Scale tier: `{scale}`. PyTorch, JAX and TensorFlow build each architecture from
+the same dimensions (`benchmarks/models/configs.py`), so they run the same network.
 
 {arch_table_md}
 
